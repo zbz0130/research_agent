@@ -2,6 +2,7 @@ const healthEl = document.querySelector("#health");
 const projectsEl = document.querySelector("#projects");
 const form = document.querySelector("#project-form");
 const messageEl = document.querySelector("#form-message");
+const apiKeysEl = document.querySelector("#api-keys");
 
 function setHealth(text, ok) {
   healthEl.textContent = text;
@@ -56,6 +57,31 @@ async function loadProjects() {
   }
 }
 
+function renderApiKeys(slots) {
+  apiKeysEl.innerHTML = slots.map((slot) => `
+    <div class="setting-row">
+      <div>
+        <h3>${escapeHtml(slot.label)}</h3>
+        <p><span class="provider-name">${escapeHtml(slot.provider)}</span> · <code>${escapeHtml(slot.environment_variable)}</code></p>
+      </div>
+      <span class="tag ${slot.configured ? "tag-configured" : "tag-missing"}">
+        ${slot.configured ? `已配置 ${escapeHtml(slot.masked || "")}` : "未配置"}
+      </span>
+    </div>
+  `).join("");
+}
+
+async function loadApiKeys() {
+  try {
+    const response = await fetch("/api/v1/settings/api-keys");
+    if (!response.ok) throw new Error("settings request failed");
+    const data = await response.json();
+    renderApiKeys(data.slots);
+  } catch (error) {
+    apiKeysEl.innerHTML = '<p class="empty error-text">配置状态读取失败，请确认 API 正在运行。</p>';
+  }
+}
+
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
   messageEl.textContent = "正在创建…";
@@ -81,6 +107,8 @@ form.addEventListener("submit", async (event) => {
 });
 
 document.querySelector("#refresh").addEventListener("click", loadProjects);
+document.querySelector("#refresh-settings").addEventListener("click", loadApiKeys);
 
 loadHealth();
 loadProjects();
+loadApiKeys();

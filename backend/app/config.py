@@ -1,18 +1,31 @@
 from functools import lru_cache
 
+from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
     """Runtime settings shared by the API and its future workers."""
 
-    app_name: str = "TraceLab API"
+    app_name: str = "许愿机 API"
+    brand_name: str = "许愿机"
+    brand_name_en: str = "WishForge"
     version: str = "0.1.0"
     cors_origins: str = "http://localhost:8000,http://localhost:3000"
 
+    # Providers are deliberately separated by responsibility. A paper-search
+    # credential must never be accidentally used by the experiment runner.
+    paper_provider: str = "semantic_scholar"
+    explanation_provider: str = "openai"
+    experiment_provider: str = "local"
+    paper_api_key: SecretStr | None = None
+    explanation_api_key: SecretStr | None = None
+    experiment_api_key: SecretStr | None = None
+
     model_config = SettingsConfigDict(
         env_file=".env",
-        env_prefix="TRACELAB_",
+        env_prefix="WISHFORGE_",
+        env_ignore_empty=True,
         extra="ignore",
     )
 

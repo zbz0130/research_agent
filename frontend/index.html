@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>TraceLab / 证研</title>
+    <title>许愿机 / WishForge</title>
     <link rel="stylesheet" href="/static/styles.css" />
   </head>
   <body>
@@ -11,8 +11,8 @@
       <header class="topbar">
         <div>
           <p class="eyebrow">EVIDENCE-DRIVEN RESEARCH WORKSPACE</p>
-          <h1>TraceLab <span>/ 证研</span></h1>
-          <p class="subtitle">从论文证据，到可复现实验。</p>
+          <h1>许愿机 <span>/ WishForge</span></h1>
+          <p class="subtitle">把一个想法，锻造成有证据的理解。</p>
         </div>
         <div id="health" class="status-pill status-pending">连接中…</div>
       </header>
@@ -20,10 +20,10 @@
       <section class="grid">
         <article class="card intro-card">
           <p class="eyebrow">STAGE 0</p>
-          <h2>最小架构骨架</h2>
+          <h2>科研概念解释工作台</h2>
           <p>
-            当前阶段验证 Web 控制台、研究项目 API 和未来本地实验执行器之间的边界。
-            文献检索、证据卡和实验运行将在后续阶段逐步接入。
+            你可以从一个模糊的科研概念开始，让许愿机查找可信资料、提取证据，
+            再用适合你的语言解释它。文献检索和证据卡将在下一阶段接入。
           </p>
           <div class="flow">
             <span>问题</span><b>→</b><span>证据</span><b>→</b><span>假设</span><b>→</b><span>实验</span>
@@ -50,6 +50,28 @@
             <p id="form-message" class="form-message" role="status"></p>
           </form>
         </article>
+      </section>
+
+      <section class="card settings-card">
+        <div class="card-heading">
+          <div>
+            <p class="eyebrow">PROVIDER CREDENTIALS</p>
+            <h2>API Key 配置</h2>
+          </div>
+          <button id="refresh-settings" class="secondary" type="button">刷新状态</button>
+        </div>
+        <p class="settings-note">
+          不同用途使用不同密钥：论文检索、解释模型和实验执行互相隔离。密钥从本地
+          <code>.env</code> 读取，网页只显示配置状态和掩码，不会显示明文。
+        </p>
+        <div id="api-keys" class="settings-list">
+          <p class="empty">正在读取配置状态…</p>
+        </div>
+        <p class="settings-hint">
+          配置变量示例：<code>WISHFORGE_PAPER_API_KEY</code>、
+          <code>WISHFORGE_EXPLANATION_API_KEY</code>、
+          <code>WISHFORGE_EXPERIMENT_API_KEY</code>。
+        </p>
       </section>
 
       <section class="card projects-card">

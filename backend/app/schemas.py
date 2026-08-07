@@ -11,6 +11,22 @@ class HealthResponse(BaseModel):
     version: str
 
 
+class ApiKeySlot(BaseModel):
+    """Public, non-secret view of one provider credential slot."""
+
+    id: Literal["paper_search", "explanation_model", "experiment_runner"]
+    label: str
+    provider: str
+    configured: bool
+    masked: str | None = None
+    environment_variable: str
+
+
+class ApiKeyStatusResponse(BaseModel):
+    slots: list[ApiKeySlot]
+    storage: Literal["environment"] = "environment"
+
+
 class ProjectCreate(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 

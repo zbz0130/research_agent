@@ -42,6 +42,16 @@ button { cursor: pointer; border: 0; border-radius: 10px; padding: 11px 16px; co
 button:hover { background: #b9ddff; }
 button.secondary { padding: 8px 12px; color: #c3d6e9; background: #26384c; }
 .form-message { min-height: 20px; margin: 12px 0 0; color: #8eb7dc; font-size: 0.82rem; }
+.settings-card { margin-top: 18px; }
+.settings-note, .settings-hint { margin: 0 0 16px; color: #9eafc2; line-height: 1.6; font-size: 0.86rem; }
+.settings-hint { margin: 16px 0 0; color: #8295aa; }
+.settings-note code, .settings-hint code, .setting-row code { color: #b8d6f2; font-family: "SFMono-Regular", Consolas, monospace; font-size: 0.78rem; }
+.settings-list { display: grid; gap: 10px; }
+.setting-row { display: flex; align-items: center; justify-content: space-between; gap: 20px; border: 1px solid #2a3a4e; border-radius: 12px; padding: 14px 16px; background: #151e29; }
+.setting-row p { margin: 0; color: #8fa3b8; }
+.provider-name { color: #c3d6e9; font-weight: 700; }
+.tag-configured { color: #9de0bc; background: rgba(72, 181, 126, 0.16); }
+.tag-missing { color: #d4b77b; background: rgba(223, 193, 126, 0.13); }
 .projects-card { margin-top: 18px; }
 .projects-list { display: grid; gap: 10px; }
 .project-row { display: flex; align-items: center; justify-content: space-between; gap: 20px; border: 1px solid #2a3a4e; border-radius: 12px; padding: 15px 16px; background: #151e29; }
@@ -53,5 +63,5 @@ button.secondary { padding: 8px 12px; color: #c3d6e9; background: #26384c; }
   .shell { width: min(100% - 24px, 1120px); padding-top: 30px; }
   .topbar { flex-direction: column; }
   .grid { grid-template-columns: 1fr; }
-  .project-row { align-items: flex-start; flex-direction: column; gap: 10px; }
+  .project-row, .setting-row { align-items: flex-start; flex-direction: column; gap: 10px; }
 }
