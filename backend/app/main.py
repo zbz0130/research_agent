@@ -12,7 +12,7 @@ settings = get_settings()
 app = FastAPI(
     title=settings.app_name,
     version=settings.version,
-    description="Evidence-driven research workspace API.",
+    description=f"{settings.brand_name} / {settings.brand_name_en}：证据驱动的科研解释工作台 API。",
 )
 
 app.add_middleware(
