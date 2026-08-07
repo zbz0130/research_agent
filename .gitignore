@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+
+# Environment and secrets
+.env
+*.secret
+
+# Frontend/tooling
+node_modules/
+dist/
+.next/
+
+# Local research artifacts
+data/
+artifacts/
+runs/
+*.sqlite3
+
+# IDE/OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

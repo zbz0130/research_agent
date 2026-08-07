@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>TraceLab / 证研</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">EVIDENCE-DRIVEN RESEARCH WORKSPACE</p>
+          <h1>TraceLab <span>/ 证研</span></h1>
+          <p class="subtitle">从论文证据，到可复现实验。</p>
+        </div>
+        <div id="health" class="status-pill status-pending">连接中…</div>
+      </header>
+
+      <section class="grid">
+        <article class="card intro-card">
+          <p class="eyebrow">STAGE 0</p>
+          <h2>最小架构骨架</h2>
+          <p>
+            当前阶段验证 Web 控制台、研究项目 API 和未来本地实验执行器之间的边界。
+            文献检索、证据卡和实验运行将在后续阶段逐步接入。
+          </p>
+          <div class="flow">
+            <span>问题</span><b>→</b><span>证据</span><b>→</b><span>假设</span><b>→</b><span>实验</span>
+          </div>
+        </article>
+
+        <article class="card">
+          <div class="card-heading">
+            <div>
+              <p class="eyebrow">PROJECTS</p>
+              <h2>新建研究项目</h2>
+            </div>
+          </div>
+          <form id="project-form">
+            <label>
+              项目名称
+              <input id="project-name" required maxlength="120" placeholder="例如：标签噪声下的 Mixup 鲁棒性" />
+            </label>
+            <label>
+              研究问题
+              <textarea id="research-question" required maxlength="2000" rows="4" placeholder="你想验证什么？"></textarea>
+            </label>
+            <button type="submit">创建草稿项目</button>
+            <p id="form-message" class="form-message" role="status"></p>
+          </form>
+        </article>
+      </section>
+
+      <section class="card projects-card">
+        <div class="card-heading">
+          <div>
+            <p class="eyebrow">RESEARCH BOARD</p>
+            <h2>研究项目</h2>
+          </div>
+          <button id="refresh" class="secondary" type="button">刷新</button>
+        </div>
+        <div id="projects" class="projects-list">
+          <p class="empty">还没有项目。先创建一个研究问题吧。</p>
+        </div>
+      </section>
+    </main>
+    <script src="/static/app.js" defer></script>
+  </body>
+</html>

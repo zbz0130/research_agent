@@ -1,0 +1,11 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      TRACELAB_APP_NAME: "TraceLab API"
+      TRACELAB_VERSION: "0.1.0"
+      TRACELAB_CORS_ORIGINS: "http://localhost:8000"
