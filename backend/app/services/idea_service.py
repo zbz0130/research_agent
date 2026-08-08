@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable
+from datetime import datetime, timezone
 
 from app.config import Settings
 from app.research_schemas import (
@@ -18,9 +19,11 @@ from app.research_schemas import (
     EvidenceLocator,
     IdeaCheckCreate,
     IdeaCheckResult,
+    IdeaCheckReview,
     InnovationCandidate,
     NoveltyCheck,
     PaperRecord,
+    RelatedWorkSummary,
 )
 from app.services.research_providers import (
     DemoSearchProvider,
@@ -99,6 +102,7 @@ class IdeaCheckService:
         scored.sort(key=lambda item: item[0][0], reverse=True)
 
         evidence = _build_evidence(scored)
+        related_work_summaries = _build_related_work_summaries(scored, evidence)
         novelty = _assess_novelty(scored, query_terms)
         current_conclusion = _conclusion_for(novelty.level, bool(papers))
         alternative_ideas = _build_alternatives(payload.idea, papers, novelty.level)
@@ -117,6 +121,7 @@ class IdeaCheckService:
             arxiv_status=("indirect_metadata" if any(paper.arxiv_id for paper in papers) else "not_checked"),
             papers=papers,
             evidence=evidence,
+            related_work_summaries=related_work_summaries,
             novelty=novelty,
             similarity_level=novelty.level,
             similarity_reason=novelty.reason,
@@ -137,6 +142,20 @@ class IdeaCheckService:
 
     def list(self) -> list[IdeaCheckResult]:
         return storage.list_idea_checks()
+
+    def review(self, check_id: str, payload: IdeaCheckReview) -> IdeaCheckResult:
+        """Persist a human review without changing the scoped search result."""
+
+        result = self.get(check_id)
+        reviewed = result.model_copy(
+            update={
+                "manual_review_status": payload.status,
+                "review_note": payload.note,
+                "reviewed_by": payload.reviewer,
+                "reviewed_at": datetime.now(timezone.utc),
+            }
+        )
+        return storage.save_idea_check(reviewed)
 
     @staticmethod
     def _provider(settings: Settings) -> SearchProvider:
@@ -347,6 +366,53 @@ def _build_evidence(
             )
         )
     return cards
+
+
+def _build_related_work_summaries(
+    scored: list[tuple[tuple[float, list[str]], PaperRecord]],
+    evidence: list[EvidenceCard],
+) -> list[RelatedWorkSummary]:
+    """Create cautious, readable per-paper summaries from abstracts only."""
+
+    evidence_by_paper: dict[str, list[str]] = {}
+    for card in evidence:
+        evidence_by_paper.setdefault(card.paper_id, []).append(card.id)
+
+    summaries: list[RelatedWorkSummary] = []
+    for (score, terms), paper in scored[:8]:
+        sentences = [
+            part.strip()
+            for part in re.split(r"[.!?。！？；;]+", paper.abstract or "")
+            if part.strip()
+        ]
+        problem = sentences[0] if sentences else "摘要未明确说明问题。"
+        mechanism = sentences[1] if len(sentences) > 1 else "摘要未提供足够机制细节。"
+        plain = (
+            f"通俗说，这篇论文主要讨论“{problem[:700]}”。"
+            f"摘要中的方法线索是“{mechanism[:900]}”。"
+        )
+        overlap = (
+            f"与当前想法在“{', '.join(terms[:8])}”等词项或目标上有重叠；"
+            "这不是方法等价证明。"
+            if terms
+            else "当前摘要没有提取到稳定的重叠词项。"
+        )
+        summaries.append(
+            RelatedWorkSummary(
+                paper_id=paper.id,
+                paper_title=paper.title,
+                what_problem=problem[:2000],
+                core_mechanism=mechanism[:3000],
+                plain_language_summary=plain[:4000],
+                overlap_with_idea=overlap,
+                possible_difference="摘要没有给出足够实验和实现细节，仍需打开原文核对差异。",
+                summary_level="abstract_only",
+                evidence_ids=evidence_by_paper.get(paper.id, []),
+                verification_status="unverified",
+                confidence="low" if paper.source_kind == "demo" or score < 0.5 else "medium",
+            )
+        )
+    return summaries
 
 
 idea_service = IdeaCheckService()

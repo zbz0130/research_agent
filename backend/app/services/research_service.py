@@ -129,14 +129,49 @@ class ResearchService:
             raise AnalysisNotFound(node_id)
         provider = _explanation_provider(settings)
         warnings: list[str] = []
+        if (
+            settings.explanation_provider in {"openai", "openai_compatible"}
+            and not settings.explanation_api_key
+        ):
+            warnings.append("未配置解释模型 API Key，本次节点解释使用规则回退，不是外部模型回答。")
+        related_papers: list[PaperRecord] = []
+        related_evidence: list[EvidenceCard] = []
+        # A graph node stores evidence IDs, while the graph itself deliberately
+        # stays lightweight.  Recover the originating analysis document when
+        # available so the explanation provider sees the same evidence that
+        # is shown in the analysis view; imported/manual graphs simply use an
+        # empty evidence set and are labelled as such below.
+        for job in storage.list_analyses():
+            if job.result is None or job.result.graph.id != graph_id:
+                continue
+            related_evidence = [
+                card for card in job.result.evidence if card.id in set(node.evidence_ids)
+            ]
+            paper_ids = {card.paper_id for card in related_evidence}
+            related_papers = [paper for paper in job.result.papers if paper.id in paper_ids]
+            break
+        if node.evidence_ids and not related_evidence:
+            warnings.append("该节点的证据卡无法从当前分析记录恢复，解释仅基于节点文本。")
         try:
-            explanation = provider.explain(node.label, [], [], audience, language)
+            explanation = provider.explain(
+                node.label,
+                related_papers,
+                related_evidence,
+                audience,
+                language,
+            )
         except ProviderUnavailable as exc:
             if not settings.demo_mode:
                 raise
             warnings.append(str(exc))
             provider = RuleBasedExplanationProvider()
-            explanation = provider.explain(node.label, [], [], audience, language)
+            explanation = provider.explain(
+                node.label,
+                related_papers,
+                related_evidence,
+                audience,
+                language,
+            )
         summary = explanation.one_sentence
         if explanation.intuitive:
             summary = f"{summary} {explanation.intuitive}"
@@ -145,6 +180,11 @@ class ResearchService:
             actor="agent",
             base_version=graph.version,
             reason="Agent 为节点生成简洁解释，等待用户批准后写入节点说明",
+            translation_mode="model"
+            if provider.name not in {"rule_based", "rule_based_fallback", "demo"}
+            else "heuristic",
+            source_request=f"为节点“{node.label}”生成面向 {audience} 的简洁解释",
+            warnings=warnings,
             operations=[
                 GraphOperation(
                     op="update_node",
@@ -221,6 +261,11 @@ class ResearchService:
             evidence = _build_evidence(payload.concept, papers)
             self._update(job_id, generation=generation, progress=70, message="正在生成分层解释和概念关系")
             explanation_provider = _explanation_provider(settings)
+            if (
+                settings.explanation_provider in {"openai", "openai_compatible"}
+                and not settings.explanation_api_key
+            ):
+                warnings.append("未配置解释模型 API Key，本次使用规则回退解释。")
             try:
                 explanation = explanation_provider.explain(
                     payload.concept,
@@ -551,7 +596,15 @@ def _build_evidence_ledger(
         )
 
     linked_claim_count = sum(1 for claim in claims if claim.evidence_links)
-    coverage = linked_claim_count / len(claims) if claims else 0.0
+    claim_total = len(claims)
+    link_coverage = linked_claim_count / claim_total if claim_total else 0.0
+    verified_claim_count = sum(
+        1
+        for claim in claims
+        if claim.evidence_links and claim.status in {"supported", "partially_supported"}
+    )
+    verified_coverage = verified_claim_count / claim_total if claim_total else 0.0
+    contradicted_claim_count = sum(1 for claim in claims if claim.status == "contradicted")
     warnings: list[str] = []
     if not evidence:
         warnings.append("本次分析没有可用证据卡；解释和相关概念只能作为模型/规则假设。")
@@ -564,7 +617,10 @@ def _build_evidence_ledger(
         claims=claims,
         evidence_count=len(evidence),
         linked_claim_count=linked_claim_count,
-        coverage=round(coverage, 4),
+        coverage=round(link_coverage, 4),
+        link_coverage=round(link_coverage, 4),
+        verified_coverage=round(verified_coverage, 4),
+        contradicted_claim_count=contradicted_claim_count,
         warnings=warnings,
     )
 

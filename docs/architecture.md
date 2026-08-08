@@ -47,6 +47,7 @@ FastAPI API (/api/v1)
   │     ├── Paper Future Work Agent（当前摘要级限制线索）
   │     └── Synthesis Agent（来源分层、候选去重和范围化 arXiv 检查）
   ├── GraphService         版本化概念图和 GraphPatch 审批
+  ├── GraphAgentPatchService  自然语言请求的有界启发式翻译（只生成提案）
   ├── IdeaCheckService     想法查重、相似度分级和替代验证方向
   ├── ExperimentService    假设、基线、指标、消融和失败判据草案
   └── SettingsService      分用途 API Key 状态（不返回明文）
@@ -55,9 +56,10 @@ FastAPI API (/api/v1)
 ### Provider 边界
 
 - `WISHFORGE_PAPER_API_KEY` 只交给论文检索 Provider；
+- `WISHFORGE_COMMUNITY_API_KEY` 只交给社区 Provider（当前研究模式仍使用明确标记的 Demo provider）；
 - `WISHFORGE_EXPLANATION_API_KEY` 只交给解释模型 Provider；
 - `WISHFORGE_EXPERIMENT_API_KEY` 预留给未来执行器，本阶段不会使用；
-- 网页 `PATCH /api/v1/settings/api-keys` 写入的三个槽位只覆盖当前进程内的 `Settings`，重启后回到 `.env`；本地第一版不把明文密钥写进 SQLite；
+- 网页 `PATCH /api/v1/settings/api-keys` 写入的四个槽位只覆盖当前进程内的 `Settings`，重启后回到 `.env`；本地第一版不把明文密钥写进 SQLite；
 - 当前没有登录、租户隔离或权限系统，密钥配置接口只适合本机/受保护内网；公网部署前必须加认证、审计和 Secret Manager；
 - 外部论文或网页内容是“不可信输入”，不能改变系统提示词、工具权限或 API Key；
 - 论文全文只应来自开放来源或用户合法提供的文件。本阶段默认只处理 Semantic Scholar 元数据和摘要。
@@ -80,13 +82,16 @@ FastAPI API (/api/v1)
 | POST | `/api/v1/ideas/check` | 对一个研究想法做有界 prior-art 判断并保存结果 |
 | GET | `/api/v1/ideas/checks` | 获取已保存的想法查重记录 |
 | GET | `/api/v1/ideas/checks/{check_id}` | 获取一条想法查重记录 |
+| POST | `/api/v1/ideas/checks/{check_id}/review` | 写入人工核验状态、备注和审阅人，不改变原检索范围 |
 | GET | `/api/v1/graphs` | 获取 SQLite 中的概念图列表，可按 `project_id` 过滤 |
+| POST | `/api/v1/graphs` | 创建或导入一棵独立概念图（重复 ID 返回 `409`） |
 | GET | `/api/v1/graphs/{graph_id}` | 获取当前概念图和版本号 |
 | GET | `/api/v1/graphs/{graph_id}/subset?node_ids=a,b` | 获取不修改原图的局部裁剪视图 |
 | PATCH | `/api/v1/graphs/{graph_id}` | 修改概念图名称、说明或根节点（带版本检查） |
 | POST | `/api/v1/graphs/compare` | 选择多棵图或节点子集，生成未验证的跨图连接候选 |
 | POST | `/api/v1/graphs/{graph_id}/patches` | 创建用户修改或 Agent 修改提案 |
 | GET | `/api/v1/graphs/{graph_id}/patches` | 获取该图的修改提案历史 |
+| POST | `/api/v1/graphs/{graph_id}/agent-patch` | 将自然语言修改请求翻译成最多 4 个受限 Agent 操作（只生成 `proposed` 提案） |
 | POST | `/api/v1/graphs/{graph_id}/nodes/{node_id}/explanation-patch` | 让 Agent 生成节点解释提案（仍需批准） |
 | POST | `/api/v1/graphs/{graph_id}/patches/{patch_id}/apply` | 批准 Agent 提案并应用 |
 | POST | `/api/v1/graphs/{graph_id}/patches/{patch_id}/reject` | 拒绝 Agent 提案 |
@@ -104,8 +109,8 @@ FastAPI API (/api/v1)
 - `graph`：节点、边、根节点和版本；
 - `innovation_candidates`：研究模式下的候选、最近工作、风险和验证步骤；
 - `research_brief`：`AgentRun`、社区信号、模型脑暴、论文摘要级限制线索、综合候选、证据覆盖率和 arXiv 范围状态；
-- `evidence_ledger`：定义、机制、演变、限制和相关概念等主张，以及每条主张关联的证据卡、状态、置信度和下一步核验动作；
-- `IdeaCheckResult`：想法、检索词、匹配论文、L0–L4、置信度、替代方向和验证步骤；
+- `evidence_ledger`：定义、机制、演变、限制和相关概念等主张，以及每条主张关联的证据卡、状态、置信度、证据关联覆盖、已核验覆盖和下一步核验动作；
+- `IdeaCheckResult`：想法、检索词、匹配论文、摘要级“别人怎么做”的易懂说明、L0–L4、置信度、替代方向、验证步骤和人工审阅元数据；
 - `ExperimentPlan`：假设、基线、变量、控制项、指标、消融、预期结果、失败判据、资源估计、来源和审阅状态；`execution_status` 固定为 `not_started`；
 - `warnings` / `novelty_note`：明确说明 Demo、回退和新颖性检索边界。
 
@@ -127,6 +132,22 @@ Agent 生成 GraphPatch
                               ▼
                       用户预览后 Apply / Reject
 ```
+
+自然语言工具使用同一条安全边界：
+
+```text
+自然语言 request（最多 2000 字）
+        ↓
+有界规则翻译（最多 4 个 add/update/remove 操作）
+        ↓
+记录 translation_mode=heuristic、原始请求和 warnings
+        ↓
+GraphService 校验 root / locked node / edge / base_version
+        ↓
+返回 actor=agent、status=proposed 的 GraphPatch
+```
+
+第一版没有为这条路径伪造模型理解：无法确定结构性意图时，会把请求作为目标节点的“待核验备注”提案，并在 `warnings` 中说明原因。提案仍需人工预览后调用 `apply` 或 `reject`；自然语言接口本身绝不写入概念图。
 
 每次应用都会让 `graph.version` 加一。若提案基于旧版本，服务端返回 `409 Conflict`，前端需要重新获取图后再生成提案。根节点不可删除；边的两个端点必须存在；删除节点会同时删除关联边。
 

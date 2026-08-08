@@ -71,6 +71,12 @@ class EvidenceLedger(BaseModel):
     claims: list[ClaimRecord] = Field(default_factory=list, max_length=200)
     evidence_count: int = Field(default=0, ge=0)
     linked_claim_count: int = Field(default=0, ge=0)
+    # ``coverage`` is retained as a compatibility alias for the original
+    # first-version response.  The two explicit rates prevent a linked
+    # abstract snippet from being mistaken for manually verified evidence.
     coverage: float = Field(default=0.0, ge=0.0, le=1.0)
+    link_coverage: float = Field(default=0.0, ge=0.0, le=1.0)
+    verified_coverage: float = Field(default=0.0, ge=0.0, le=1.0)
+    contradicted_claim_count: int = Field(default=0, ge=0)
     warnings: list[str] = Field(default_factory=list, max_length=30)
     generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

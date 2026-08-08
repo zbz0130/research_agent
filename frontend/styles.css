@@ -68,6 +68,10 @@ select { width: 100%; margin-top: 7px; border: 1px solid #34465b; border-radius:
 .idea-papers, .idea-alternatives { margin-top: 16px; }
 .idea-paper-row { display: flex; justify-content: space-between; gap: 14px; border-bottom: 1px solid #2a3a4e; padding: 9px 0; color: #c7d7e7; }
 .idea-paper-row span { flex: 0 0 auto; color: #8295aa; font-size: 0.78rem; }
+.idea-related-work { display: grid; gap: 12px; margin-top: 16px; }
+.idea-related-row { border: 1px solid #3c526b; border-radius: 12px; padding: 14px; background: rgba(35, 57, 79, 0.22); }
+.idea-related-row h3 { color: #dcecff; font-size: 0.95rem; }
+.idea-related-row p { color: #c0cfdd; line-height: 1.6; }
 .graph-compare-card select[multiple] { min-height: 112px; }
 .graph-compare-result { margin-top: 18px; border-top: 1px solid #2a3a4e; padding-top: 18px; }
 .graph-gallery-card { margin-top: 18px; }
@@ -170,6 +174,8 @@ button.secondary { padding: 8px 12px; color: #c3d6e9; background: #26384c; }
 .error-text { color: #ed9b9b; }
 /* Stage 1 research result panels */
 .graph-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-top: 14px; border-top: 1px solid #2a3a4e; padding-top: 12px; }
+.graph-agent-form { margin-top: 14px; border-top: 1px solid #2a3a4e; padding-top: 14px; }
+.graph-agent-form textarea { min-height: 68px; resize: vertical; }
 .graph-meta-form { display: flex; align-items: flex-end; gap: 9px; margin-top: 4px; }
 .graph-meta-form label { flex: 1; margin-bottom: 0; }
 .innovation-card { margin-top: 18px; }

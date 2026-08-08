@@ -24,6 +24,10 @@ const nodeForm = document.querySelector("#node-form");
 const graphActionsEl = document.querySelector("#graph-actions");
 const graphMessageEl = document.querySelector("#graph-message");
 const agentProposeButton = document.querySelector("#agent-propose");
+const graphAgentForm = document.querySelector("#graph-agent-form");
+const graphAgentRequestInput = document.querySelector("#graph-agent-request");
+const graphAgentSubmit = document.querySelector("#graph-agent-submit");
+const graphAgentMessageEl = document.querySelector("#graph-agent-message");
 const graphMetaForm = document.querySelector("#graph-meta-form");
 const graphNameInput = document.querySelector("#graph-name");
 const graphRootInput = document.querySelector("#graph-root");
@@ -69,6 +73,7 @@ const state = {
   graphs: [],
   pendingPatches: new Map(),
   experimentPlan: null,
+  ideaCheck: null,
 };
 
 function escapeHtml(value) {
@@ -124,6 +129,8 @@ const displayLabels = {
   paper_future_work: "论文限制线索",
   synthesis: "综合候选",
   abstract_signal: "摘要级线索",
+  abstract_only: "仅依据摘要",
+  full_text_verified: "全文已核验",
   supported: "已有证据关联",
   partially_supported: "部分支持",
   contradicted: "存在反驳线索",
@@ -300,6 +307,9 @@ function resetAnalysisView() {
   graphEl.textContent = "正在构建概念图…";
   nodeForm.classList.add("hidden");
   graphActionsEl.classList.add("hidden");
+  graphAgentForm.classList.add("hidden");
+  graphAgentRequestInput.value = "";
+  graphAgentMessageEl.textContent = "";
   graphMetaForm.classList.add("hidden");
   graphNameInput.value = "";
   graphRootInput.innerHTML = "";
@@ -405,8 +415,9 @@ function renderEvidenceLedger(result) {
     return;
   }
   evidenceLedgerEl.classList.remove("hidden");
-  const coverage = Math.round(Number(ledger.coverage || 0) * 100);
-  ledgerCoverageEl.textContent = `证据覆盖 ${coverage}% · ${ledger.linked_claim_count || 0}/${ledger.claims?.length || 0} 条主张`;
+  const linkCoverage = Math.round(Number(ledger.link_coverage ?? ledger.coverage ?? 0) * 100);
+  const verifiedCoverage = Math.round(Number(ledger.verified_coverage || 0) * 100);
+  ledgerCoverageEl.textContent = `证据关联 ${linkCoverage}% · 已核验 ${verifiedCoverage}% · ${ledger.linked_claim_count || 0}/${ledger.claims?.length || 0} 条主张`;
   ledgerMessageEl.textContent = (ledger.warnings || []).join(" ") || "每条主张都可以展开查看关联证据。";
   const evidenceById = new Map((result.evidence || []).map((item) => [item.id, item]));
   ledgerClaimsEl.innerHTML = (ledger.claims || []).map((claim) => {
@@ -770,8 +781,10 @@ function setIdeaCheckMessage(text, kind = "") {
 }
 
 function renderIdeaCheck(result) {
+  state.ideaCheck = result;
   const novelty = result.novelty || {};
   const papers = result.papers || [];
+  const relatedWork = result.related_work_summaries || [];
   const alternatives = result.alternative_ideas || [];
   ideaCheckResultEl.classList.remove("hidden");
   ideaCheckResultEl.innerHTML = `
@@ -790,15 +803,51 @@ function renderIdeaCheck(result) {
       <div><dt>arXiv 状态</dt><dd>${escapeHtml(displayLabel(result.arxiv_status || "not_checked"))}（没有单独查询不能当作排除证明）</dd></div>
       <div><dt>人工状态</dt><dd>${escapeHtml(displayLabel(result.manual_review_status || "needs_review"))}</dd></div>
     </dl>
+    <div class="innovation-actions idea-review-actions">
+      <button type="button" class="secondary" data-idea-review="reviewed">标记已核验</button>
+      <button type="button" class="secondary" data-idea-review="dismissed">标记为忽略</button>
+      <span class="form-message" data-idea-review-message></span>
+    </div>
     ${papers.length ? `<div class="idea-papers"><p class="section-label">最相关资料（摘要级）</p>${papers.slice(0, 5).map((paper) => `
       <div class="idea-paper-row"><strong>${escapeHtml(paper.title)}</strong><span>${escapeHtml(paper.year || "年份未知")} · ${escapeHtml(displayLabel(paper.source_kind || "academic"))}</span></div>
     `).join("")}</div>` : `<p class="empty">没有返回论文，建议补充英文术语后重试。</p>`}
+    ${relatedWork.length ? `<div class="idea-related-work"><p class="section-label">别人是怎么做的（摘要级易懂说明）</p>${relatedWork.slice(0, 5).map((item) => `
+      <article class="idea-related-row">
+        <div class="paper-title-line"><h3>${escapeHtml(item.paper_title)}</h3><span class="tag tag-missing">${escapeHtml(displayLabel(item.summary_level || "abstract_only"))}</span></div>
+        <p>${escapeHtml(item.plain_language_summary)}</p>
+        <dl class="idea-meta"><div><dt>核心机制线索</dt><dd>${escapeHtml(item.core_mechanism)}</dd></div><div><dt>与想法的重叠</dt><dd>${escapeHtml(item.overlap_with_idea)}</dd></div><div><dt>可能差异</dt><dd>${escapeHtml(item.possible_difference)}</dd></div></dl>
+      </article>
+    `).join("")}</div>` : ""}
     ${alternatives.length ? `<div class="idea-alternatives"><p class="section-label">从当前想法改造出的候选</p>${alternatives.map((candidate) => `
       <article class="innovation-row"><h3>${escapeHtml(candidate.title)}</h3><p>${escapeHtml(candidate.rationale)}</p><div class="validation-box"><strong>最小验证</strong><ol>${(candidate.validation_steps || []).map((step) => `<li>${escapeHtml(step)}</li>`).join("")}</ol></div><p class="warning-inline">${escapeHtml(candidate.warning || "未验证")}</p><div class="innovation-actions"><button type="button" class="secondary experiment-from-candidate" data-experiment-candidate="${escapeHtml([candidate.title, candidate.rationale].filter(Boolean).join("；"))}">生成实验方案</button></div></article>
     `).join("")}</div>` : ""}
     <div class="validation-box"><strong>建议下一步</strong><ol>${(result.validation_steps || []).map((step) => `<li>${escapeHtml(step)}</li>`).join("")}</ol></div>
   `;
 }
+
+ideaCheckResultEl.addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-idea-review]");
+  if (!button || !state.ideaCheck?.id) return;
+  const status = button.dataset.ideaReview;
+  const message = ideaCheckResultEl.querySelector("[data-idea-review-message]");
+  [...ideaCheckResultEl.querySelectorAll("[data-idea-review]")].forEach((item) => { item.disabled = true; });
+  if (message) message.textContent = "正在保存人工核验状态…";
+  try {
+    const response = await fetch(`/api/v1/ideas/checks/${encodeURIComponent(state.ideaCheck.id)}/review`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ status, reviewer: "local-user" }),
+    });
+    if (!response.ok) throw new Error(await response.text());
+    renderIdeaCheck(await response.json());
+  } catch (error) {
+    if (message) {
+      message.textContent = `保存失败：${error.message}`;
+      message.className = "form-message error-text";
+    }
+    [...ideaCheckResultEl.querySelectorAll("[data-idea-review]")].forEach((item) => { item.disabled = false; });
+  }
+});
 
 async function checkIdea(idea, maxPapers) {
   const response = await fetch("/api/v1/ideas/check", {
@@ -855,6 +904,7 @@ function renderGraph(graph) {
   graphPickerEl.value = graph.id;
   nodeForm.classList.remove("hidden");
   graphActionsEl.classList.remove("hidden");
+  graphAgentForm.classList.remove("hidden");
   graphMetaForm.classList.remove("hidden");
   graphNameInput.value = graph.name || "";
   graphRootInput.innerHTML = graph.nodes
@@ -1158,7 +1208,9 @@ function renderPatches() {
           <span class="tag tag-beta">v${escapeHtml(patch.base_version)} → 待应用</span>
         </div>
         <p>${escapeHtml(patch.reason)}</p>
+        ${patch.source_request ? `<p class="settings-note">原始请求：${escapeHtml(patch.source_request)}</p>` : ""}
         <ul>${(patch.operations || []).map((operation) => `<li>${escapeHtml(describeOperation(operation))}</li>`).join("")}</ul>
+        ${(patch.warnings || []).length ? `<div class="warning-box"><ul>${patch.warnings.map((warning) => `<li>${escapeHtml(warning)}</li>`).join("")}</ul></div>` : ""}
       </div>
       <div class="patch-actions">
         <button type="button" data-patch-action="apply" data-patch-id="${escapeHtml(patch.id)}">批准</button>
@@ -1251,6 +1303,38 @@ agentProposeButton.addEventListener("click", () => {
   proposeAgentPatch()
     .catch((error) => setGraphMessage(`提案生成失败：${error.message}`, "error-text"))
     .finally(() => { agentProposeButton.disabled = false; });
+});
+
+graphAgentForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (!state.graphId || !state.graph) return;
+  const request = graphAgentRequestInput.value.trim();
+  if (!request) {
+    graphAgentMessageEl.textContent = "请先写下想怎样修改概念图。";
+    graphAgentMessageEl.className = "form-message error-text";
+    return;
+  }
+  graphAgentSubmit.disabled = true;
+  graphAgentMessageEl.textContent = "正在把自然语言请求转换成受限提案…";
+  graphAgentMessageEl.className = "form-message";
+  try {
+    const response = await fetch(`/api/v1/graphs/${encodeURIComponent(state.graphId)}/agent-patch`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ request, base_version: state.graph.version, max_operations: 4 }),
+    });
+    if (!response.ok) throw new Error(await response.text());
+    const patch = await response.json();
+    state.pendingPatches.set(patch.id, patch);
+    renderPatches();
+    graphAgentMessageEl.textContent = "提案已生成，请在下方预览后批准或拒绝。";
+    graphAgentMessageEl.className = "form-message";
+  } catch (error) {
+    graphAgentMessageEl.textContent = `提案生成失败：${error.message}`;
+    graphAgentMessageEl.className = "form-message error-text";
+  } finally {
+    graphAgentSubmit.disabled = false;
+  }
 });
 
 graphMetaForm.addEventListener("submit", async (event) => {

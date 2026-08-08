@@ -25,6 +25,13 @@ def api_key_slots(settings: Settings) -> Iterable[ApiKeySlot]:
             "WISHFORGE_PAPER_API_KEY",
         ),
         (
+            "community_search",
+            "社区检索（探索性信号）",
+            settings.community_provider,
+            settings.community_api_key,
+            "WISHFORGE_COMMUNITY_API_KEY",
+        ),
+        (
             "explanation_model",
             "解释模型",
             settings.explanation_provider,
@@ -71,6 +78,7 @@ def update_api_keys(settings: Settings, payload: ApiKeyUpdate) -> ApiKeyStatusRe
 
     slot_to_attribute = {
         "paper_search": "paper_api_key",
+        "community_search": "community_api_key",
         "explanation_model": "explanation_api_key",
         "experiment_runner": "experiment_api_key",
     }

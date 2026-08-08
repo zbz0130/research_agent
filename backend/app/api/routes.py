@@ -10,12 +10,15 @@ from app.research_schemas import (
     AnalysisJob,
     AnalysisSummary,
     ConceptGraph,
+    GraphCreate,
+    GraphAgentPatchCreate,
     GraphPatch,
     GraphPatchCreate,
     GraphMetadataUpdate,
     GraphCompareCreate,
     GraphCompareResult,
     GraphSubsetResult,
+    IdeaCheckReview,
     IdeaCheckCreate,
     IdeaCheckResult,
     NodeExplanationCreate,
@@ -23,6 +26,7 @@ from app.research_schemas import (
 )
 from app.schemas import ApiKeyStatusResponse, ApiKeyUpdate, HealthResponse, Project, ProjectCreate
 from app.services.graph_service import GraphConflict, GraphNotFound, graph_service
+from app.services.graph_agent_patch_service import graph_agent_patch_service
 from app.services.project_service import project_service
 from app.services.research_service import AnalysisNotFound, research_service
 from app.services.idea_service import IdeaCheckNotFound, idea_service
@@ -162,6 +166,16 @@ def get_idea_check(check_id: str) -> IdeaCheckResult:
         raise HTTPException(status_code=404, detail="想法查重记录不存在") from exc
 
 
+@router.post("/ideas/checks/{check_id}/review", response_model=IdeaCheckResult, tags=["research"])
+def review_idea_check(check_id: str, payload: IdeaCheckReview) -> IdeaCheckResult:
+    """Record human review metadata for a prior-art triage result."""
+
+    try:
+        return idea_service.review(check_id, payload)
+    except IdeaCheckNotFound as exc:
+        raise HTTPException(status_code=404, detail="想法查重记录不存在") from exc
+
+
 @router.post(
     "/experiments/plans",
     response_model=ExperimentPlan,
@@ -199,6 +213,21 @@ def review_experiment_plan(plan_id: str, payload: ExperimentPlanReview) -> Exper
         raise HTTPException(status_code=404, detail="实验方案不存在")
     reviewed = experiment_service.review(plan, payload)
     return storage.save_experiment_plan(reviewed)
+
+
+@router.post(
+    "/graphs",
+    response_model=ConceptGraph,
+    status_code=status.HTTP_201_CREATED,
+    tags=["graphs"],
+)
+def create_graph(payload: GraphCreate) -> ConceptGraph:
+    """Create an independent concept graph for manual/imported knowledge."""
+
+    try:
+        return graph_service.create(payload)
+    except GraphConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.get("/graphs/{graph_id}", response_model=ConceptGraph, tags=["graphs"])
@@ -261,6 +290,32 @@ def create_graph_patch(graph_id: str, payload: GraphPatchCreate) -> GraphPatch:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
+@router.post(
+    "/graphs/{graph_id}/agent-patch",
+    response_model=GraphPatch,
+    tags=["graphs"],
+    summary="把自然语言图谱修改请求转换为待审批 Agent GraphPatch",
+)
+def propose_agent_graph_patch(
+    graph_id: str,
+    payload: GraphAgentPatchCreate,
+) -> GraphPatch:
+    """Translate a bounded natural-language request without mutating the graph.
+
+    The returned patch is always ``actor=agent`` and ``status=proposed``.  A
+    reviewer must call the normal ``apply`` or ``reject`` endpoint.  The
+    service uses a transparent heuristic translator in this first version and
+    records the original request plus warnings on the patch itself.
+    """
+
+    try:
+        return graph_agent_patch_service.propose(graph_id, payload)
+    except GraphNotFound as exc:
+        raise HTTPException(status_code=404, detail="概念图不存在") from exc
+    except GraphConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @router.get("/graphs/{graph_id}/patches", response_model=list[GraphPatch], tags=["graphs"])
 def list_graph_patches(graph_id: str) -> list[GraphPatch]:
     try:
@@ -295,6 +350,8 @@ def propose_node_explanation(
         raise HTTPException(status_code=404, detail="概念图不存在") from exc
     except GraphConflict as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ProviderUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @router.post("/graphs/{graph_id}/patches/{patch_id}/apply", response_model=GraphPatch, tags=["graphs"])

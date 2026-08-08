@@ -439,6 +439,24 @@ class NoveltyCheck(BaseModel):
     scope_note: str
 
 
+class RelatedWorkSummary(BaseModel):
+    """Plain-language, abstract-level account of a matched paper."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    paper_id: str
+    paper_title: str
+    what_problem: str = Field(default="摘要未明确说明问题。", max_length=2000)
+    core_mechanism: str = Field(default="摘要未提供足够机制细节。", max_length=3000)
+    plain_language_summary: str = Field(max_length=4000)
+    overlap_with_idea: str = Field(default="尚未从摘要确认具体重叠。", max_length=2000)
+    possible_difference: str = Field(default="仅凭摘要无法确认与用户想法的差异。", max_length=2000)
+    summary_level: Literal["abstract_only", "full_text_verified"] = "abstract_only"
+    evidence_ids: list[str] = Field(default_factory=list, max_length=20)
+    verification_status: VerificationStatus = "unverified"
+    confidence: Confidence = "low"
+
+
 class IdeaCheckResult(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid4()))
     idea: str
@@ -448,6 +466,7 @@ class IdeaCheckResult(BaseModel):
     arxiv_status: ArxivCheckStatus = "not_checked"
     papers: list[PaperRecord] = Field(default_factory=list)
     evidence: list[EvidenceCard] = Field(default_factory=list)
+    related_work_summaries: list[RelatedWorkSummary] = Field(default_factory=list, max_length=30)
     novelty: NoveltyCheck
     # Flattened fields make the first-version API convenient for a table or a
     # spreadsheet export, while ``novelty`` keeps the assessment grouped.
@@ -456,10 +475,23 @@ class IdeaCheckResult(BaseModel):
     current_conclusion: str
     confidence: Confidence = "low"
     manual_review_status: ManualReviewStatus = "needs_review"
+    review_note: str | None = Field(default=None, max_length=2000)
+    reviewed_by: str | None = Field(default=None, max_length=200)
+    reviewed_at: datetime | None = None
     alternative_ideas: list[InnovationCandidate] = Field(default_factory=list)
     validation_steps: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class IdeaCheckReview(BaseModel):
+    """Human review metadata for a prior-art triage result."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    status: ManualReviewStatus
+    note: str | None = Field(default=None, max_length=2000)
+    reviewer: str | None = Field(default=None, max_length=200)
 
 
 class GraphCompareCreate(BaseModel):
@@ -589,6 +621,73 @@ class GraphPatchCreate(BaseModel):
     # concurrency before a patch is accepted.
     base_version: int | None = Field(default=None, ge=1)
     actor: Literal["user", "agent"] = "agent"
+    # These fields are populated by the natural-language Agent Patch tool.
+    # Keeping them on the canonical patch contract makes the translation
+    # decision visible in the review UI and preserves it in SQLite.  Existing
+    # callers can omit them and continue to create ordinary patches.
+    translation_mode: Literal["heuristic", "model"] = "heuristic"
+    source_request: str | None = Field(default=None, max_length=2000)
+    warnings: list[str] = Field(default_factory=list, max_length=8)
+
+
+class GraphAgentPatchCreate(BaseModel):
+    """Bounded natural-language request for an Agent concept-graph patch.
+
+    The endpoint accepts a request rather than arbitrary operations.  The
+    server translates it into at most ``max_operations`` validated
+    :class:`GraphOperation` objects and stores the result as an Agent
+    proposal.  It deliberately does not expose fields such as ``editable``
+    or arbitrary node IDs for mutation; GraphService remains the final
+    authority for root, lock, endpoint, and optimistic-version checks.
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    request: str = Field(min_length=3, max_length=2000)
+    target_node_id: str | None = Field(default=None, min_length=1, max_length=200)
+    base_version: int | None = Field(default=None, ge=1)
+    language: Literal["zh-CN", "en"] = "zh-CN"
+    # A small caller-selectable budget is useful for previews, but the upper
+    # bound is intentionally lower than the generic GraphPatch limit.
+    max_operations: int = Field(default=4, ge=1, le=4)
+
+
+class GraphCreate(BaseModel):
+    """Payload for creating an independent, user-editable concept graph.
+
+    Analysis results create graphs automatically, but the workspace also needs
+    a small import/create contract so users can keep a hand-built tree or a
+    graph copied from another project.  ``id`` is optional; when omitted the
+    service generates one.  Existing graph IDs are never overwritten by the
+    public create endpoint.
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    id: str | None = Field(default=None, min_length=1, max_length=200)
+    project_id: UUID | None = None
+    name: str = Field(default="未命名概念图", min_length=1, max_length=200)
+    description: str = Field(default="", max_length=2000)
+    root_id: str = Field(min_length=1, max_length=200)
+    nodes: list[ConceptNode] = Field(min_length=1, max_length=500)
+    edges: list[ConceptEdge] = Field(default_factory=list, max_length=1000)
+
+    @model_validator(mode="after")
+    def validate_integrity(self) -> "GraphCreate":
+        node_ids = [node.id for node in self.nodes]
+        if self.root_id not in node_ids:
+            raise ValueError("root_id 必须指向图中的现有节点")
+        if len(node_ids) != len(set(node_ids)):
+            raise ValueError("概念图不能包含重复节点 ID")
+        edge_ids = [edge.id for edge in self.edges]
+        if len(edge_ids) != len(set(edge_ids)):
+            raise ValueError("概念图不能包含重复边 ID")
+        known = set(node_ids)
+        if any(edge.source not in known or edge.target not in known for edge in self.edges):
+            raise ValueError("概念图中的边必须连接现有节点")
+        if any(edge.source == edge.target for edge in self.edges):
+            raise ValueError("概念图不能包含自环边")
+        return self
 
 
 class GraphPatch(BaseModel):
@@ -599,4 +698,14 @@ class GraphPatch(BaseModel):
     reason: str
     actor: Literal["user", "agent"]
     status: Literal["proposed", "applied", "rejected"] = "proposed"
+    translation_mode: Literal["heuristic", "model"] = "heuristic"
+    source_request: str | None = Field(default=None, max_length=2000)
+    warnings: list[str] = Field(default_factory=list, max_length=8)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+# Friendly aliases for callers that prefer the request/agent naming order.
+# They point at one Pydantic model so OpenAPI and runtime validation stay in
+# sync while older integrations can choose either spelling.
+AgentGraphPatchRequest = GraphAgentPatchCreate
+GraphAgentPatchRequest = GraphAgentPatchCreate

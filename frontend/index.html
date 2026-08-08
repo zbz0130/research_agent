@@ -130,6 +130,17 @@
             <button type="button" class="secondary" id="agent-propose">让 Agent 提议一个节点</button>
             <span class="form-message" id="graph-message" role="status"></span>
           </div>
+          <form id="graph-agent-form" class="graph-agent-form hidden">
+            <label>
+              用一句话描述你想怎样改图
+              <textarea id="graph-agent-request" maxlength="2000" rows="2" placeholder="例如：在 Attention Mechanism 下增加 FlashAttention 节点，并说明它解决什么问题"></textarea>
+            </label>
+            <div class="form-actions">
+              <button type="submit" class="secondary" id="graph-agent-submit">让 Agent 生成修改提案</button>
+              <span class="form-message" id="graph-agent-message" role="status"></span>
+            </div>
+            <p class="settings-note">第一版使用透明的有界规则翻译，最多生成 4 个操作；提案会先进入待审核列表，不会直接改动概念图。</p>
+          </form>
           <form id="node-form" class="node-form hidden">
             <label>
               新增节点
@@ -321,7 +332,7 @@
             <button id="refresh-settings" class="secondary" type="button">刷新状态</button>
           </div>
           <p class="settings-note">
-            论文检索、解释模型和实验执行使用不同密钥。可以在这里临时配置当前 API 进程使用的密钥；
+            论文检索、社区探索、解释模型和实验执行使用不同密钥。可以在这里临时配置当前 API 进程使用的密钥；
             网页只显示状态和掩码，不会显示明文。重启服务后，网页配置会清除，持久配置请放在本地 <code>.env</code> 或 Secret Manager。
           </p>
           <form id="api-key-form" class="api-key-form">
@@ -334,7 +345,8 @@
             </div>
           </form>
           <p class="settings-hint">
-            <code>WISHFORGE_PAPER_API_KEY</code> · <code>WISHFORGE_EXPLANATION_API_KEY</code> ·
+            <code>WISHFORGE_PAPER_API_KEY</code> · <code>WISHFORGE_COMMUNITY_API_KEY</code> ·
+            <code>WISHFORGE_EXPLANATION_API_KEY</code> ·
             <code>WISHFORGE_EXPERIMENT_API_KEY</code>
           </p>
         </article>

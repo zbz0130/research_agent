@@ -24,12 +24,13 @@ main
 - **研究线索**：在文献解释的基础上，用“限制 / future work / 方法对比”检索词做一次有预算的 prior-art 扩展，再生成探索性候选，列出最近资料、风险、可行性和最小验证步骤。
 - **三路研究 Brief**：研究模式会并行记录社区痛点 Agent、模型/启发式脑暴 Agent 和论文限制/Future Work Agent，再由综合记录汇总候选。社区内容和模型脑暴始终与学术证据分栏显示；当前没有实时 X、知乎、Reddit 连接器，也没有把摘要伪装成全文 Discussion。
 - **想法查重**：输入一段研究想法，展示实际检索词、匹配论文、摘要级证据、L0–L4 相似度分级、替代方向和最小验证步骤；结果保存到 SQLite，方便回看。
+- 查重结果可以通过人工审阅接口记录 `reviewed / dismissed / needs_review`、审阅人和备注；这只更新审阅元数据，不会把范围化检索升级成原创性结论。
 - **跨图借鉴**：保存多棵概念图后，可选择多图和节点子集，生成带关系类型、证据 ID、风险提示和验证步骤的跨领域候选；候选不会自动写回原图。
 - **多图画布**：在网页中选择多棵已保存概念图并排查看，也可以按节点 ID生成临时局部视图；局部视图不改变源图。
 - **主张—证据账本**：把解释中的定义、机制、演变和限制拆成可追踪主张，显示证据关联、覆盖率、置信度和下一步人工核验动作；没有人工核验时不会把摘要线索显示成“已证实”。
 - **实验方案草案**：从自由文本、创新候选或 prior-art 结果生成假设、基线、变量、控制项、指标、消融、预期结果、失败判据、资源估计和证据来源。草案可以保存并由用户批准/退回/拒绝，但本阶段始终不执行代码或实验。
 
-概念图支持改名、节点手动编辑/新增，以及让 Agent 为节点生成解释。所有 Agent 修改都通过 `GraphPatch`：先进入“待批准”状态，服务端按图谱版本检查冲突后才应用；用户自己的修改则立即应用。
+概念图支持改名、节点手动编辑/新增，以及让 Agent 为节点生成解释。用户也可以通过 `POST /api/v1/graphs` 独立创建或导入一棵概念树。所有 Agent 修改都通过 `GraphPatch`：先进入“待批准”状态，服务端按图谱版本检查冲突后才应用；用户自己的修改则立即应用。网页或其他 Agent 也可以调用自然语言工具，把“在 Attention 下增加 FlashAttention 节点”翻译成最多 4 个受限操作；第一版使用透明启发式翻译，并把原始请求、翻译模式和警告保存在提案中。
 
 第一版的证据边界需要牢记：
 
@@ -76,10 +77,11 @@ PYTHONPATH=backend python -m uvicorn app.main:app --reload
 
 ## API Key 配置
 
-不同用途的服务使用不同的配置槽位，避免查论文的密钥被实验执行器误用：
+不同用途的服务使用不同的配置槽位，避免一种用途的密钥被另一种用途误用：
 
 ```text
 WISHFORGE_PAPER_API_KEY          # 论文检索
+WISHFORGE_COMMUNITY_API_KEY      # 社区探索（当前为 Provider 预留）
 WISHFORGE_EXPLANATION_API_KEY   # 解释模型
 WISHFORGE_EXPERIMENT_API_KEY    # 实验执行
 WISHFORGE_EXPLANATION_MODEL     # 解释模型名称（默认 gpt-4.1-mini）
@@ -102,6 +104,7 @@ Content-Type: application/json
 
 {
   "paper_search": "sk-...",
+  "community_search": "sk-...",
   "explanation_model": "sk-...",
   "experiment_runner": "sk-..."
 }
@@ -122,6 +125,31 @@ Invoke-RestMethod "http://localhost:8000/api/v1/analyses/$($job.id)"
 ```
 
 返回的 `result` 中会有 `papers`、`evidence`、`explanation`、`graph` 和 `innovation_candidates`。当 `level=research` 时还会有 `research_brief`，其中按角色保存 `agent_runs`、社区信号、模型候选、论文摘要级限制线索、综合候选、覆盖率和 arXiv 范围状态。`GraphPatch` 的 Agent 提案先调用创建接口，再调用 `apply` 或 `reject`；用户手动修改则带 `actor: "user"` 立即应用。
+
+自然语言概念图修改示例（只生成提案，不会直接改图）：
+
+```powershell
+$patch = Invoke-RestMethod -Method Post `
+  "http://localhost:8000/api/v1/graphs/$graphId/agent-patch" `
+  -ContentType "application/json" `
+  -Body '{"request":"在根节点下增加一个 FlashAttention 节点，并说明它要解决什么问题","target_node_id":"root","base_version":1}'
+
+# 预览 $patch.operations 和 $patch.warnings 后，再由用户决定：
+Invoke-RestMethod -Method Post `
+  "http://localhost:8000/api/v1/graphs/$graphId/patches/$($patch.id)/apply"
+```
+
+请求模型只接受 `request`、可选 `target_node_id`、`base_version`、`language` 和 `max_operations(1-4)`。不能从自然语言接口直接提交任意字段、解锁节点或删除根节点；这些边界仍由 GraphService 在提案阶段校验，旧版本会返回 `409 Conflict`。
+
+独立创建一棵手工概念图：
+
+```powershell
+$graph = Invoke-RestMethod -Method Post http://localhost:8000/api/v1/graphs `
+  -ContentType "application/json" `
+  -Body '{"name":"我的概念树","root_id":"root","nodes":[{"id":"root","label":"研究主题","node_type":"concept"}]}'
+```
+
+创建接口会校验根节点、节点 ID 和边端点；非法图谱返回 `422`，重复的显式图 ID 返回 `409`，不会覆盖已有图。
 
 研究 Brief 也可以单独读取：
 
@@ -166,16 +194,19 @@ docker compose up --build
 
 - `GET /api/v1/health` 返回 `status=ok`，服务名称显示为许愿机；
 - Web 首页可以打开并显示 API 状态；
-- Web 首页可以看到并配置论文检索、解释模型和实验执行三个独立密钥槽位（当前进程内存，不回显明文）；
+- Web 首页可以看到并配置论文检索、社区探索、解释模型和实验执行四个独立密钥槽位（当前进程内存，不回显明文）；
 - 可以创建和查看一个研究项目，并在服务重启后从 SQLite 恢复；
 - 可以创建异步概念分析任务并轮询阶段进度；
 - 文献模式能返回论文元数据、摘要级证据卡、分层解释和概念图；
 - 研究模式能返回谨慎的创新候选和新颖性范围说明；
 - 研究模式能返回社区 / 模型脑暴 / 论文限制三路 AgentRun，以及综合候选和来源标签；
 - 可以通过 `POST /api/v1/ideas/check` 对一个研究想法做范围化 prior-art 判断，并通过 `GET /api/v1/ideas/checks` 回看记录；
+- 可以通过 `POST /api/v1/ideas/checks/{check_id}/review` 写入人工核验状态和备注；
+- 可以通过 `POST /api/v1/graphs` 独立创建或导入一棵概念图，并通过 `GET /api/v1/graphs` 回看；
 - 可以通过 `POST /api/v1/graphs/compare` 选择多棵概念图或节点子集，生成未验证的跨图候选；
 - Web 页面可以把多棵概念图并排显示，并按节点 ID生成不落库的局部画布；
 - 可以获取概念图、手动新增/编辑节点，并提交 Agent GraphPatch 后批准或拒绝；
+- 可以通过 `POST /api/v1/graphs/{graph_id}/agent-patch` 把自然语言修改需求转换为有界、可审阅的 Agent GraphPatch；提案不会直接改图，并记录启发式翻译警告；
 - 分析任务、概念图、Patch、项目和想法查重结果写入 SQLite，重启后可恢复；
 - 图谱版本冲突会返回 `409 Conflict`，防止旧提案覆盖新修改；
 - `python -m pytest` 全部通过；

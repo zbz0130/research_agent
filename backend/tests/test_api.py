@@ -57,9 +57,11 @@ def test_project_validation() -> None:
 def test_api_key_status_is_separated_and_masked() -> None:
     app.dependency_overrides[get_settings] = lambda: Settings(
         paper_provider="semantic_scholar",
+        community_provider="official_api",
         explanation_provider="openai",
         experiment_provider="remote_runner",
         paper_api_key=SecretStr("paper-secret-1234"),
+        community_api_key=SecretStr("community-secret-4321"),
         experiment_api_key=SecretStr("run-secret-5678"),
     )
 
@@ -73,21 +75,27 @@ def test_api_key_status_is_separated_and_masked() -> None:
     slots = {slot["id"]: slot for slot in response.json()["slots"]}
     assert slots["paper_search"]["configured"] is True
     assert slots["paper_search"]["masked"] == "••••••••1234"
+    assert slots["community_search"]["configured"] is True
+    assert slots["community_search"]["masked"] == "••••••••4321"
     assert slots["experiment_runner"]["configured"] is True
     assert slots["experiment_runner"]["masked"] == "••••••••5678"
     assert slots["explanation_model"]["configured"] is False
     assert "paper-secret-1234" not in response.text
+    assert "community-secret-4321" not in response.text
     assert "run-secret-5678" not in response.text
 
 
 def test_settings_load_separate_environment_keys(monkeypatch) -> None:
     monkeypatch.setenv("WISHFORGE_PAPER_API_KEY", "paper-env-9999")
+    monkeypatch.setenv("WISHFORGE_COMMUNITY_API_KEY", "community-env-7777")
     monkeypatch.setenv("WISHFORGE_EXPERIMENT_API_KEY", "runner-env-8888")
 
     slots = {slot.id: slot for slot in api_key_slots(Settings())}
 
     assert slots["paper_search"].configured is True
     assert slots["paper_search"].masked == "••••••••9999"
+    assert slots["community_search"].configured is True
+    assert slots["community_search"].masked == "••••••••7777"
     assert slots["experiment_runner"].configured is True
     assert slots["experiment_runner"].masked == "••••••••8888"
     assert slots["explanation_model"].configured is False
@@ -428,6 +436,53 @@ def test_graph_list_and_patch_history_endpoints() -> None:
     assert graph_service.get(graph.id).version == 1
 
 
+def test_independent_graph_create_endpoint_does_not_overwrite_existing_graph() -> None:
+    payload = {
+        "id": "manual-graph",
+        "name": "手工概念树",
+        "description": "用户从零开始整理的概念树",
+        "root_id": "root",
+        "nodes": [
+            {"id": "root", "label": "研究主题", "node_type": "concept"},
+            {"id": "method", "label": "候选方法", "node_type": "method"},
+        ],
+        "edges": [
+            {"source": "root", "target": "method", "relation": "is_a"},
+        ],
+    }
+    created = client.post("/api/v1/graphs", json=payload)
+    assert created.status_code == 201, created.text
+    assert created.json()["id"] == "manual-graph"
+    assert created.json()["root_id"] == "root"
+
+    duplicate = client.post("/api/v1/graphs", json=payload)
+    assert duplicate.status_code == 409
+    restored = client.get("/api/v1/graphs/manual-graph")
+    assert restored.status_code == 200
+    assert restored.json()["version"] == 1
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "name": "缺少根节点",
+            "root_id": "missing",
+            "nodes": [{"id": "root", "label": "根"}],
+        },
+        {
+            "name": "边端点不存在",
+            "root_id": "root",
+            "nodes": [{"id": "root", "label": "根"}],
+            "edges": [{"source": "root", "target": "missing", "relation": "is_a"}],
+        },
+    ],
+)
+def test_independent_graph_create_validates_root_and_edge_endpoints(payload: dict) -> None:
+    response = client.post("/api/v1/graphs", json=payload)
+    assert response.status_code == 422
+
+
 def test_graph_metadata_can_be_renamed_with_version_check() -> None:
     graph = _seed_graph()
     renamed = client.patch(
@@ -462,7 +517,27 @@ def test_agent_node_explanation_is_a_patch_until_approved() -> None:
         assert patch["status"] == "proposed"
         assert patch["operations"][0]["op"] == "update_node"
         assert patch["operations"][0]["updates"]["summary"]
+        assert patch["source_request"]
+        assert patch["translation_mode"] == "heuristic"
         assert graph_service.get(graph.id).nodes[1].summary == ""
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_agent_node_explanation_provider_failure_is_not_a_500() -> None:
+    app.dependency_overrides[get_settings] = lambda: Settings(
+        paper_provider="demo",
+        explanation_provider="unsupported",
+        demo_mode=False,
+    )
+    try:
+        graph = _seed_graph()
+        response = client.post(
+            f"/api/v1/graphs/{graph.id}/nodes/child/explanation-patch",
+            json={"audience": "beginner", "language": "zh-CN"},
+        )
+        assert response.status_code == 503
+        assert "Provider" in response.json()["detail"]
     finally:
         app.dependency_overrides.clear()
 
@@ -494,6 +569,9 @@ def test_idea_check_reports_scoped_prior_art_and_alternatives() -> None:
         assert result["papers"]
         assert result["alternative_ideas"]
         assert result["validation_steps"]
+        assert result["related_work_summaries"]
+        assert result["related_work_summaries"][0]["summary_level"] == "abstract_only"
+        assert result["related_work_summaries"][0]["plain_language_summary"]
         assert "不能" in "".join(result["warnings"]) or result["novelty"]["confidence"] == "low"
 
         check_id = result["id"]
@@ -523,6 +601,38 @@ def test_idea_check_does_not_turn_provider_failure_into_a_novelty_claim() -> Non
         )
         assert response.status_code == 503
         assert "Provider" in response.json()["detail"]
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_idea_check_can_record_human_review_without_changing_search_scope() -> None:
+    app.dependency_overrides[get_settings] = lambda: Settings(
+        paper_provider="demo",
+        explanation_provider="rule_based",
+        demo_mode=True,
+    )
+    try:
+        created = client.post(
+            "/api/v1/ideas/check",
+            json={"idea": "Use paged memory for long context inference cache"},
+        )
+        assert created.status_code == 200
+        check = created.json()
+        reviewed = client.post(
+            f"/api/v1/ideas/checks/{check['id']}/review",
+            json={
+                "status": "reviewed",
+                "note": "已打开最相似论文并核对摘要与方法标题",
+                "reviewer": "researcher",
+            },
+        )
+        assert reviewed.status_code == 200
+        body = reviewed.json()
+        assert body["manual_review_status"] == "reviewed"
+        assert body["review_note"]
+        assert body["reviewed_by"] == "researcher"
+        assert body["reviewed_at"]
+        assert body["search_terms"] == check["search_terms"]
     finally:
         app.dependency_overrides.clear()
 

@@ -14,7 +14,7 @@ class HealthResponse(BaseModel):
 class ApiKeySlot(BaseModel):
     """Public, non-secret view of one provider credential slot."""
 
-    id: Literal["paper_search", "explanation_model", "experiment_runner"]
+    id: Literal["paper_search", "community_search", "explanation_model", "experiment_runner"]
     label: str
     provider: str
     configured: bool
@@ -39,6 +39,7 @@ class ApiKeyUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     paper_search: str | None = Field(default=None, max_length=500)
+    community_search: str | None = Field(default=None, max_length=500)
     explanation_model: str | None = Field(default=None, max_length=500)
     experiment_runner: str | None = Field(default=None, max_length=500)
 

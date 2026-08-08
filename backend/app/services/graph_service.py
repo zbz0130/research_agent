@@ -4,10 +4,12 @@ from datetime import datetime, timezone
 import hashlib
 import re
 from threading import RLock
+from uuid import uuid4
 
 from app.research_schemas import (
     ConceptEdge,
     ConceptGraph,
+    GraphCreate,
     ConceptNode,
     GraphMetadataUpdate,
     GraphOperation,
@@ -49,6 +51,31 @@ class GraphService:
             storage.save_graph(stored)
             self._graphs[stored.id] = stored.model_copy(deep=True)
             return stored.model_copy(deep=True)
+
+    def create(self, payload: GraphCreate) -> ConceptGraph:
+        """Create an independent graph without overwriting an existing ID.
+
+        Analysis jobs use :meth:`save` because they own the generated graph
+        document.  The public create endpoint uses this stricter method so a
+        user importing a tree cannot accidentally replace another saved graph.
+        """
+
+        with self._lock:
+            graph_id = payload.id or str(uuid4())
+            if storage.get_graph(graph_id) is not None:
+                raise GraphConflict(f"概念图 ID 已存在：{graph_id}")
+            graph = ConceptGraph(
+                id=graph_id,
+                project_id=payload.project_id,
+                name=payload.name,
+                description=payload.description,
+                root_id=payload.root_id,
+                nodes=payload.nodes,
+                edges=payload.edges,
+            )
+            storage.save_graph(graph)
+            self._graphs[graph.id] = graph.model_copy(deep=True)
+            return graph.model_copy(deep=True)
 
     def get(self, graph_id: str) -> ConceptGraph:
         with self._lock:
@@ -264,6 +291,9 @@ class GraphService:
                 reason=payload.reason,
                 actor=payload.actor,
                 status="proposed",
+                translation_mode=payload.translation_mode,
+                source_request=payload.source_request,
+                warnings=list(payload.warnings),
             )
 
             # Validate against a copy before persisting a proposal. This also

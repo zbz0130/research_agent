@@ -38,6 +38,9 @@ def test_literature_analysis_contains_claim_level_ledger() -> None:
         assert ledger["claims"]
         assert ledger["linked_claim_count"] > 0
         assert 0 < ledger["coverage"] <= 1
+        assert ledger["link_coverage"] == ledger["coverage"]
+        assert ledger["verified_coverage"] == 0
+        assert ledger["contradicted_claim_count"] >= 0
         assert any(claim["evidence_links"] for claim in ledger["claims"])
         assert any(claim["status"] == "unverified" for claim in ledger["claims"])
         assert ledger["warnings"]
