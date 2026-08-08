@@ -1,6 +1,6 @@
 from functools import lru_cache
 
-from pydantic import SecretStr
+from pydantic import PrivateAttr, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -17,14 +17,24 @@ class Settings(BaseSettings):
     # Providers are deliberately separated by responsibility. A paper-search
     # credential must never be accidentally used by the experiment runner.
     paper_provider: str = "semantic_scholar"
+    # Community sources (X/知乎/Reddit) are deliberately separate from
+    # academic search.  The first version ships a demo provider; production
+    # connectors can be configured later without reusing paper credentials.
+    community_provider: str = "demo"
     explanation_provider: str = "openai"
     experiment_provider: str = "local"
     explanation_model: str = "gpt-4.1-mini"
     explanation_base_url: str = "https://api.openai.com/v1"
     demo_mode: bool = True
     paper_api_key: SecretStr | None = None
+    community_api_key: SecretStr | None = None
     explanation_api_key: SecretStr | None = None
     experiment_api_key: SecretStr | None = None
+
+    # Keys entered through the local web UI are intentionally process-local.
+    # This private marker lets the status endpoint explain whether a value
+    # came from .env or from the in-memory runtime overlay without exposing it.
+    _runtime_api_key_slots: set[str] = PrivateAttr(default_factory=set)
 
     model_config = SettingsConfigDict(
         env_file=".env",

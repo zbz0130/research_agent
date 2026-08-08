@@ -1,5 +1,8 @@
 const healthEl = document.querySelector("#health");
 const apiKeysEl = document.querySelector("#api-keys");
+const apiKeyForm = document.querySelector("#api-key-form");
+const apiKeyMessageEl = document.querySelector("#api-key-message");
+const saveApiKeysButton = document.querySelector("#save-api-keys");
 const projectsEl = document.querySelector("#projects");
 const projectForm = document.querySelector("#project-form");
 const projectMessageEl = document.querySelector("#form-message");
@@ -19,9 +22,12 @@ const graphMessageEl = document.querySelector("#graph-message");
 const agentProposeButton = document.querySelector("#agent-propose");
 const graphMetaForm = document.querySelector("#graph-meta-form");
 const graphNameInput = document.querySelector("#graph-name");
+const graphRootInput = document.querySelector("#graph-root");
 const innovationCardEl = document.querySelector("#innovation-card");
 const innovationsEl = document.querySelector("#innovations");
 const noveltyNoteEl = document.querySelector("#novelty-note");
+const researchBriefCardEl = document.querySelector("#research-brief-card");
+const researchBriefEl = document.querySelector("#research-brief");
 const patchCardEl = document.querySelector("#patch-card");
 const patchesEl = document.querySelector("#patches");
 const ideaCheckForm = document.querySelector("#idea-check-form");
@@ -37,11 +43,18 @@ const graphCompareFocusInput = document.querySelector("#graph-compare-focus");
 const graphCompareSubmit = document.querySelector("#graph-compare-submit");
 const graphCompareMessageEl = document.querySelector("#graph-compare-message");
 const graphCompareResultEl = document.querySelector("#graph-compare-result");
+const graphGalleryForm = document.querySelector("#graph-gallery-form");
+const graphGalleryPickerEl = document.querySelector("#graph-gallery-picker");
+const graphGalleryNodesInput = document.querySelector("#graph-gallery-nodes");
+const graphGallerySubmit = document.querySelector("#graph-gallery-submit");
+const graphGalleryMessageEl = document.querySelector("#graph-gallery-message");
+const graphGalleryEl = document.querySelector("#graph-gallery");
 
 const state = {
   analysisId: null,
   graphId: null,
   graph: null,
+  graphs: [],
   pendingPatches: new Map(),
 };
 
@@ -90,6 +103,14 @@ const displayLabels = {
   indirect_metadata: "由论文元数据间接发现",
   checked: "已检查",
   unavailable: "检查不可用",
+  no_direct_match_in_scope: "当前范围未发现直接匹配",
+  matched: "发现匹配线索",
+  model_generated: "模型生成",
+  heuristic: "启发式生成",
+  community_signal: "社区信号转化",
+  paper_future_work: "论文限制线索",
+  synthesis: "综合候选",
+  abstract_signal: "摘要级线索",
 };
 
 function displayLabel(value) {
@@ -114,16 +135,33 @@ async function loadHealth() {
 
 function renderApiKeys(slots) {
   apiKeysEl.innerHTML = slots.map((slot) => `
-    <div class="setting-row">
-      <div>
-        <h3>${escapeHtml(slot.label)}</h3>
+    <div class="setting-row api-key-row" data-api-key-slot="${escapeHtml(slot.id)}">
+      <div class="setting-main">
+        <div class="setting-title-line">
+          <h3>${escapeHtml(slot.label)}</h3>
+          <span class="tag ${slot.configured ? "tag-configured" : "tag-missing"}">
+            ${slot.configured ? `已配置 ${escapeHtml(slot.masked || "")}` : "未配置"}
+          </span>
+        </div>
         <p><span class="provider-name">${escapeHtml(slot.provider)}</span> · <code>${escapeHtml(slot.environment_variable)}</code></p>
+        <input
+          type="password"
+          class="api-key-input"
+          data-api-key-input="${escapeHtml(slot.id)}"
+          autocomplete="new-password"
+          spellcheck="false"
+          placeholder="${slot.configured ? "输入新密钥以替换（留空保持不变）" : "粘贴该用途的 API Key"}"
+          aria-label="${escapeHtml(slot.label)} API Key"
+        />
       </div>
-      <span class="tag ${slot.configured ? "tag-configured" : "tag-missing"}">
-        ${slot.configured ? `已配置 ${escapeHtml(slot.masked || "")}` : "未配置"}
-      </span>
+      <button type="button" class="secondary api-key-clear" data-api-key-clear="${escapeHtml(slot.id)}">清除当前值</button>
     </div>
   `).join("");
+}
+
+function setApiKeyMessage(text, kind = "") {
+  apiKeyMessageEl.textContent = text;
+  apiKeyMessageEl.className = `form-message ${kind}`;
 }
 
 async function loadApiKeys() {
@@ -132,10 +170,62 @@ async function loadApiKeys() {
     if (!response.ok) throw new Error("settings request failed");
     const data = await response.json();
     renderApiKeys(data.slots);
+    apiKeyForm.dataset.storage = data.storage || "environment";
   } catch (error) {
     apiKeysEl.innerHTML = '<p class="empty error-text">配置状态读取失败，请确认 API 正在运行。</p>';
   }
 }
+
+async function updateApiKeys(payload) {
+  const response = await fetch("/api/v1/settings/api-keys", {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) throw new Error(await response.text());
+  return response.json();
+}
+
+apiKeyForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const payload = {};
+  apiKeysEl.querySelectorAll("[data-api-key-input]").forEach((input) => {
+    const value = input.value.trim();
+    if (value) payload[input.dataset.apiKeyInput] = value;
+  });
+  if (!Object.keys(payload).length) {
+    setApiKeyMessage("没有新的密钥需要保存；留空会保持现有值。", "");
+    return;
+  }
+  saveApiKeysButton.disabled = true;
+  setApiKeyMessage("正在更新当前进程配置…");
+  try {
+    const data = await updateApiKeys(payload);
+    renderApiKeys(data.slots);
+    apiKeyForm.dataset.storage = data.storage || "runtime_memory";
+    setApiKeyMessage("已保存。密钥只保存在当前 API 进程内，响应中不会返回明文。", "");
+  } catch (error) {
+    setApiKeyMessage(`保存失败：${error.message}`, "error-text");
+  } finally {
+    saveApiKeysButton.disabled = false;
+  }
+});
+
+apiKeysEl.addEventListener("click", async (event) => {
+  const clearButton = event.target.closest("[data-api-key-clear]");
+  if (!clearButton) return;
+  const slot = clearButton.dataset.apiKeyClear;
+  clearButton.disabled = true;
+  setApiKeyMessage("正在清除当前进程中的该密钥…");
+  try {
+    const data = await updateApiKeys({ [slot]: "" });
+    renderApiKeys(data.slots);
+    apiKeyForm.dataset.storage = data.storage || "runtime_memory";
+    setApiKeyMessage("已清除该用途的当前进程密钥。", "");
+  } catch (error) {
+    setApiKeyMessage(`清除失败：${error.message}`, "error-text");
+  }
+});
 
 function renderProjects(projects) {
   if (projects.length === 0) {
@@ -172,6 +262,7 @@ function resetAnalysisView() {
   state.analysisId = null;
   state.graphId = null;
   state.graph = null;
+  state.graphs = [];
   state.pendingPatches.clear();
   analysisProviderEl.textContent = "分析中…";
   paperCountEl.textContent = "0 篇";
@@ -187,10 +278,15 @@ function resetAnalysisView() {
   graphActionsEl.classList.add("hidden");
   graphMetaForm.classList.add("hidden");
   graphNameInput.value = "";
+  graphRootInput.innerHTML = "";
   innovationCardEl.classList.add("hidden");
   innovationsEl.innerHTML = "";
   noveltyNoteEl.textContent = "";
+  researchBriefCardEl.classList.add("hidden");
+  researchBriefEl.innerHTML = "";
   renderPatches();
+  graphGalleryEl.innerHTML = '<p class="empty">正在读取概念图列表…</p>';
+  setGraphGalleryMessage("", "");
 }
 
 function renderExplanation(result) {
@@ -300,6 +396,71 @@ function renderInnovations(result) {
   noveltyNoteEl.textContent = result.novelty_note || "当前没有可用的新颖性范围说明。";
 }
 
+function renderResearchBrief(result) {
+  const brief = result.research_brief;
+  if (!brief) {
+    researchBriefCardEl.classList.add("hidden");
+    researchBriefEl.innerHTML = "";
+    return;
+  }
+  researchBriefCardEl.classList.remove("hidden");
+  const runs = brief.agent_runs || [];
+  const statusText = {
+    completed: "完成",
+    failed: "失败",
+    skipped: "跳过",
+    running: "运行中",
+    queued: "排队",
+  };
+  const roleText = {
+    community: "社区 Agent",
+    model_brainstorm: "脑暴 Agent",
+    future_work: "论文 Future Work Agent",
+    synthesis: "综合 Agent",
+  };
+  const renderCandidate = (candidate) => `
+    <article class="brief-candidate">
+      <div class="brief-candidate-heading">
+        <h4>${escapeHtml(candidate.title)}</h4>
+        <span class="tag tag-missing">${escapeHtml(displayLabel(candidate.source_type || "unverified"))} · ${escapeHtml(displayLabel(candidate.arxiv_status || "not_checked"))}</span>
+      </div>
+      <p>${escapeHtml(candidate.problem || candidate.rationale || "暂无说明")}</p>
+      <small>${escapeHtml(candidate.warning || "需要人工核验")}</small>
+    </article>
+  `;
+  researchBriefEl.innerHTML = `
+    ${(brief.warnings || []).length ? `<div class="warning-box"><strong>研究边界</strong><ul>${brief.warnings.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul></div>` : ""}
+    <p class="brief-synthesis">${escapeHtml(brief.synthesis || "暂无综合说明")}</p>
+    <div class="agent-run-list">
+      ${runs.map((run) => `
+        <div class="agent-run-row">
+          <div><strong>${escapeHtml(roleText[run.role] || run.role)}</strong><small>${escapeHtml(run.provider || "未标注 Provider")}</small></div>
+          <span class="tag ${run.status === "completed" ? "tag-configured" : "tag-missing"}">${escapeHtml(statusText[run.status] || run.status)} · ${escapeHtml(run.summary || "暂无摘要")}</span>
+        </div>
+      `).join("")}
+    </div>
+    <div class="brief-columns">
+      <section>
+        <p class="section-label">社区痛点（非科学证据）</p>
+        ${(brief.community_signals || []).map((signal) => `
+          <article class="brief-signal"><strong>${escapeHtml(signal.title)}</strong><span>${escapeHtml(signal.platform)} · ${escapeHtml(signal.pain_point || signal.summary)}</span><small>${escapeHtml(signal.open_question || "暂无开放问题")}</small></article>
+        `).join("") || '<p class="empty">没有社区信号。</p>'}
+      </section>
+      <section>
+        <p class="section-label">论文限制 / Future Work 线索</p>
+        ${(brief.future_work_signals || []).map((signal) => `
+          <article class="brief-signal"><strong>${escapeHtml(signal.paper_title)}</strong><span>${escapeHtml(displayLabel(signal.section))} · ${escapeHtml(signal.claim)}</span><small>${escapeHtml(signal.excerpt || "暂无摘录")}</small></article>
+        `).join("") || '<p class="empty">当前摘要中没有可提取的后续工作线索。</p>'}
+      </section>
+    </div>
+    <section class="brief-candidates">
+      <p class="section-label">综合候选（仍需核验）</p>
+      ${(brief.innovation_candidates || []).map(renderCandidate).join("") || '<p class="empty">没有综合候选。</p>'}
+    </section>
+    <p class="brief-coverage">证据覆盖：${escapeHtml(JSON.stringify(brief.coverage || {}))} · arXiv 范围状态：${escapeHtml(brief.arxiv_status || "not_checked")}</p>
+  `;
+}
+
 const noveltyLabels = {
   L0: "L0 · 直接已有工作",
   L1: "L1 · 核心方法高度相似",
@@ -401,6 +562,10 @@ function renderGraph(graph) {
   graphActionsEl.classList.remove("hidden");
   graphMetaForm.classList.remove("hidden");
   graphNameInput.value = graph.name || "";
+  graphRootInput.innerHTML = graph.nodes
+    .map((node) => `<option value="${escapeHtml(node.id)}">${escapeHtml(node.label)}</option>`)
+    .join("");
+  graphRootInput.value = graph.root_id;
   const depths = graphDepths(graph);
   const relationsByTarget = {};
   graph.edges.forEach((edge) => {
@@ -452,12 +617,18 @@ async function loadGraphPicker(selectedId = state.graphId) {
   const response = await fetch("/api/v1/graphs");
   if (!response.ok) return;
   const graphs = await response.json();
+  state.graphs = graphs;
   const previousCompareSelection = new Set(
     [...graphComparePickerEl.selectedOptions].map((option) => option.value),
+  );
+  const previousGallerySelection = new Set(
+    [...graphGalleryPickerEl.selectedOptions].map((option) => option.value),
   );
   if (!graphs.length) {
     graphPickerEl.classList.add("hidden");
     graphComparePickerEl.innerHTML = '<option disabled>完成分析后这里会出现概念图</option>';
+    graphGalleryPickerEl.innerHTML = '<option disabled>完成分析后这里会出现概念图</option>';
+    graphGalleryEl.innerHTML = '<p class="empty">还没有已保存的概念图。</p>';
     return;
   }
   graphPickerEl.classList.remove("hidden");
@@ -470,6 +641,12 @@ async function loadGraphPicker(selectedId = state.graphId) {
   ).join("");
   [...graphComparePickerEl.options].forEach((option) => {
     option.selected = previousCompareSelection.has(option.value) || option.value === selectedId;
+  });
+  graphGalleryPickerEl.innerHTML = graphs.map((graph) =>
+    `<option value="${escapeHtml(graph.id)}">${escapeHtml(graph.name)} · v${escapeHtml(graph.version)}</option>`,
+  ).join("");
+  [...graphGalleryPickerEl.options].forEach((option) => {
+    option.selected = previousGallerySelection.has(option.value) || option.value === selectedId;
   });
 }
 
@@ -534,6 +711,120 @@ graphCompareForm.addEventListener("submit", async (event) => {
     setGraphCompareMessage(`跨图比较失败：${error.message}`, "error-text");
   } finally {
     graphCompareSubmit.disabled = false;
+  }
+});
+
+function setGraphGalleryMessage(text, kind = "") {
+  graphGalleryMessageEl.textContent = text;
+  graphGalleryMessageEl.className = `form-message ${kind}`;
+}
+
+function renderGraphNodesMarkup(graph, compact = false) {
+  const depths = graphDepths(graph);
+  const relationsByTarget = {};
+  graph.edges.forEach((edge) => {
+    const relations = relationsByTarget[edge.target] || [];
+    relations.push(edge.relation);
+    relationsByTarget[edge.target] = relations;
+  });
+  const nodes = [...graph.nodes].sort(
+    (a, b) => (depths[a.id] - depths[b.id]) || a.label.localeCompare(b.label),
+  );
+  return nodes.map((node) => `
+    <div class="graph-node gallery-node node-${escapeHtml(node.node_type)}" style="--depth:${Math.min(depths[node.id], compact ? 3 : 4)}">
+      <div class="node-content">
+        <div>
+          <span class="node-type">${escapeHtml(node.node_type)}</span>
+          <h3>${escapeHtml(node.label)}</h3>
+          <p>${escapeHtml(node.summary || "暂无说明")}</p>
+        </div>
+      </div>
+      ${relationsByTarget[node.id] ? `<small class="node-relation">${escapeHtml(relationsByTarget[node.id].join(" · "))}</small>` : ""}
+    </div>
+  `).join("");
+}
+
+function renderGraphGallery(graphs, warnings = []) {
+  if (!graphs.length) {
+    graphGalleryEl.innerHTML = '<p class="empty">没有可显示的概念图。</p>';
+    return;
+  }
+  graphGalleryEl.innerHTML = `
+    ${warnings.length ? `<div class="warning-box"><strong>局部视图提示</strong><ul>${warnings.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul></div>` : ""}
+    <div class="graph-gallery-grid">
+      ${graphs.map((graph) => `
+        <article class="graph-gallery-column" data-gallery-graph-id="${escapeHtml(graph.id)}">
+          <div class="graph-gallery-heading">
+            <div>
+              <p class="section-label">${escapeHtml(graph.project_id ? "项目概念图" : "独立概念图")}</p>
+              <h3>${escapeHtml(graph.name)}</h3>
+            </div>
+            <div class="graph-gallery-actions">
+              <span class="tag">v${escapeHtml(graph.version)}</span>
+              <button type="button" class="secondary graph-gallery-open" data-gallery-open="${escapeHtml(graph.id)}">打开编辑</button>
+            </div>
+          </div>
+          <p class="graph-gallery-description">${escapeHtml(graph.description || "暂无描述")}</p>
+          <div class="graph-gallery-tree">${renderGraphNodesMarkup(graph, true)}</div>
+        </article>
+      `).join("")}
+    </div>
+  `;
+}
+
+async function loadGalleryGraph(graphId, nodeIds) {
+  if (nodeIds.length) {
+    const query = encodeURIComponent(nodeIds.join(","));
+    const response = await fetch(`/api/v1/graphs/${encodeURIComponent(graphId)}/subset?node_ids=${query}`);
+    if (!response.ok) throw new Error(await response.text());
+    return response.json().then((data) => data.graph);
+  }
+  const response = await fetch(`/api/v1/graphs/${encodeURIComponent(graphId)}`);
+  if (!response.ok) throw new Error(await response.text());
+  return response.json();
+}
+
+graphGalleryForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const graphIds = [...graphGalleryPickerEl.selectedOptions].map((option) => option.value);
+  if (!graphIds.length) {
+    setGraphGalleryMessage("请至少选择一棵概念图。", "error-text");
+    return;
+  }
+  const nodeIds = graphGalleryNodesInput.value.split(",").map((value) => value.trim()).filter(Boolean);
+  graphGallerySubmit.disabled = true;
+  setGraphGalleryMessage("正在读取并排视图…");
+  try {
+    const settled = await Promise.allSettled(graphIds.map((graphId) => loadGalleryGraph(graphId, nodeIds)));
+    const graphs = [];
+    const warnings = nodeIds.length ? ["这是按节点 ID 生成的临时裁剪视图；源图没有被修改。"] : [];
+    settled.forEach((item, index) => {
+      if (item.status === "fulfilled") {
+        graphs.push(item.value);
+      } else {
+        warnings.push(`图 ${graphIds[index].slice(0, 8)} 加载失败，已跳过：${item.reason?.message || item.reason || "未知错误"}`);
+      }
+    });
+    if (!graphs.length) throw new Error(warnings[warnings.length - 1] || "没有可显示的概念图");
+    renderGraphGallery(graphs, warnings);
+    setGraphGalleryMessage(`已显示 ${graphs.length} 棵概念图。`, "");
+  } catch (error) {
+    setGraphGalleryMessage(`多图视图加载失败：${error.message}`, "error-text");
+  } finally {
+    graphGallerySubmit.disabled = false;
+  }
+});
+
+graphGalleryEl.addEventListener("click", async (event) => {
+  const openButton = event.target.closest("[data-gallery-open]");
+  if (!openButton) return;
+  const graphId = openButton.dataset.galleryOpen;
+  graphPickerEl.value = graphId;
+  try {
+    await refreshGraph();
+    document.querySelector(".graph-card")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  } catch (error) {
+    setGraphGalleryMessage(`切换概念图失败：${error.message}`, "error-text");
   }
 });
 
@@ -671,11 +962,12 @@ graphMetaForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   if (!state.graphId || !state.graph) return;
   const name = graphNameInput.value.trim();
-  if (!name) return;
+  const rootId = graphRootInput.value;
+  if (!name && !rootId) return;
   const response = await fetch(`/api/v1/graphs/${encodeURIComponent(state.graphId)}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name, base_version: state.graph.version }),
+    body: JSON.stringify({ name: name || undefined, root_id: rootId || undefined, base_version: state.graph.version }),
   });
   if (!response.ok) {
     if (response.status === 409) await refreshGraph();
@@ -774,6 +1066,7 @@ function renderAnalysis(result) {
   renderExplanation(result);
   renderPapers(result);
   renderInnovations(result);
+  renderResearchBrief(result);
   renderGraph(result.graph);
   loadGraphPicker(result.graph.id).catch(() => {});
   state.pendingPatches.clear();

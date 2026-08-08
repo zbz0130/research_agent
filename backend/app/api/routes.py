@@ -17,14 +17,15 @@ from app.research_schemas import (
     IdeaCheckCreate,
     IdeaCheckResult,
     NodeExplanationCreate,
+    ResearchBrief,
 )
-from app.schemas import ApiKeyStatusResponse, HealthResponse, Project, ProjectCreate
+from app.schemas import ApiKeyStatusResponse, ApiKeyUpdate, HealthResponse, Project, ProjectCreate
 from app.services.graph_service import GraphConflict, GraphNotFound, graph_service
 from app.services.project_service import project_service
 from app.services.research_service import AnalysisNotFound, research_service
 from app.services.idea_service import IdeaCheckNotFound, idea_service
 from app.services.research_providers import ProviderUnavailable
-from app.services.settings_service import api_key_slots
+from app.services.settings_service import api_key_status as build_api_key_status, update_api_keys
 
 router = APIRouter()
 
@@ -38,7 +39,22 @@ def health(settings: Settings = Depends(get_settings)) -> HealthResponse:
 def api_key_status(settings: Settings = Depends(get_settings)) -> ApiKeyStatusResponse:
     """Expose configuration status without ever returning a raw API key."""
 
-    return ApiKeyStatusResponse(slots=list(api_key_slots(settings)))
+    return build_api_key_status(settings)
+
+
+@router.patch("/settings/api-keys", response_model=ApiKeyStatusResponse, tags=["settings"])
+def update_api_key_status(
+    payload: ApiKeyUpdate,
+    settings: Settings = Depends(get_settings),
+) -> ApiKeyStatusResponse:
+    """Set or clear provider credentials for the current API process.
+
+    The response contains only masked status.  Runtime values are lost on
+    restart; use environment variables or a secret manager for persistent
+    deployment configuration.
+    """
+
+    return update_api_keys(settings, payload)
 
 
 @router.get("/projects", response_model=list[Project], tags=["projects"])
@@ -80,6 +96,23 @@ def get_analysis(analysis_id: UUID) -> AnalysisJob:
         return research_service.get(analysis_id)
     except AnalysisNotFound as exc:
         raise HTTPException(status_code=404, detail="分析任务不存在") from exc
+
+
+@router.get(
+    "/analyses/{analysis_id}/research-brief",
+    response_model=ResearchBrief,
+    tags=["research"],
+)
+def get_research_brief(analysis_id: UUID) -> ResearchBrief:
+    """Return the auditable multi-agent result for a completed research run."""
+
+    try:
+        job = research_service.get(analysis_id)
+    except AnalysisNotFound as exc:
+        raise HTTPException(status_code=404, detail="分析任务不存在") from exc
+    if job.result is None or job.result.research_brief is None:
+        raise HTTPException(status_code=404, detail="该分析没有可用的 Research Brief")
+    return job.result.research_brief
 
 
 @router.post("/ideas/check", response_model=IdeaCheckResult, tags=["research"])

@@ -14,7 +14,7 @@
       ├── 摘要级 EvidenceCard
       ├── 解释 Provider（OpenAI-compatible / 规则回退）
       ├── ConceptGraph 构建
-      ├── research 模式：谨慎的 InnovationCandidate
+      ├── research 模式：三路 AgentRun + ResearchBrief + 谨慎候选
       ├── IdeaCheckService：范围化 prior-art 判断
       └── SQLite Storage：任务、项目、图谱、Patch 和查重记录
       │
@@ -39,6 +39,11 @@ FastAPI API (/api/v1)
   │     └── ExplanationProvider
   │           ├── OpenAICompatibleExplanationProvider
   │           └── RuleBasedExplanationProvider
+  ├── ResearchOrchestrator（research 模式）
+  │     ├── Community Agent（X / 知乎 / Reddit Provider 边界，当前 demo）
+  │     ├── Model Brainstorm Agent（模型或透明启发式回退）
+  │     ├── Paper Future Work Agent（当前摘要级限制线索）
+  │     └── Synthesis Agent（来源分层、候选去重和范围化 arXiv 检查）
   ├── GraphService         版本化概念图和 GraphPatch 审批
   ├── IdeaCheckService     想法查重、相似度分级和替代验证方向
   └── SettingsService      分用途 API Key 状态（不返回明文）
@@ -49,6 +54,8 @@ FastAPI API (/api/v1)
 - `WISHFORGE_PAPER_API_KEY` 只交给论文检索 Provider；
 - `WISHFORGE_EXPLANATION_API_KEY` 只交给解释模型 Provider；
 - `WISHFORGE_EXPERIMENT_API_KEY` 预留给未来执行器，本阶段不会使用；
+- 网页 `PATCH /api/v1/settings/api-keys` 写入的三个槽位只覆盖当前进程内的 `Settings`，重启后回到 `.env`；本地第一版不把明文密钥写进 SQLite；
+- 当前没有登录、租户隔离或权限系统，密钥配置接口只适合本机/受保护内网；公网部署前必须加认证、审计和 Secret Manager；
 - 外部论文或网页内容是“不可信输入”，不能改变系统提示词、工具权限或 API Key；
 - 论文全文只应来自开放来源或用户合法提供的文件。本阶段默认只处理 Semantic Scholar 元数据和摘要。
 - IdeaCheck 的 L0–L4 是检索范围内的分诊信号，不是专利或论文法律意义上的新颖性结论。
@@ -59,11 +66,13 @@ FastAPI API (/api/v1)
 |---|---|---|
 | GET | `/api/v1/health` | 健康检查 |
 | GET | `/api/v1/settings/api-keys` | 获取各用途密钥的配置状态和掩码 |
+| PATCH | `/api/v1/settings/api-keys` | 在当前进程设置/清除各用途密钥（只返回掩码） |
 | GET | `/api/v1/projects` | 获取研究项目 |
 | POST | `/api/v1/projects` | 创建草稿项目 |
 | POST | `/api/v1/analyses` | 创建异步概念分析任务，返回 `202` 和任务 ID |
 | GET | `/api/v1/analyses` | 查看最近分析任务摘要 |
 | GET | `/api/v1/analyses/{analysis_id}` | 查看状态、阶段进度和完成结果 |
+| GET | `/api/v1/analyses/{analysis_id}/research-brief` | 单独读取 research 模式的三路 Agent Brief |
 | POST | `/api/v1/ideas/check` | 对一个研究想法做有界 prior-art 判断并保存结果 |
 | GET | `/api/v1/ideas/checks` | 获取已保存的想法查重记录 |
 | GET | `/api/v1/ideas/checks/{check_id}` | 获取一条想法查重记录 |
@@ -86,6 +95,7 @@ FastAPI API (/api/v1)
 - `explanation`：一句话、直觉类比、技术机制、演变、相关概念、限制和关联证据 ID；
 - `graph`：节点、边、根节点和版本；
 - `innovation_candidates`：研究模式下的候选、最近工作、风险和验证步骤；
+- `research_brief`：`AgentRun`、社区信号、模型脑暴、论文摘要级限制线索、综合候选、证据覆盖率和 arXiv 范围状态；
 - `IdeaCheckResult`：想法、检索词、匹配论文、L0–L4、置信度、替代方向和验证步骤；
 - `warnings` / `novelty_note`：明确说明 Demo、回退和新颖性检索边界。
 
@@ -116,19 +126,19 @@ Agent 生成 GraphPatch
 
 为保证比赛首版稳定，下列能力先不成为主流程的硬依赖：
 
-- X、知乎、Reddit 的实时爬取；
+- X、知乎、Reddit 的实时爬取（当前仅有明确标记的 demo 社区 Provider 和可替换接口）；
 - “确保 arXiv 没有相同论文”或任何绝对新颖性承诺；
 - 全量 PDF 图表理解和商业数据库的版权内容；
 - 真实仪器控制、耗材管理和任意代码执行；
-- 多用户权限、团队协作和跨多个概念树的自动合并（当前只生成跨图候选，不自动合并）；
+- 多用户权限、团队协作和跨多个概念树的自动合并（当前只生成跨图候选；网页并排画布和临时局部裁剪不会自动合并或写回）；
 
-社区讨论若在后续接入，应标记为探索性痛点信号；模型脑暴应标记为未验证假设；论文 `Discussion`、`Conclusion`、`Limitations` 和 `Future Work` 应单独保存原文定位，不能与事实证据混成一栏。
+社区讨论若在后续接入，应标记为探索性痛点信号；模型脑暴应标记为未验证假设；当前论文分支只有摘要级线索，已明确标为 `abstract_signal`，不能声称读过全文 `Discussion`。接入合法的 PDF / HTML 全文后，再把 `Discussion`、`Conclusion`、`Limitations` 和 `Future Work` 单独保存原文定位，不能与事实证据混成一栏。
 
 ## 6. 后续演进路线
 
 1. **持久化层**：SQLite → PostgreSQL，保存 `AnalysisRun`、`Paper`、`Evidence`、`ConceptGraph`、`GraphPatch` 和版本历史。
 2. **主张级证据账本**：把解释拆成 Claim/Paragraph，并绑定 `evidence_ids`、原文位置和支持/反驳关系。
-3. **多 Agent 研究模式**：社区信号、论文 Future Work、模型假设三个子任务并行，增加 `AgentRun`、预算、超时、局部失败和重试。
+3. **多 Agent 研究模式**：当前已实现社区信号、论文摘要限制、模型假设三个子任务并行和 `AgentRun`；下一步增加真实连接器、超时/预算、重试与全文 section 抽取。
 4. **创新核验**：接入 arXiv、OpenAlex、Crossref 等数据源，保存查询词、时间、筛选条件和相似论文；输出“当前检索范围内未发现直接等价工作”。
 5. **实验契约**：生成结构化 `ProtocolSpec`，经过安全检查和人工批准后，先在仿真环境运行。
 6. **隔离执行器**：参考 Curie/EOS/PyLabRobot 的沙箱、协议校验、设备抽象和产物血缘，禁止 Agent 直接获得主机 Shell 权限。
@@ -146,3 +156,4 @@ Agent 生成 GraphPatch
 7. 切换“研究线索”，检查候选和新颖性免责声明；
 8. 在“想法查重”中输入 `PagedAttention 管理 KV cache`，确认会显示 L0–L4、匹配论文和人工核验步骤；
 9. 创建第二棵概念图，在“跨图借鉴”中选择两棵图，确认结果带有低置信度和验证步骤，且原图版本不变。
+10. 在“同时查看多棵概念树”中选择多棵图，分别验收整图并排展示和按节点 ID 的临时裁剪。

@@ -17,6 +17,12 @@ Confidence = Literal["high", "medium", "low"]
 NoveltyLevel = Literal["L0", "L1", "L2", "L3", "L4"]
 ManualReviewStatus = Literal["needs_review", "reviewed", "dismissed"]
 ArxivCheckStatus = Literal["not_checked", "indirect_metadata", "checked", "unavailable"]
+AgentRole = Literal["community", "model_brainstorm", "future_work", "synthesis"]
+AgentRunStatus = Literal["queued", "running", "completed", "failed", "skipped"]
+CommunityPlatform = Literal["x", "知乎", "zhihu", "reddit", "other"]
+ArxivNoveltyStatus = Literal[
+    "not_checked", "no_direct_match_in_scope", "matched", "unavailable", "checked"
+]
 EvidenceLocationKind = Literal["abstract", "page", "section", "figure", "table", "url", "unknown"]
 GraphNodeType = Literal["concept", "method", "problem", "paper", "idea", "note"]
 GraphRelation = Literal[
@@ -221,6 +227,8 @@ class ExplanationResult(BaseModel):
 
 
 class InnovationCandidate(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
     id: str = Field(default_factory=lambda: str(uuid4()))
     title: str
     problem: str
@@ -232,6 +240,124 @@ class InnovationCandidate(BaseModel):
     rationale: str
     validation_steps: list[str] = Field(default_factory=list)
     warning: str | None = None
+    # Provenance is deliberately explicit.  A generated candidate must never
+    # be presented as a verified scientific result or silently mixed with a
+    # paper-backed claim.
+    source_type: Literal[
+        "heuristic", "model_generated", "community_signal", "paper_future_work", "synthesis"
+    ] = "heuristic"
+    source_agent_run_id: str | None = None
+    evidence_ids: list[str] = Field(default_factory=list)
+    arxiv_status: ArxivNoveltyStatus = "not_checked"
+    arxiv_match_paper_ids: list[str] = Field(default_factory=list)
+
+
+class CommunitySignal(BaseModel):
+    """An exploratory pain-point signal from a community platform.
+
+    Community posts are useful for discovering problems, but they are not
+    scientific evidence.  The source and verification fields are mandatory in
+    the object so the UI cannot accidentally render a post as a citation.
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    id: str = Field(default_factory=lambda: str(uuid4()))
+    platform: CommunityPlatform
+    title: str = Field(min_length=1, max_length=500)
+    summary: str = Field(min_length=1, max_length=5000)
+    pain_point: str = Field(default="", max_length=2000)
+    open_question: str = Field(default="", max_length=2000)
+    url: str | None = None
+    observed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    source_type: Literal["community_signal"] = "community_signal"
+    verification_status: VerificationStatus = "unverified"
+    confidence: Confidence = "low"
+
+    @field_validator("url", mode="before")
+    @classmethod
+    def validate_community_url(cls, value: str | None) -> str | None:
+        return _http_url_or_none(value)
+
+
+class FutureWorkSignal(BaseModel):
+    """A limitation/discussion/future-work clue extracted from a paper.
+
+    The first version usually has only abstracts, so ``section`` may be
+    ``abstract_signal``.  This prevents an abstract sentence from being
+    misrepresented as a verified quotation from a paper's Discussion section.
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    id: str = Field(default_factory=lambda: str(uuid4()))
+    paper_id: str
+    paper_title: str
+    section: Literal[
+        "discussion",
+        "conclusion",
+        "limitations",
+        "future_work",
+        "error_analysis",
+        "supplementary",
+        "abstract_signal",
+    ] = "abstract_signal"
+    claim: str
+    excerpt: str
+    evidence_id: str | None = None
+    locator: EvidenceLocator | None = None
+    source_type: Literal["academic"] = "academic"
+    verification_status: VerificationStatus = "unverified"
+    confidence: Confidence = "low"
+
+
+class AgentRun(BaseModel):
+    """Auditable execution record for one bounded research sub-agent."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    id: str = Field(default_factory=lambda: str(uuid4()))
+    role: AgentRole
+    status: AgentRunStatus = "queued"
+    provider: str
+    query_terms: list[str] = Field(default_factory=list)
+    input_paper_ids: list[str] = Field(default_factory=list)
+    output_ids: list[str] = Field(default_factory=list)
+    evidence_ids: list[str] = Field(default_factory=list)
+    summary: str = ""
+    warnings: list[str] = Field(default_factory=list)
+    error: str | None = None
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    duration_ms: int | None = Field(default=None, ge=0)
+
+
+class ResearchBrief(BaseModel):
+    """Structured result of the research-mode multi-agent orchestration.
+
+    ``innovation_candidates`` is the synthesis output.  The three upstream
+    collections remain separate so a user can inspect which ideas came from
+    community signals, model brainstorming, or paper limitations before
+    accepting the synthesis.
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    id: str = Field(default_factory=lambda: str(uuid4()))
+    topic: str
+    objective: str = "发现研究痛点、候选方向和最小验证路径"
+    agent_runs: list[AgentRun] = Field(default_factory=list)
+    community_signals: list[CommunitySignal] = Field(default_factory=list)
+    model_ideas: list[InnovationCandidate] = Field(default_factory=list)
+    future_work_signals: list[FutureWorkSignal] = Field(default_factory=list)
+    innovation_candidates: list[InnovationCandidate] = Field(default_factory=list)
+    synthesis: str = ""
+    arxiv_status: ArxivNoveltyStatus = "not_checked"
+    arxiv_checked_terms: list[str] = Field(default_factory=list)
+    arxiv_match_paper_ids: list[str] = Field(default_factory=list)
+    coverage: dict[str, float] = Field(default_factory=dict)
+    warnings: list[str] = Field(default_factory=list)
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class AnalysisResult(BaseModel):
@@ -249,6 +375,7 @@ class AnalysisResult(BaseModel):
     graph: ConceptGraph
     innovation_candidates: list[InnovationCandidate] = Field(default_factory=list)
     novelty_note: str | None = None
+    research_brief: ResearchBrief | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 

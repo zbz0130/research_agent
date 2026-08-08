@@ -1,0 +1,62 @@
+from fastapi.testclient import TestClient
+
+from app.config import Settings, get_settings
+from app.main import app
+
+
+client = TestClient(app)
+
+
+def test_runtime_api_key_update_is_masked_and_separated() -> None:
+    settings = Settings(
+        paper_provider="semantic_scholar",
+        explanation_provider="openai",
+        experiment_provider="remote_runner",
+    )
+    app.dependency_overrides[get_settings] = lambda: settings
+    try:
+        response = client.patch(
+            "/api/v1/settings/api-keys",
+            json={
+                "paper_search": "paper-secret-1234",
+                "explanation_model": "explanation-secret-5678",
+                "experiment_runner": "runner-secret-9012",
+            },
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["storage"] == "runtime_memory"
+        slots = {slot["id"]: slot for slot in body["slots"]}
+        assert slots["paper_search"]["configured"] is True
+        assert slots["paper_search"]["masked"] == "••••••••1234"
+        assert slots["explanation_model"]["masked"] == "••••••••5678"
+        assert slots["experiment_runner"]["masked"] == "••••••••9012"
+        assert "paper-secret-1234" not in response.text
+        assert "explanation-secret-5678" not in response.text
+        assert "runner-secret-9012" not in response.text
+
+        cleared = client.patch(
+            "/api/v1/settings/api-keys",
+            json={"paper_search": ""},
+        )
+        assert cleared.status_code == 200
+        cleared_slots = {slot["id"]: slot for slot in cleared.json()["slots"]}
+        assert cleared_slots["paper_search"]["configured"] is False
+        assert cleared_slots["experiment_runner"]["configured"] is True
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_runtime_api_key_update_requires_a_slot() -> None:
+    response = client.patch("/api/v1/settings/api-keys", json={})
+    assert response.status_code == 422
+
+
+def test_invalid_runtime_api_key_request_does_not_echo_secret() -> None:
+    secret = "x" * 501
+    response = client.patch(
+        "/api/v1/settings/api-keys",
+        json={"paper_search": secret},
+    )
+    assert response.status_code == 422
+    assert secret not in response.text

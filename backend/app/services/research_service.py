@@ -20,6 +20,7 @@ from app.research_schemas import (
     ExplanationResult,
     InnovationCandidate,
     PaperRecord,
+    ResearchBrief,
     GraphOperation,
     GraphPatch,
     GraphPatchCreate,
@@ -35,6 +36,7 @@ from app.services.research_providers import (
     SearchProvider,
     SemanticScholarProvider,
 )
+from app.services.research_orchestration import research_orchestrator
 
 
 class AnalysisNotFound(KeyError):
@@ -47,6 +49,10 @@ class ResearchService:
     def __init__(self) -> None:
         self._jobs: dict[UUID, AnalysisJob] = {}
         self._lock = RLock()
+        # Tests and local callers can clear the store while an async job is
+        # still finishing a provider call.  A generation token prevents that
+        # stale worker from writing a graph or analysis row into the next run.
+        self._generation = 0
         self._executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="wishforge-analysis")
 
     def create(self, payload: AnalysisCreate, settings: Settings) -> AnalysisJob:
@@ -57,9 +63,10 @@ class ResearchService:
             project_id=payload.project_id,
         )
         with self._lock:
+            generation = self._generation
             self._jobs[job.id] = job
             storage.save_analysis(job)
-        self._executor.submit(self._run, job.id, payload, settings)
+        self._executor.submit(self._run, job.id, payload, settings, generation)
         return job.model_copy(deep=True)
 
     def get(self, job_id: UUID) -> AnalysisJob:
@@ -92,6 +99,7 @@ class ResearchService:
 
     def clear(self) -> None:
         with self._lock:
+            self._generation += 1
             self._jobs.clear()
         graph_service.clear()
         storage.clear_research()
@@ -142,9 +150,26 @@ class ResearchService:
         )
         return graph_service.create_patch(graph_id, patch), warnings
 
-    def _run(self, job_id: UUID, payload: AnalysisCreate, settings: Settings) -> None:
+    def _run(
+        self,
+        job_id: UUID,
+        payload: AnalysisCreate,
+        settings: Settings,
+        generation: int | None = None,
+    ) -> None:
         try:
-            self._update(job_id, status="running", progress=8, message="正在理解概念并准备检索")
+            if generation is None:
+                with self._lock:
+                    generation = self._generation
+            if not self._is_generation_current(generation):
+                return
+            self._update(
+                job_id,
+                generation=generation,
+                status="running",
+                progress=8,
+                message="正在理解概念并准备检索",
+            )
             warnings: list[str] = []
             search_terms: list[str] = []
             search_provider = _search_provider(settings)
@@ -168,6 +193,7 @@ class ResearchService:
                     progress = 25 + min(index * 8, 20)
                     self._update(
                         job_id,
+                        generation=generation,
                         progress=progress,
                         message=f"正在通过 {search_provider.name} 检索：{query}",
                     )
@@ -186,9 +212,9 @@ class ResearchService:
                 if not papers:
                     warnings.append("检索没有返回论文，请尝试补充英文关键词或切换数据源。")
 
-            self._update(job_id, progress=52, message="正在生成段落级证据卡")
+            self._update(job_id, generation=generation, progress=52, message="正在生成段落级证据卡")
             evidence = _build_evidence(payload.concept, papers)
-            self._update(job_id, progress=70, message="正在生成分层解释和概念关系")
+            self._update(job_id, generation=generation, progress=70, message="正在生成分层解释和概念关系")
             explanation_provider = _explanation_provider(settings)
             try:
                 explanation = explanation_provider.explain(
@@ -220,7 +246,9 @@ class ResearchService:
                 linked_ids = [item.id for item in evidence]
             explanation = explanation.model_copy(update={"evidence_ids": linked_ids})
 
-            self._update(job_id, progress=86, message="正在构建概念树")
+            self._update(job_id, generation=generation, progress=86, message="正在构建概念树")
+            if not self._is_generation_current(generation):
+                return
             graph = _build_graph(
                 payload.concept,
                 papers,
@@ -229,12 +257,40 @@ class ResearchService:
                 project_id=payload.project_id,
                 graph_name=payload.graph_name,
             )
-            graph_service.save(graph)
-            innovation_candidates = (
-                _build_innovation_candidates(payload.concept, papers, explanation)
-                if payload.level == "research"
-                else []
-            )
+            with self._lock:
+                if generation != self._generation:
+                    return
+                graph_service.save(graph)
+            innovation_candidates: list[InnovationCandidate] = []
+            research_brief: ResearchBrief | None = None
+            if payload.level == "research":
+                # Research mode is intentionally a bounded fan-out: community
+                # signals, model/heuristic brainstorming and paper limitation
+                # extraction run concurrently, then a synthesis record joins
+                # them.  A branch failure is surfaced inside the brief rather
+                # than turning a missing community connector into a false
+                # novelty claim.
+                self._update(
+                    job_id,
+                    generation=generation,
+                    progress=90,
+                    message="三个研究 Agent 并行寻找痛点、脑暴和 Future Work",
+                )
+                baseline_candidates = _build_innovation_candidates(
+                    payload.concept, papers, explanation
+                )
+                research_brief = research_orchestrator.run(
+                    payload.concept,
+                    papers,
+                    evidence,
+                    search_provider,
+                    settings,
+                    explanation_provider=explanation_provider,
+                    language=payload.language,
+                    existing_candidates=baseline_candidates,
+                )
+                innovation_candidates = research_brief.innovation_candidates
+                warnings.extend(research_brief.warnings)
             result = AnalysisResult(
                 id=str(job_id),
                 concept=payload.concept,
@@ -254,13 +310,15 @@ class ResearchService:
                 graph=graph,
                 innovation_candidates=innovation_candidates,
                 novelty_note=(
-                    "在当前 Provider 返回的资料范围内未发现直接等价工作的候选，不能据此证明全球不存在相似研究。"
+                    "在当前 Provider、关键词、时间和返回数量范围内未发现直接等价工作的候选，不能据此证明全球不存在相似研究。"
                     if payload.level == "research"
                     else None
                 ),
+                research_brief=research_brief,
             )
             self._update(
                 job_id,
+                generation=generation,
                 status="completed",
                 progress=100,
                 message="分析完成",
@@ -270,6 +328,7 @@ class ResearchService:
         except Exception as exc:  # noqa: BLE001 - job must expose failure to the UI
             self._update(
                 job_id,
+                generation=generation,
                 status="failed",
                 progress=100,
                 message="分析失败",
@@ -277,8 +336,14 @@ class ResearchService:
                 completed_at=datetime.now(timezone.utc),
             )
 
-    def _update(self, job_id: UUID, **changes: object) -> None:
+    def _is_generation_current(self, generation: int) -> bool:
         with self._lock:
+            return generation == self._generation
+
+    def _update(self, job_id: UUID, *, generation: int | None = None, **changes: object) -> None:
+        with self._lock:
+            if generation is not None and generation != self._generation:
+                return
             job = self._jobs.get(job_id)
             if job is not None:
                 for key, value in changes.items():

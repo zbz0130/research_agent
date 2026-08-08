@@ -2,7 +2,7 @@
 
 面向科研人员的证据驱动研究工作台：把一个模糊想法变成有来源、能理解、可继续研究的知识。
 
-当前仓库处于 **Stage 1：概念分析与研究线索 MVP**。这一阶段已经打通“概念 → 论文检索 → 证据卡 → 易懂解释 → 概念图”的首条闭环，并新增“研究想法 → 范围化 prior-art 判断”和“多图 → 跨领域候选”的可验收入口。真实实验执行、社交平台抓取、全文页码级证据和团队权限仍属于后续阶段。
+当前仓库处于 **Stage 1：概念分析与研究线索 MVP**。这一阶段已经打通“概念 → 论文检索 → 证据卡 → 易懂解释 → 概念图”的首条闭环，并新增“研究想法 → 范围化 prior-art 判断”“三路研究 Agent Brief”和“多图 → 跨领域候选”的可验收入口。真实社交平台实时抓取、全文页码级证据、团队权限和实验执行仍属于后续阶段。
 
 ## 当前分支
 
@@ -10,7 +10,7 @@
 
 ```text
 main
-  └── codex/literature-explanation  # 当前阶段：概念分析 MVP（待验收）
+  └── codex/literature-explanation  # 当前阶段：概念分析 + 研究 Brief + 多图视图（待验收）
 ```
 
 每个阶段完成后先由项目负责人验收，再合并到 `main`。未通过验收的阶段不会直接进入 `main`。
@@ -22,8 +22,10 @@ main
 - **快速解释**：不检索论文，立即给出透明的基础解释；
 - **文献解释**：通过 Semantic Scholar 检索，或在无网络时使用明确标记的 Demo 资料，生成论文列表、摘要级证据卡、分层解释和概念图；
 - **研究线索**：在文献解释的基础上，用“限制 / future work / 方法对比”检索词做一次有预算的 prior-art 扩展，再生成探索性候选，列出最近资料、风险、可行性和最小验证步骤。
+- **三路研究 Brief**：研究模式会并行记录社区痛点 Agent、模型/启发式脑暴 Agent 和论文限制/Future Work Agent，再由综合记录汇总候选。社区内容和模型脑暴始终与学术证据分栏显示；当前没有实时 X、知乎、Reddit 连接器，也没有把摘要伪装成全文 Discussion。
 - **想法查重**：输入一段研究想法，展示实际检索词、匹配论文、摘要级证据、L0–L4 相似度分级、替代方向和最小验证步骤；结果保存到 SQLite，方便回看。
 - **跨图借鉴**：保存多棵概念图后，可选择多图和节点子集，生成带关系类型、证据 ID、风险提示和验证步骤的跨领域候选；候选不会自动写回原图。
+- **多图画布**：在网页中选择多棵已保存概念图并排查看，也可以按节点 ID生成临时局部视图；局部视图不改变源图。
 
 概念图支持改名、节点手动编辑/新增，以及让 Agent 为节点生成解释。所有 Agent 修改都通过 `GraphPatch`：先进入“待批准”状态，服务端按图谱版本检查冲突后才应用；用户自己的修改则立即应用。
 
@@ -90,6 +92,23 @@ WISHFORGE_EXPLANATION_BASE_URL  # OpenAI-compatible 服务地址
 GET /api/v1/settings/api-keys
 ```
 
+网页也可以通过下面的接口配置或清除当前进程的密钥：
+
+```text
+PATCH /api/v1/settings/api-keys
+Content-Type: application/json
+
+{
+  "paper_search": "sk-...",
+  "explanation_model": "sk-...",
+  "experiment_runner": "sk-..."
+}
+```
+
+接口只返回掩码和 `configured` 状态，绝不返回明文。第一版把网页输入保存在当前 API 进程的内存中，服务重启后消失；正式部署应改用操作系统密钥环或 Secret Manager。传入空字符串可清除对应槽位。
+
+当前接口没有用户登录和权限系统，网页密钥配置只适合本机或受保护的内网演示；不要把这个版本直接暴露到公网。
+
 也可以不用网页，直接用 API 验收一轮：
 
 ```powershell
@@ -100,7 +119,13 @@ $job = Invoke-RestMethod -Method Post http://localhost:8000/api/v1/analyses `
 Invoke-RestMethod "http://localhost:8000/api/v1/analyses/$($job.id)"
 ```
 
-返回的 `result` 中会有 `papers`、`evidence`、`explanation`、`graph` 和 `innovation_candidates`。`GraphPatch` 的 Agent 提案先调用创建接口，再调用 `apply` 或 `reject`；用户手动修改则带 `actor: "user"` 立即应用。
+返回的 `result` 中会有 `papers`、`evidence`、`explanation`、`graph` 和 `innovation_candidates`。当 `level=research` 时还会有 `research_brief`，其中按角色保存 `agent_runs`、社区信号、模型候选、论文摘要级限制线索、综合候选、覆盖率和 arXiv 范围状态。`GraphPatch` 的 Agent 提案先调用创建接口，再调用 `apply` 或 `reject`；用户手动修改则带 `actor: "user"` 立即应用。
+
+研究 Brief 也可以单独读取：
+
+```text
+GET /api/v1/analyses/{analysis_id}/research-brief
+```
 
 想法查重示例：
 
@@ -122,13 +147,15 @@ docker compose up --build
 
 - `GET /api/v1/health` 返回 `status=ok`，服务名称显示为许愿机；
 - Web 首页可以打开并显示 API 状态；
-- Web 首页可以看到论文检索、解释模型和实验执行三个独立密钥槽位；
+- Web 首页可以看到并配置论文检索、解释模型和实验执行三个独立密钥槽位（当前进程内存，不回显明文）；
 - 可以创建和查看一个研究项目，并在服务重启后从 SQLite 恢复；
 - 可以创建异步概念分析任务并轮询阶段进度；
 - 文献模式能返回论文元数据、摘要级证据卡、分层解释和概念图；
 - 研究模式能返回谨慎的创新候选和新颖性范围说明；
+- 研究模式能返回社区 / 模型脑暴 / 论文限制三路 AgentRun，以及综合候选和来源标签；
 - 可以通过 `POST /api/v1/ideas/check` 对一个研究想法做范围化 prior-art 判断，并通过 `GET /api/v1/ideas/checks` 回看记录；
 - 可以通过 `POST /api/v1/graphs/compare` 选择多棵概念图或节点子集，生成未验证的跨图候选；
+- Web 页面可以把多棵概念图并排显示，并按节点 ID生成不落库的局部画布；
 - 可以获取概念图、手动新增/编辑节点，并提交 Agent GraphPatch 后批准或拒绝；
 - 分析任务、概念图、Patch、项目和想法查重结果写入 SQLite，重启后可恢复；
 - 图谱版本冲突会返回 `409 Conflict`，防止旧提案覆盖新修改；
@@ -136,4 +163,4 @@ docker compose up --build
 - README、架构说明和后续执行器边界清晰；
 - 不在本阶段引入任意代码执行权限。
 
-下一阶段优先实现全文/用户文献库、主张级证据绑定、arXiv/OpenAlex/Crossref 多源检索、Discussion/Future Work 结构化阅读和 Agent 子任务状态；之后再接入经过人工批准、默认只读的隔离计算实验执行器。
+下一阶段优先实现全文/用户文献库、主张级证据绑定、arXiv/OpenAlex/Crossref 多源检索、真实社区连接器、Discussion/Future Work 结构化阅读和更严格的 Agent 预算/重试；之后再接入经过人工批准、默认只读的隔离计算实验执行器。

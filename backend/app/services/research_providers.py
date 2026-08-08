@@ -1,3 +1,4 @@
+import json
 import re
 import hashlib
 from datetime import datetime, timezone
@@ -6,7 +7,14 @@ from typing import Protocol
 
 import httpx
 
-from app.research_schemas import ExplanationResult, EvidenceCard, PaperRecord
+from app.research_schemas import (
+    CommunitySignal,
+    EvidenceCard,
+    ExplanationResult,
+    FutureWorkSignal,
+    InnovationCandidate,
+    PaperRecord,
+)
 
 
 class ProviderUnavailable(RuntimeError):
@@ -31,6 +39,36 @@ class ExplanationProvider(Protocol):
         audience: str,
         language: str,
     ) -> ExplanationResult:
+        ...
+
+
+class BrainstormProvider(Protocol):
+    """Optional model capability used by the research-mode brainstorm agent."""
+
+    name: str
+
+    def brainstorm(
+        self,
+        concept: str,
+        papers: Sequence[PaperRecord],
+        evidence: Sequence[EvidenceCard],
+        language: str,
+    ) -> list[InnovationCandidate]:
+        ...
+
+
+class SynthesisProvider(Protocol):
+    """Optional model capability for combining the three research branches."""
+
+    name: str
+
+    def synthesize_research(
+        self,
+        concept: str,
+        community_signals: Sequence[CommunitySignal],
+        model_ideas: Sequence[InnovationCandidate],
+        future_work_signals: Sequence[FutureWorkSignal],
+    ) -> tuple[str, list[InnovationCandidate]]:
         ...
 
 
@@ -313,6 +351,171 @@ related_concepts（字符串数组）、limitations（字符串数组）、evide
             return ExplanationResult.model_validate_json(_strip_code_fence(content))
         except (httpx.HTTPError, KeyError, TypeError, ValueError, AttributeError) as exc:
             raise ProviderUnavailable(f"解释模型暂时不可用：{exc}") from exc
+
+    def brainstorm(
+        self,
+        concept: str,
+        papers: Sequence[PaperRecord],
+        evidence: Sequence[EvidenceCard],
+        language: str,
+    ) -> list[InnovationCandidate]:
+        """Ask the configured compatible model for explicitly unverified ideas.
+
+        This is a separate method from ``explain`` so the service can expose
+        which model call produced a candidate and can fall back to the
+        deterministic heuristic without pretending the two are equivalent.
+        """
+
+        paper_payload = "\n".join(
+            f"- {paper.title} ({paper.year or 'n.d.'})\n  摘要：{paper.abstract[:900]}"
+            for paper in papers[:10]
+        )
+        evidence_payload = "\n".join(
+            f"[{item.id}] {item.claim}\n原文：{item.excerpt[:900]}" for item in evidence[:10]
+        )
+        prompt = f"""
+你是 WishForge 的科研创新脑暴 Agent。围绕“{concept}”提出最多 3 个可检验的研究候选。
+语言：{language}。只能把论文资料支持的内容当作背景，所有候选都必须标记为未验证。
+返回 JSON 对象，唯一字段为 candidates；其值是对象数组。每个对象必须包含：
+title、problem、mechanism、nearest_work（字符串数组）、novelty_level（只能是 L0/L1/L2/L3/L4）、
+confidence（只能是 high/medium/low，建议 low）、feasibility（low/medium/high）、rationale、
+validation_steps（字符串数组）、warning（字符串）。不要声称“保证原创”或“arXiv 没有”。
+
+论文资料：
+{paper_payload or '无'}
+
+证据卡：
+{evidence_payload or '无'}
+""".strip()
+        try:
+            response = httpx.post(
+                f"{self.base_url}/chat/completions",
+                headers={"Authorization": f"Bearer {self.api_key}"},
+                json={
+                    "model": self.model,
+                    "temperature": 0.4,
+                    "response_format": {"type": "json_object"},
+                    "messages": [
+                        {"role": "system", "content": "你是一名严谨、保守、重视可复现性的科研方法专家。"},
+                        {"role": "user", "content": prompt},
+                    ],
+                },
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+            content = response.json()["choices"][0]["message"]["content"]
+            if not isinstance(content, str):
+                raise ProviderUnavailable("创新脑暴模型返回的 content 不是字符串。")
+            payload = json.loads(_strip_code_fence(content))
+            raw_candidates = payload.get("candidates") if isinstance(payload, dict) else None
+            if not isinstance(raw_candidates, list):
+                raise ProviderUnavailable("创新脑暴模型没有返回 candidates 数组。")
+            candidates: list[InnovationCandidate] = []
+            for item in raw_candidates[:3]:
+                if not isinstance(item, dict):
+                    continue
+                candidate = InnovationCandidate.model_validate(item).model_copy(
+                    update={
+                        "source_type": "model_generated",
+                        "confidence": "low",
+                        "warning": item.get("warning")
+                        or "模型生成的待验证候选，不是已确认的新颖成果。",
+                        "evidence_ids": [evidence_item.id for evidence_item in evidence],
+                    }
+                )
+                candidates.append(candidate)
+            if not candidates:
+                raise ProviderUnavailable("创新脑暴模型返回的候选无法通过结构校验。")
+            return candidates
+        except ProviderUnavailable:
+            raise
+        except (httpx.HTTPError, KeyError, TypeError, ValueError, AttributeError) as exc:
+            raise ProviderUnavailable(f"创新脑暴模型暂时不可用：{exc}") from exc
+
+    def synthesize_research(
+        self,
+        concept: str,
+        community_signals: Sequence[CommunitySignal],
+        model_ideas: Sequence[InnovationCandidate],
+        future_work_signals: Sequence[FutureWorkSignal],
+    ) -> tuple[str, list[InnovationCandidate]]:
+        """Synthesize bounded upstream artifacts into cautious candidates."""
+
+        community_payload = "\n".join(
+            f"- [{item.platform}] {item.title}\n  痛点：{item.pain_point}\n  问题：{item.open_question}"
+            for item in community_signals[:8]
+        )
+        model_payload = "\n".join(
+            f"- {item.title}\n  问题：{item.problem}\n  机制：{item.mechanism}"
+            for item in model_ideas[:6]
+        )
+        future_payload = "\n".join(
+            f"- {item.paper_title} [{item.section}]：{item.excerpt[:700]}"
+            for item in future_work_signals[:8]
+        )
+        prompt = f"""
+你是 WishForge 的研究综合 Agent。请综合以下三类输入，围绕“{concept}”生成最多 4 个
+值得人工核验的创新候选。社区内容只能作为痛点信号，论文内容目前主要是摘要级线索。
+不要声称全球唯一、保证原创或 arXiv 上不存在相同工作。
+返回 JSON 对象，字段：summary（字符串）、candidates（对象数组）。candidates 每项必须包含：
+title、problem、mechanism、nearest_work（字符串数组）、novelty_level（L0-L4）、confidence、
+feasibility、rationale、validation_steps（字符串数组）、warning。
+
+社区信号：
+{community_payload or '无'}
+
+模型脑暴：
+{model_payload or '无'}
+
+论文限制 / Future Work 线索：
+{future_payload or '无'}
+""".strip()
+        try:
+            response = httpx.post(
+                f"{self.base_url}/chat/completions",
+                headers={"Authorization": f"Bearer {self.api_key}"},
+                json={
+                    "model": self.model,
+                    "temperature": 0.2,
+                    "response_format": {"type": "json_object"},
+                    "messages": [
+                        {"role": "system", "content": "你是一名保守、可审计的科研综述编辑。"},
+                        {"role": "user", "content": prompt},
+                    ],
+                },
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+            content = response.json()["choices"][0]["message"]["content"]
+            if not isinstance(content, str):
+                raise ProviderUnavailable("研究综合模型返回的 content 不是字符串。")
+            payload = json.loads(_strip_code_fence(content))
+            if not isinstance(payload, dict) or not isinstance(payload.get("candidates"), list):
+                raise ProviderUnavailable("研究综合模型没有返回 candidates 数组。")
+            candidates: list[InnovationCandidate] = []
+            for item in payload["candidates"][:4]:
+                if not isinstance(item, dict):
+                    continue
+                candidates.append(
+                    InnovationCandidate.model_validate(item).model_copy(
+                        update={
+                            "source_type": "synthesis",
+                            "confidence": "low",
+                            "warning": item.get("warning")
+                            or "综合模型生成的待验证候选，不是已确认的新颖成果。",
+                        }
+                    )
+                )
+            if not candidates:
+                raise ProviderUnavailable("研究综合模型返回的候选无法通过结构校验。")
+            summary = payload.get("summary")
+            if not isinstance(summary, str) or not summary.strip():
+                summary = f"模型综合了社区、脑暴和论文 Future Work 线索，形成 {len(candidates)} 个待验证候选。"
+            return summary.strip()[:4000], candidates
+        except ProviderUnavailable:
+            raise
+        except (httpx.HTTPError, KeyError, TypeError, ValueError, AttributeError) as exc:
+            raise ProviderUnavailable(f"研究综合模型暂时不可用：{exc}") from exc
 
 
 def _strip_code_fence(content: str) -> str:

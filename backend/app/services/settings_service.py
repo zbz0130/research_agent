@@ -1,7 +1,8 @@
 from collections.abc import Iterable
 
 from app.config import Settings
-from app.schemas import ApiKeySlot
+from app.schemas import ApiKeySlot, ApiKeyStatusResponse, ApiKeyUpdate
+from pydantic import SecretStr
 
 
 def mask_secret(secret: str | None) -> str | None:
@@ -49,3 +50,39 @@ def api_key_slots(settings: Settings) -> Iterable[ApiKeySlot]:
             masked=mask_secret(raw_secret),
             environment_variable=environment_variable,
         )
+
+
+def api_key_status(settings: Settings) -> ApiKeyStatusResponse:
+    """Build the public status view without ever serializing a secret."""
+
+    runtime_slots = getattr(settings, "_runtime_api_key_slots", set())
+    storage = "runtime_memory" if runtime_slots else "environment"
+    return ApiKeyStatusResponse(slots=list(api_key_slots(settings)), storage=storage)
+
+
+def update_api_keys(settings: Settings, payload: ApiKeyUpdate) -> ApiKeyStatusResponse:
+    """Apply a local, process-memory credential overlay.
+
+    The provider services construct their clients for each job, so changing a
+    setting here takes effect for subsequent requests without restarting the
+    API.  We deliberately do not persist these values to SQLite or echo them
+    in the response.
+    """
+
+    slot_to_attribute = {
+        "paper_search": "paper_api_key",
+        "explanation_model": "explanation_api_key",
+        "experiment_runner": "experiment_api_key",
+    }
+    values = payload.model_dump(exclude_unset=True)
+    runtime_slots = getattr(settings, "_runtime_api_key_slots", None)
+    if runtime_slots is None:
+        runtime_slots = set()
+        setattr(settings, "_runtime_api_key_slots", runtime_slots)
+    for slot_id, raw_value in values.items():
+        attribute = slot_to_attribute[slot_id]
+        # An empty value is an explicit clear operation.  Never log or retain
+        # a second plain-string copy of a credential.
+        setattr(settings, attribute, SecretStr(raw_value) if raw_value else None)
+        runtime_slots.add(slot_id)
+    return api_key_status(settings)

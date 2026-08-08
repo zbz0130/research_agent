@@ -120,7 +120,11 @@
               概念图名称
               <input id="graph-name" maxlength="200" placeholder="例如：注意力机制知识树" />
             </label>
-            <button type="submit" class="secondary">保存名称</button>
+            <label>
+              图谱根节点
+              <select id="graph-root" aria-label="选择概念图根节点"></select>
+            </label>
+            <button type="submit" class="secondary">保存图谱设置</button>
           </form>
           <div class="graph-actions hidden" id="graph-actions">
             <button type="button" class="secondary" id="agent-propose">让 Agent 提议一个节点</button>
@@ -153,6 +157,20 @@
         </p>
         <div id="innovations" class="innovation-list"></div>
         <p id="novelty-note" class="novelty-note"></p>
+      </section>
+
+      <section class="card research-brief-card hidden" id="research-brief-card">
+        <div class="card-heading">
+          <div>
+            <p class="eyebrow">MULTI-AGENT RESEARCH BRIEF</p>
+            <h2>三路研究线索与综合结果</h2>
+          </div>
+          <span class="tag tag-beta">来源分层</span>
+        </div>
+        <p class="settings-note">
+          社区 Agent 用来发现痛点，脑暴 Agent 用来提出假设，论文 Agent 用来整理限制或 Future Work；三者都不会自动变成科学结论。
+        </p>
+        <div id="research-brief" class="research-brief-content"></div>
       </section>
 
       <section class="card evidence-card">
@@ -215,6 +233,38 @@
         <div id="graph-compare-result" class="graph-compare-result hidden"></div>
       </section>
 
+      <section class="card graph-gallery-card">
+        <div class="card-heading">
+          <div>
+            <p class="eyebrow">MULTI-GRAPH CANVAS</p>
+            <h2>同时查看多棵概念树</h2>
+          </div>
+          <span class="tag tag-beta">局部视图</span>
+        </div>
+        <p class="settings-note">
+          选择两棵或更多概念图并排查看。填写节点 ID 后，每一列会保留这些节点及其层级祖先；这是临时视图，不会修改数据库中的原图。
+        </p>
+        <form id="graph-gallery-form" class="analysis-form">
+          <label>
+            要显示的概念图（可多选）
+            <select id="graph-gallery-picker" multiple size="4" aria-label="选择要并排显示的概念图">
+              <option disabled>完成分析后这里会出现概念图</option>
+            </select>
+          </label>
+          <label>
+            可选：只显示这些节点（逗号分隔）
+            <input id="graph-gallery-nodes" maxlength="1200" placeholder="例如：root,problem-a,method-b；留空表示整棵图" />
+          </label>
+          <div class="form-actions">
+            <button type="submit" id="graph-gallery-submit">显示选中概念图</button>
+            <span id="graph-gallery-message" class="form-message" role="status"></span>
+          </div>
+        </form>
+        <div id="graph-gallery" class="graph-gallery">
+          <p class="empty">选择概念图后，这里会并排显示它们的层级结构。</p>
+        </div>
+      </section>
+
       <section class="grid">
         <article class="card settings-card">
           <div class="card-heading">
@@ -225,12 +275,18 @@
             <button id="refresh-settings" class="secondary" type="button">刷新状态</button>
           </div>
           <p class="settings-note">
-            论文检索、解释模型和实验执行使用不同密钥。密钥从本地 <code>.env</code> 读取，
-            网页只显示状态和掩码，不会显示明文。
+            论文检索、解释模型和实验执行使用不同密钥。可以在这里临时配置当前 API 进程使用的密钥；
+            网页只显示状态和掩码，不会显示明文。重启服务后，网页配置会清除，持久配置请放在本地 <code>.env</code> 或 Secret Manager。
           </p>
-          <div id="api-keys" class="settings-list">
-            <p class="empty">正在读取配置状态…</p>
-          </div>
+          <form id="api-key-form" class="api-key-form">
+            <div id="api-keys" class="settings-list">
+              <p class="empty">正在读取配置状态…</p>
+            </div>
+            <div class="form-actions">
+              <button type="submit" id="save-api-keys">保存到当前进程</button>
+              <span id="api-key-message" class="form-message" role="status"></span>
+            </div>
+          </form>
           <p class="settings-hint">
             <code>WISHFORGE_PAPER_API_KEY</code> · <code>WISHFORGE_EXPLANATION_API_KEY</code> ·
             <code>WISHFORGE_EXPERIMENT_API_KEY</code>
