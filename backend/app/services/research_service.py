@@ -1,0 +1,485 @@
+from __future__ import annotations
+
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
+from threading import RLock
+from uuid import UUID
+
+from app.config import Settings
+from app.research_schemas import (
+    AnalysisCreate,
+    AnalysisJob,
+    AnalysisResult,
+    AnalysisSummary,
+    ConceptEdge,
+    ConceptGraph,
+    ConceptNode,
+    ConceptNodeUpdate,
+    EvidenceCard,
+    EvidenceLocator,
+    ExplanationResult,
+    InnovationCandidate,
+    PaperRecord,
+    GraphOperation,
+    GraphPatch,
+    GraphPatchCreate,
+)
+from app.services.graph_service import graph_service
+from app.services.research_providers import (
+    DemoSearchProvider,
+    ExplanationProvider,
+    OpenAICompatibleExplanationProvider,
+    ProviderUnavailable,
+    RuleBasedExplanationProvider,
+    SearchProvider,
+    SemanticScholarProvider,
+)
+
+
+class AnalysisNotFound(KeyError):
+    pass
+
+
+class ResearchService:
+    """Orchestrates the first concept-to-evidence analysis pipeline."""
+
+    def __init__(self) -> None:
+        self._jobs: dict[UUID, AnalysisJob] = {}
+        self._lock = RLock()
+        self._executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="wishforge-analysis")
+
+    def create(self, payload: AnalysisCreate, settings: Settings) -> AnalysisJob:
+        job = AnalysisJob(
+            concept=payload.concept,
+            level=payload.level,
+            audience=payload.audience,
+            project_id=payload.project_id,
+        )
+        with self._lock:
+            self._jobs[job.id] = job
+        self._executor.submit(self._run, job.id, payload, settings)
+        return job.model_copy(deep=True)
+
+    def get(self, job_id: UUID) -> AnalysisJob:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                raise AnalysisNotFound(job_id)
+            return job.model_copy(deep=True)
+
+    def list(self) -> list[AnalysisSummary]:
+        with self._lock:
+            jobs = sorted(self._jobs.values(), key=lambda item: item.created_at, reverse=True)
+            return [
+                AnalysisSummary(
+                    id=job.id,
+                    concept=job.concept,
+                    level=job.level,
+                    project_id=job.project_id,
+                    status=job.status,
+                    progress=job.progress,
+                    message=job.message,
+                    created_at=job.created_at,
+                )
+                for job in jobs
+            ]
+
+    def clear(self) -> None:
+        with self._lock:
+            self._jobs.clear()
+        graph_service.clear()
+
+    def propose_node_explanation(
+        self,
+        graph_id: str,
+        node_id: str,
+        settings: Settings,
+        audience: str = "beginner",
+        language: str = "zh-CN",
+    ) -> tuple[GraphPatch, list[str]]:
+        """Create an Agent GraphPatch containing a concise node explanation.
+
+        The explanation is deliberately proposed, not written directly to the
+        graph. A user must approve the patch through the normal review API.
+        """
+
+        graph = graph_service.get(graph_id)
+        node = next((item for item in graph.nodes if item.id == node_id), None)
+        if node is None:
+            raise AnalysisNotFound(node_id)
+        provider = _explanation_provider(settings)
+        warnings: list[str] = []
+        try:
+            explanation = provider.explain(node.label, [], [], audience, language)
+        except ProviderUnavailable as exc:
+            if not settings.demo_mode:
+                raise
+            warnings.append(str(exc))
+            provider = RuleBasedExplanationProvider()
+            explanation = provider.explain(node.label, [], [], audience, language)
+        summary = explanation.one_sentence
+        if explanation.intuitive:
+            summary = f"{summary} {explanation.intuitive}"
+        summary = summary[:5000]
+        patch = GraphPatchCreate(
+            actor="agent",
+            base_version=graph.version,
+            reason="Agent 为节点生成简洁解释，等待用户批准后写入节点说明",
+            operations=[
+                GraphOperation(
+                    op="update_node",
+                    node_id=node.id,
+                    updates=ConceptNodeUpdate(summary=summary),
+                )
+            ],
+        )
+        return graph_service.create_patch(graph_id, patch), warnings
+
+    def _run(self, job_id: UUID, payload: AnalysisCreate, settings: Settings) -> None:
+        try:
+            self._update(job_id, status="running", progress=8, message="正在理解概念并准备检索")
+            warnings: list[str] = []
+            search_terms: list[str] = []
+            search_provider = _search_provider(settings)
+            if payload.level == "quick":
+                papers = []
+                warnings.append("快速解释模式未检索论文，结论需要自行核验。")
+            else:
+                query_plan = [payload.concept]
+                if payload.level == "research":
+                    # A small, bounded prior-art expansion. It is intentionally
+                    # transparent and is not a claim of exhaustive novelty.
+                    query_plan.extend(
+                        [
+                            f"{payload.concept} limitations future work",
+                            f"{payload.concept} efficient method comparison",
+                        ]
+                    )
+                papers = []
+                for index, query in enumerate(query_plan):
+                    search_terms.append(query)
+                    progress = 25 + min(index * 8, 20)
+                    self._update(
+                        job_id,
+                        progress=progress,
+                        message=f"正在通过 {search_provider.name} 检索：{query}",
+                    )
+                    try:
+                        papers.extend(search_provider.search(query, payload.max_papers))
+                    except ProviderUnavailable as exc:
+                        if not settings.demo_mode and index == 0:
+                            raise
+                        warnings.append(str(exc))
+                        if search_provider.name != "demo" and settings.demo_mode:
+                            warnings.append("已切换到演示资料；演示资料不应当作为正式科学证据引用。")
+                            search_provider = DemoSearchProvider()
+                            papers.extend(search_provider.search(query, payload.max_papers))
+                papers = _dedupe_papers(papers)
+                papers = papers[: payload.max_papers]
+                if not papers:
+                    warnings.append("检索没有返回论文，请尝试补充英文关键词或切换数据源。")
+
+            self._update(job_id, progress=52, message="正在生成段落级证据卡")
+            evidence = _build_evidence(payload.concept, papers)
+            self._update(job_id, progress=70, message="正在生成分层解释和概念关系")
+            explanation_provider = _explanation_provider(settings)
+            try:
+                explanation = explanation_provider.explain(
+                    payload.concept,
+                    papers,
+                    evidence,
+                    payload.audience,
+                    payload.language,
+                )
+            except ProviderUnavailable as exc:
+                if not settings.demo_mode:
+                    raise
+                warnings.append(str(exc))
+                warnings.append("已使用规则回退解释；配置解释模型后可获得更完整的分层回答。")
+                explanation_provider = RuleBasedExplanationProvider()
+                explanation = explanation_provider.explain(
+                    payload.concept,
+                    papers,
+                    evidence,
+                    payload.audience,
+                    payload.language,
+                )
+
+            # Keep the explanation auditable even when a compatible model omits
+            # the optional links or returns an ID that is not part of this run.
+            evidence_ids = {item.id for item in evidence}
+            linked_ids = [item_id for item_id in explanation.evidence_ids if item_id in evidence_ids]
+            if not linked_ids and evidence:
+                linked_ids = [item.id for item in evidence]
+            explanation = explanation.model_copy(update={"evidence_ids": linked_ids})
+
+            self._update(job_id, progress=86, message="正在构建概念树")
+            graph = _build_graph(
+                payload.concept,
+                papers,
+                evidence,
+                explanation,
+                project_id=payload.project_id,
+                graph_name=payload.graph_name,
+            )
+            graph_service.save(graph)
+            innovation_candidates = (
+                _build_innovation_candidates(payload.concept, papers, explanation)
+                if payload.level == "research"
+                else []
+            )
+            result = AnalysisResult(
+                id=str(job_id),
+                concept=payload.concept,
+                level=payload.level,
+                audience=payload.audience,
+                provider=f"search={search_provider.name}; explanation={explanation_provider.name}",
+                warnings=warnings,
+                search_terms=search_terms,
+                retrieval_scope=(
+                    "摘要和论文元数据；研究模式额外检索限制、未来工作和方法对比词。"
+                    if payload.level == "research"
+                    else "摘要和论文元数据"
+                ),
+                papers=papers,
+                evidence=evidence,
+                explanation=explanation,
+                graph=graph,
+                innovation_candidates=innovation_candidates,
+                novelty_note=(
+                    "在当前 Provider 返回的资料范围内未发现直接等价工作的候选，不能据此证明全球不存在相似研究。"
+                    if payload.level == "research"
+                    else None
+                ),
+            )
+            self._update(
+                job_id,
+                status="completed",
+                progress=100,
+                message="分析完成",
+                result=result,
+                completed_at=datetime.now(timezone.utc),
+            )
+        except Exception as exc:  # noqa: BLE001 - job must expose failure to the UI
+            self._update(
+                job_id,
+                status="failed",
+                progress=100,
+                message="分析失败",
+                error=str(exc),
+                completed_at=datetime.now(timezone.utc),
+            )
+
+    def _update(self, job_id: UUID, **changes: object) -> None:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is not None:
+                for key, value in changes.items():
+                    setattr(job, key, value)
+
+
+def _search_provider(settings: Settings) -> SearchProvider:
+    if settings.paper_provider == "demo":
+        return DemoSearchProvider()
+    if settings.paper_provider == "semantic_scholar":
+        api_key = settings.paper_api_key.get_secret_value() if settings.paper_api_key else None
+        return SemanticScholarProvider(api_key=api_key)
+    raise ProviderUnavailable(f"未支持的论文检索 Provider：{settings.paper_provider}")
+
+
+def _explanation_provider(settings: Settings) -> ExplanationProvider:
+    if settings.explanation_provider == "rule_based":
+        return RuleBasedExplanationProvider()
+    if settings.explanation_provider in {"openai", "openai_compatible"}:
+        if not settings.explanation_api_key:
+            return RuleBasedExplanationProvider()
+        return OpenAICompatibleExplanationProvider(
+            api_key=settings.explanation_api_key.get_secret_value(),
+            base_url=settings.explanation_base_url,
+            model=settings.explanation_model,
+        )
+    raise ProviderUnavailable(f"未支持的解释 Provider：{settings.explanation_provider}")
+
+
+def _build_evidence(concept: str, papers: list[PaperRecord]) -> list[EvidenceCard]:
+    cards: list[EvidenceCard] = []
+    for paper in papers:
+        if not paper.abstract:
+            continue
+        sentences = [part.strip() for part in paper.abstract.replace("?", ".").split(".") if part.strip()]
+        excerpt = " ".join(sentences[:3])
+        evidence_type, claim = _classify_abstract_evidence(paper.title, excerpt, concept)
+        cards.append(
+            EvidenceCard(
+                paper_id=paper.id,
+                claim=claim,
+                excerpt=excerpt,
+                location="abstract",
+                locator=EvidenceLocator(kind="abstract", url=paper.url),
+                evidence_type=evidence_type,
+                relation="background",
+                confidence="low" if paper.source_kind == "demo" else "medium",
+                verification_status="unverified",
+                source_url=paper.url,
+            )
+        )
+    return cards
+
+
+def _dedupe_papers(papers: list[PaperRecord]) -> list[PaperRecord]:
+    """Collapse provider duplicates without hiding distinct same-title works."""
+
+    seen: set[str] = set()
+    unique: list[PaperRecord] = []
+    for paper in papers:
+        key = (paper.canonical_id or paper.doi or paper.provider_id or paper.title).strip().lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        unique.append(paper)
+    return unique
+
+
+def _classify_abstract_evidence(title: str, excerpt: str, concept: str) -> tuple[str, str]:
+    """Assign a transparent, deliberately modest label to an abstract snippet."""
+
+    text = f"{title} {excerpt}".lower()
+    if any(token in text for token in ("limitation", "trade-off", "bottleneck", "cost", "限制", "瓶颈")):
+        return "limitation", f"摘要提到了“{concept}”相关方法的限制或成本线索。"
+    if any(token in text for token in ("report", "result", "improv", "faster", "lower memory", "结果", "提升")):
+        return "result", f"摘要报告了“{concept}”相关方法的结果或性能线索。"
+    if any(token in text for token in ("introduc", "propos", "architecture", "mechanism", "algorithm", "机制", "算法")):
+        return "mechanism", f"摘要描述了“{concept}”相关方法的机制或算法线索。"
+    return "context", f"摘要提供了与“{concept}”相关的背景线索。"
+
+
+def _build_graph(
+    concept: str,
+    papers: list[PaperRecord],
+    evidence: list[EvidenceCard],
+    explanation: ExplanationResult,
+    *,
+    project_id: UUID | None = None,
+    graph_name: str | None = None,
+) -> ConceptGraph:
+    root_id = "root"
+    nodes = [
+        ConceptNode(
+            id=root_id,
+            label=concept,
+            summary=explanation.one_sentence,
+            node_type="concept",
+            evidence_ids=[card.id for card in evidence],
+        )
+    ]
+    edges: list[ConceptEdge] = []
+    sections = [
+        ("definition", "是什么", explanation.one_sentence, "concept"),
+        ("mechanism", "核心机制", explanation.technical, "method"),
+        ("evidence", "文献证据", "从相关论文中提取的摘要级证据。", "paper"),
+        ("limitations", "限制与空白", "；".join(explanation.limitations), "problem"),
+    ]
+    for node_id, label, summary, node_type in sections:
+        nodes.append(ConceptNode(id=node_id, label=label, summary=summary, node_type=node_type))
+        edges.append(ConceptEdge(source=root_id, target=node_id, relation="is_a"))
+
+    for index, paper in enumerate(papers[:6]):
+        paper_id = f"paper-{index}-{paper.id[:16]}"
+        nodes.append(
+            ConceptNode(
+                id=paper_id,
+                label=paper.title,
+                summary=f"{paper.year or '未标年份'} · {paper.venue or paper.source}",
+                node_type="paper",
+                evidence_ids=[card.id for card in evidence if card.paper_id == paper.id],
+            )
+        )
+        edges.append(ConceptEdge(source="evidence", target=paper_id, relation="supports"))
+
+    for index, related in enumerate(explanation.related_concepts[:8]):
+        related_id = f"related-{index}"
+        nodes.append(ConceptNode(id=related_id, label=related, summary="相关概念，可继续展开。"))
+        edges.append(ConceptEdge(source=root_id, target=related_id, relation="related_to"))
+    return ConceptGraph(
+        project_id=project_id,
+        name=graph_name or f"{concept} 概念图",
+        description="由概念分析结果生成的第一版证据关联图。",
+        root_id=root_id,
+        nodes=nodes,
+        edges=edges,
+    )
+
+
+def _build_innovation_candidates(
+    concept: str,
+    papers: list[PaperRecord],
+    explanation: ExplanationResult,
+) -> list[InnovationCandidate]:
+    """Generate deliberately cautious, evidence-aware first-pass ideas.
+
+    This is a transparent heuristic fallback. A later research Agent can replace
+    it with a model-backed proposal, while keeping the same candidate schema and
+    novelty disclaimer.
+    """
+
+    normalized = concept.lower()
+    if "attention" in normalized or "注意力" in concept:
+        return [
+            InnovationCandidate(
+                title="面向长序列的注意力缓存自适应管理",
+                problem="标准注意力在长序列场景中会带来较高的计算、显存或内存访问成本。",
+                mechanism="根据上下文位置或 token 重要性，动态选择缓存、压缩或淘汰策略。",
+                nearest_work=[paper.title for paper in papers[:3]],
+                novelty_level="L2",
+                confidence="low",
+                feasibility="medium",
+                rationale="现有资料反复讨论长序列效率问题，但当前候选需要进一步核对 FlashAttention、PagedAttention 和稀疏注意力相关工作。",
+                validation_steps=[
+                    "与标准 Attention、FlashAttention 和固定缓存策略比较",
+                    "在不同序列长度下记录延迟、峰值显存和结果质量",
+                    "对缓存重要性估计的额外开销做消融实验",
+                ],
+                warning="这是待检索的研究候选，不是已确认的新颖成果。",
+            )
+        ]
+    if "lora" in normalized or "低秩" in concept or "微调" in concept:
+        return [
+            InnovationCandidate(
+                title="按任务难度自适应调整低秩微调容量",
+                problem="固定 rank 的参数高效微调可能无法同时适配简单任务和复杂任务。",
+                mechanism="根据任务难度或训练信号动态分配不同层的低秩容量。",
+                nearest_work=[paper.title for paper in papers[:3]],
+                novelty_level="L2",
+                confidence="low",
+                feasibility="medium",
+                rationale="已有 LoRA 及其扩展工作提供了基础，但自适应 rank、层选择和任务难度定义需要单独核验。",
+                validation_steps=[
+                    "与固定 rank 的 LoRA、全量微调和 QLoRA 比较",
+                    "记录可训练参数量、效果、显存和训练时间",
+                    "进行不同任务难度分组的消融实验",
+                ],
+                warning="候选可能与已有 AdaLoRA 等方法接近，必须先完成相似工作核验。",
+            )
+        ]
+    related = explanation.related_concepts[0] if explanation.related_concepts else concept
+    return [
+        InnovationCandidate(
+            title=f"将 {related} 的方法用于 {concept} 的限制场景",
+            problem=f"现有“{concept}”研究中的适用边界和失败条件还需要更多验证。",
+            mechanism=f"借鉴“{related}”中的机制，针对一个明确的限制条件设计可复现实验。",
+            nearest_work=[paper.title for paper in papers[:3]],
+            novelty_level="L4",
+            confidence="low",
+            feasibility="low",
+            rationale="当前只是基于概念关系生成的探索性假设，尚未完成完整的 prior-art 检索。",
+            validation_steps=[
+                "先检索该组合的中英文术语和同义表达",
+                "确定基线、对照和可量化指标",
+                "使用小规模数据进行可行性预实验",
+            ],
+            warning="不能将此候选直接表述为原创创新点。",
+        )
+    ]
+
+
+research_service = ResearchService()

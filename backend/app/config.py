@@ -18,6 +18,9 @@ class Settings(BaseSettings):
     paper_provider: str = "semantic_scholar"
     explanation_provider: str = "openai"
     experiment_provider: str = "local"
+    explanation_model: str = "gpt-4.1-mini"
+    explanation_base_url: str = "https://api.openai.com/v1"
+    demo_mode: bool = True
     paper_api_key: SecretStr | None = None
     explanation_api_key: SecretStr | None = None
     experiment_api_key: SecretStr | None = None

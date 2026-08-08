@@ -10,81 +10,193 @@
     <main class="shell">
       <header class="topbar">
         <div>
-          <p class="eyebrow">EVIDENCE-DRIVEN RESEARCH WORKSPACE</p>
+          <p class="eyebrow">CONCEPT → EVIDENCE → UNDERSTANDING</p>
           <h1>许愿机 <span>/ WishForge</span></h1>
-          <p class="subtitle">把一个想法，锻造成有证据的理解。</p>
+          <p class="subtitle">把一个模糊的想法，锻造成有证据的理解。</p>
         </div>
         <div id="health" class="status-pill status-pending">连接中…</div>
       </header>
 
-      <section class="grid">
-        <article class="card intro-card">
-          <p class="eyebrow">STAGE 0</p>
-          <h2>科研概念解释工作台</h2>
-          <p>
-            你可以从一个模糊的科研概念开始，让许愿机查找可信资料、提取证据，
-            再用适合你的语言解释它。文献检索和证据卡将在下一阶段接入。
-          </p>
-          <div class="flow">
-            <span>问题</span><b>→</b><span>证据</span><b>→</b><span>假设</span><b>→</b><span>实验</span>
+      <section class="card analysis-card">
+        <div class="card-heading">
+          <div>
+            <p class="eyebrow">CONCEPT ANALYSIS</p>
+            <h2>从一个概念开始</h2>
+          </div>
+          <span class="tag tag-beta">第一版</span>
+        </div>
+        <form id="analysis-form" class="analysis-form">
+          <label class="concept-field">
+            概念或想法
+            <input id="concept" required maxlength="500" placeholder="例如：注意力机制为什么适合处理长距离依赖？" />
+          </label>
+          <div class="form-grid">
+            <label>
+              分析模式
+              <select id="analysis-level">
+                <option value="quick">快速解释：不检索，先建立直觉</option>
+                <option value="literature" selected>文献解释：检索论文并生成证据卡</option>
+                <option value="research">研究线索：扩展检索 + 探索性候选</option>
+              </select>
+            </label>
+            <label>
+              面向读者
+              <select id="audience">
+                <option value="beginner" selected>初学者</option>
+                <option value="student">本科生 / 研究生</option>
+                <option value="researcher">研究者</option>
+              </select>
+            </label>
+            <label>
+              最多检索论文数
+              <input id="max-papers" type="number" min="1" max="12" value="6" />
+            </label>
+          </div>
+          <div class="form-actions">
+            <button type="submit" id="analysis-submit">开始分析</button>
+            <span id="analysis-message" class="form-message" role="status"></span>
+          </div>
+        </form>
+      </section>
+
+      <section class="analysis-layout">
+        <article class="card result-card">
+          <div class="card-heading">
+            <div>
+              <p class="eyebrow">EXPLANATION</p>
+              <h2>易懂解释</h2>
+            </div>
+            <span id="analysis-provider" class="tag">尚未分析</span>
+          </div>
+          <div id="explanation" class="result-placeholder">
+            输入一个概念后，这里会显示一句话定义、直觉类比、技术机制、演变过程和限制。
           </div>
         </article>
 
-        <article class="card">
+        <article class="card graph-card">
           <div class="card-heading">
             <div>
-              <p class="eyebrow">PROJECTS</p>
-              <h2>新建研究项目</h2>
+              <p class="eyebrow">CONCEPT MAP</p>
+              <h2>概念树 / 关系视图</h2>
+            </div>
+            <div class="graph-heading-actions">
+              <select id="graph-picker" class="graph-picker hidden" aria-label="选择概念图"></select>
+              <span id="graph-version" class="tag">v—</span>
             </div>
           </div>
-          <form id="project-form">
+          <div id="graph" class="graph-placeholder">分析完成后会生成概念关系图。</div>
+          <form id="graph-meta-form" class="graph-meta-form hidden">
             <label>
-              项目名称
-              <input id="project-name" required maxlength="120" placeholder="例如：标签噪声下的 Mixup 鲁棒性" />
+              概念图名称
+              <input id="graph-name" maxlength="200" placeholder="例如：注意力机制知识树" />
+            </label>
+            <button type="submit" class="secondary">保存名称</button>
+          </form>
+          <div class="graph-actions hidden" id="graph-actions">
+            <button type="button" class="secondary" id="agent-propose">让 Agent 提议一个节点</button>
+            <span class="form-message" id="graph-message" role="status"></span>
+          </div>
+          <form id="node-form" class="node-form hidden">
+            <label>
+              新增节点
+              <input id="node-label" maxlength="120" placeholder="例如：FlashAttention" />
             </label>
             <label>
-              研究问题
-              <textarea id="research-question" required maxlength="2000" rows="4" placeholder="你想验证什么？"></textarea>
+              节点说明
+              <input id="node-summary" maxlength="500" placeholder="这个节点解决什么问题？" />
             </label>
-            <button type="submit">创建草稿项目</button>
-            <p id="form-message" class="form-message" role="status"></p>
+            <button type="submit" class="secondary">添加到概念图</button>
           </form>
         </article>
       </section>
 
-      <section class="card settings-card">
+      <section class="card innovation-card hidden" id="innovation-card">
         <div class="card-heading">
           <div>
-            <p class="eyebrow">PROVIDER CREDENTIALS</p>
-            <h2>API Key 配置</h2>
+            <p class="eyebrow">RESEARCH LEADS</p>
+            <h2>探索性创新候选</h2>
           </div>
-          <button id="refresh-settings" class="secondary" type="button">刷新状态</button>
+          <span class="tag tag-beta">需要人工核验</span>
         </div>
         <p class="settings-note">
-          不同用途使用不同密钥：论文检索、解释模型和实验执行互相隔离。密钥从本地
-          <code>.env</code> 读取，网页只显示配置状态和掩码，不会显示明文。
+          这些内容是基于当前检索结果生成的研究假设，不是“保证原创”的结论。先核对相似论文，再决定是否做实验。
         </p>
-        <div id="api-keys" class="settings-list">
-          <p class="empty">正在读取配置状态…</p>
-        </div>
-        <p class="settings-hint">
-          配置变量示例：<code>WISHFORGE_PAPER_API_KEY</code>、
-          <code>WISHFORGE_EXPLANATION_API_KEY</code>、
-          <code>WISHFORGE_EXPERIMENT_API_KEY</code>。
-        </p>
+        <div id="innovations" class="innovation-list"></div>
+        <p id="novelty-note" class="novelty-note"></p>
       </section>
 
-      <section class="card projects-card">
+      <section class="card evidence-card">
         <div class="card-heading">
           <div>
-            <p class="eyebrow">RESEARCH BOARD</p>
-            <h2>研究项目</h2>
+            <p class="eyebrow">EVIDENCE LEDGER</p>
+            <h2>文献与证据卡</h2>
           </div>
-          <button id="refresh" class="secondary" type="button">刷新</button>
+          <span id="paper-count" class="tag">0 篇</span>
         </div>
-        <div id="projects" class="projects-list">
-          <p class="empty">还没有项目。先创建一个研究问题吧。</p>
+        <div id="papers" class="paper-list">
+          <p class="empty">完成一次文献分析后，这里会显示来源和原文摘要。</p>
         </div>
+      </section>
+
+      <section class="card patch-card hidden" id="patch-card">
+        <div class="card-heading">
+          <div>
+            <p class="eyebrow">GRAPH PATCH REVIEW</p>
+            <h2>Agent 修改提案</h2>
+          </div>
+          <span class="tag tag-beta">人工确认</span>
+        </div>
+        <div id="patches" class="patch-list">
+          <p class="empty">还没有待审核的提案。</p>
+        </div>
+      </section>
+
+      <section class="grid">
+        <article class="card settings-card">
+          <div class="card-heading">
+            <div>
+              <p class="eyebrow">PROVIDER CREDENTIALS</p>
+              <h2>API Key 配置</h2>
+            </div>
+            <button id="refresh-settings" class="secondary" type="button">刷新状态</button>
+          </div>
+          <p class="settings-note">
+            论文检索、解释模型和实验执行使用不同密钥。密钥从本地 <code>.env</code> 读取，
+            网页只显示状态和掩码，不会显示明文。
+          </p>
+          <div id="api-keys" class="settings-list">
+            <p class="empty">正在读取配置状态…</p>
+          </div>
+          <p class="settings-hint">
+            <code>WISHFORGE_PAPER_API_KEY</code> · <code>WISHFORGE_EXPLANATION_API_KEY</code> ·
+            <code>WISHFORGE_EXPERIMENT_API_KEY</code>
+          </p>
+        </article>
+
+        <article class="card projects-card">
+          <div class="card-heading">
+            <div>
+              <p class="eyebrow">RESEARCH BOARD</p>
+              <h2>研究项目</h2>
+            </div>
+            <button id="refresh" class="secondary" type="button">刷新</button>
+          </div>
+          <form id="project-form">
+            <label>
+              项目名称
+              <input id="project-name" required maxlength="120" placeholder="例如：长序列注意力机制调研" />
+            </label>
+            <label>
+              研究问题
+              <textarea id="research-question" required maxlength="2000" rows="3" placeholder="你想验证什么？"></textarea>
+            </label>
+            <button type="submit">创建草稿项目</button>
+            <p id="form-message" class="form-message" role="status"></p>
+          </form>
+          <div id="projects" class="projects-list compact-projects">
+            <p class="empty">还没有项目。</p>
+          </div>
+        </article>
       </section>
     </main>
     <script src="/static/app.js" defer></script>
