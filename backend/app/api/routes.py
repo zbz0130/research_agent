@@ -1,6 +1,6 @@
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from app.config import Settings, get_settings
 from app.research_schemas import (
@@ -11,12 +11,19 @@ from app.research_schemas import (
     GraphPatch,
     GraphPatchCreate,
     GraphMetadataUpdate,
+    GraphCompareCreate,
+    GraphCompareResult,
+    GraphSubsetResult,
+    IdeaCheckCreate,
+    IdeaCheckResult,
     NodeExplanationCreate,
 )
 from app.schemas import ApiKeyStatusResponse, HealthResponse, Project, ProjectCreate
 from app.services.graph_service import GraphConflict, GraphNotFound, graph_service
 from app.services.project_service import project_service
 from app.services.research_service import AnalysisNotFound, research_service
+from app.services.idea_service import IdeaCheckNotFound, idea_service
+from app.services.research_providers import ProviderUnavailable
 from app.services.settings_service import api_key_slots
 
 router = APIRouter()
@@ -75,6 +82,32 @@ def get_analysis(analysis_id: UUID) -> AnalysisJob:
         raise HTTPException(status_code=404, detail="分析任务不存在") from exc
 
 
+@router.post("/ideas/check", response_model=IdeaCheckResult, tags=["research"])
+def check_idea(
+    payload: IdeaCheckCreate,
+    settings: Settings = Depends(get_settings),
+) -> IdeaCheckResult:
+    """Run a bounded, explicit prior-art triage for a research idea."""
+
+    try:
+        return idea_service.check(payload, settings)
+    except ProviderUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.get("/ideas/checks", response_model=list[IdeaCheckResult], tags=["research"])
+def list_idea_checks() -> list[IdeaCheckResult]:
+    return idea_service.list()
+
+
+@router.get("/ideas/checks/{check_id}", response_model=IdeaCheckResult, tags=["research"])
+def get_idea_check(check_id: str) -> IdeaCheckResult:
+    try:
+        return idea_service.get(check_id)
+    except IdeaCheckNotFound as exc:
+        raise HTTPException(status_code=404, detail="想法查重记录不存在") from exc
+
+
 @router.get("/graphs/{graph_id}", response_model=ConceptGraph, tags=["graphs"])
 def get_graph(graph_id: str) -> ConceptGraph:
     try:
@@ -96,6 +129,33 @@ def update_graph_metadata(graph_id: str, payload: GraphMetadataUpdate) -> Concep
 @router.get("/graphs", response_model=list[ConceptGraph], tags=["graphs"])
 def list_graphs(project_id: UUID | None = None) -> list[ConceptGraph]:
     return graph_service.list(project_id=project_id)
+
+
+@router.post("/graphs/compare", response_model=GraphCompareResult, tags=["graphs"])
+def compare_graphs(payload: GraphCompareCreate) -> GraphCompareResult:
+    try:
+        return graph_service.compare(payload)
+    except GraphNotFound as exc:
+        raise HTTPException(status_code=404, detail="参与比较的概念图不存在") from exc
+
+
+@router.get("/graphs/{graph_id}/subset", response_model=GraphSubsetResult, tags=["graphs"])
+def get_graph_subset(
+    graph_id: str,
+    node_ids: str = Query(..., description="逗号分隔的节点 ID"),
+    include_ancestors: bool = True,
+) -> GraphSubsetResult:
+    requested = [value.strip() for value in node_ids.split(",") if value.strip()]
+    try:
+        return graph_service.subset(
+            graph_id,
+            requested,
+            include_ancestors=include_ancestors,
+        )
+    except GraphNotFound as exc:
+        raise HTTPException(status_code=404, detail="概念图不存在") from exc
+    except GraphConflict as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.post("/graphs/{graph_id}/patches", response_model=GraphPatch, tags=["graphs"])

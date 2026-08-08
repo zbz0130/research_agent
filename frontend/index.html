@@ -59,6 +59,36 @@
         </form>
       </section>
 
+      <section class="card idea-check-card">
+        <div class="card-heading">
+          <div>
+            <p class="eyebrow">PRIOR-ART CHECK</p>
+            <h2>判断一个想法有没有被做过</h2>
+          </div>
+          <span class="tag tag-beta">范围化判断</span>
+        </div>
+        <p class="settings-note">
+          许愿机会检索论文标题、摘要和公开元数据，给出 L0–L4 相似度分级。它帮助你决定下一步读什么，不能证明全球范围内绝对没有相似工作。
+        </p>
+        <form id="idea-check-form" class="analysis-form">
+          <label class="concept-field">
+            研究想法
+            <textarea id="idea-check-input" required maxlength="2000" rows="3" placeholder="例如：用分页机制管理长上下文 LLM 的 KV cache"></textarea>
+          </label>
+          <div class="form-grid idea-form-grid">
+            <label>
+              最多检索论文数
+              <input id="idea-max-papers" type="number" min="1" max="12" value="8" />
+            </label>
+            <div class="form-actions idea-actions">
+              <button type="submit" id="idea-check-submit">开始查重</button>
+              <span id="idea-check-message" class="form-message" role="status"></span>
+            </div>
+          </div>
+        </form>
+        <div id="idea-check-result" class="idea-result hidden"></div>
+      </section>
+
       <section class="analysis-layout">
         <article class="card result-card">
           <div class="card-heading">
@@ -149,6 +179,40 @@
         <div id="patches" class="patch-list">
           <p class="empty">还没有待审核的提案。</p>
         </div>
+      </section>
+
+      <section class="card graph-compare-card">
+        <div class="card-heading">
+          <div>
+            <p class="eyebrow">CROSS-GRAPH IDEATION</p>
+            <h2>让多棵概念图互相借鉴</h2>
+          </div>
+          <span class="tag tag-beta">未验证假设</span>
+        </div>
+        <p class="settings-note">
+          选择至少两棵已保存的图。你也可以输入节点 ID，只比较局部节点；结果不会直接改动原图，若要写回必须生成并审批 GraphPatch。
+        </p>
+        <form id="graph-compare-form" class="analysis-form">
+          <label>
+            参与比较的概念图（可多选）
+            <select id="graph-compare-picker" multiple size="4" aria-label="选择多棵概念图">
+              <option disabled>完成分析后这里会出现概念图</option>
+            </select>
+          </label>
+          <label>
+            可选：节点 ID（逗号分隔）
+            <input id="graph-compare-nodes" maxlength="1200" placeholder="例如：problem-a, method-b；留空表示比较各图的主要节点" />
+          </label>
+          <label>
+            比较焦点
+            <input id="graph-compare-focus" maxlength="1000" value="找出可以互相借鉴的机制，并给出最小验证实验" />
+          </label>
+          <div class="form-actions">
+            <button type="submit" id="graph-compare-submit">生成跨图候选</button>
+            <span id="graph-compare-message" class="form-message" role="status"></span>
+          </div>
+        </form>
+        <div id="graph-compare-result" class="graph-compare-result hidden"></div>
       </section>
 
       <section class="grid">

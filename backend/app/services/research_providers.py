@@ -103,6 +103,41 @@ class DemoSearchProvider:
     name = "demo"
 
     _fixtures = {
+        "paged_attention": [
+            PaperRecord(
+                id="demo-vllm-paged-attention",
+                title="vLLM: Easy, Fast, and Cheap LLM Serving with PagedAttention",
+                authors=["Woosuk Kwon", "Zongyu Li"],
+                year=2023,
+                venue="ACM SOSP",
+                abstract=(
+                    "The paper presents vLLM, a high-throughput serving system for large language models. "
+                    "PagedAttention manages the key-value cache as fixed-size pages, borrowing the idea of virtual memory "
+                    "to reduce fragmentation and support efficient sharing during generation. "
+                    "The authors report improved serving throughput while discussing scheduling and memory trade-offs."
+                ),
+                url="https://arxiv.org/abs/2309.06180",
+                source="demo_fixture",
+                source_kind="demo",
+                access_type="demo",
+            ),
+            PaperRecord(
+                id="demo-kv-cache-compression",
+                title="Efficient KV Cache Compression for Long-Context Language Model Serving",
+                authors=["WishForge demo fixture"],
+                year=2024,
+                venue="arXiv",
+                abstract=(
+                    "This fixture represents work on reducing key-value cache memory for long-context generation. "
+                    "It highlights a common limitation: compression can lower memory use but may affect answer quality, "
+                    "so sequence length, latency and accuracy should be evaluated together."
+                ),
+                url="https://arxiv.org/",
+                source="demo_fixture",
+                source_kind="demo",
+                access_type="demo",
+            ),
+        ],
         "attention": [
             PaperRecord(
                 id="demo-attention-vaswani",
@@ -160,6 +195,7 @@ class DemoSearchProvider:
     def search(self, concept: str, limit: int) -> list[PaperRecord]:
         normalized = re.sub(r"[^a-z0-9]+", " ", concept.lower()).strip()
         aliases = {
+            "paged_attention": {"pagedattention", "paged attention", "分页注意力", "分页机制", "kv cache", "kv缓存", "键值缓存"},
             "attention": {"注意力", "注意力机制", "self attention", "自注意力"},
             "lora": {"低秩适配", "低秩微调", "参数高效微调", "qlora"},
         }

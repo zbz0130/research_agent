@@ -14,6 +14,9 @@ EvidenceType = Literal["definition", "mechanism", "result", "limitation", "futur
 EvidenceRelation = Literal["supports", "contradicts", "qualified_support", "background", "unclear"]
 VerificationStatus = Literal["unverified", "reviewed"]
 Confidence = Literal["high", "medium", "low"]
+NoveltyLevel = Literal["L0", "L1", "L2", "L3", "L4"]
+ManualReviewStatus = Literal["needs_review", "reviewed", "dismissed"]
+ArxivCheckStatus = Literal["not_checked", "indirect_metadata", "checked", "unavailable"]
 EvidenceLocationKind = Literal["abstract", "page", "section", "figure", "table", "url", "unknown"]
 GraphNodeType = Literal["concept", "method", "problem", "paper", "idea", "note"]
 GraphRelation = Literal[
@@ -223,7 +226,7 @@ class InnovationCandidate(BaseModel):
     problem: str
     mechanism: str
     nearest_work: list[str] = Field(default_factory=list)
-    novelty_level: Literal["L0", "L1", "L2", "L3", "L4"]
+    novelty_level: NoveltyLevel
     confidence: Confidence = "low"
     feasibility: Literal["low", "medium", "high"] = "medium"
     rationale: str
@@ -273,6 +276,110 @@ class AnalysisSummary(BaseModel):
     progress: int
     message: str
     created_at: datetime
+
+
+class IdeaCheckCreate(BaseModel):
+    """Request for an explicit prior-art check.
+
+    This is intentionally separate from ``AnalysisCreate``.  A concept
+    explanation asks "what is this?"; an idea check asks "how close is this to
+    work already published?".  Keeping the contracts separate prevents the
+    UI from presenting a lightweight concept search as a novelty verdict.
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    idea: str = Field(min_length=3, max_length=2000)
+    max_papers: int = Field(default=8, ge=1, le=12)
+    language: Literal["zh-CN", "en"] = "zh-CN"
+    project_id: UUID | None = None
+
+
+class NoveltyCheck(BaseModel):
+    """Cautious, scoped prior-art assessment, never a proof of originality."""
+
+    level: NoveltyLevel
+    reason: str
+    confidence: Confidence = "low"
+    matched_paper_ids: list[str] = Field(default_factory=list)
+    compared_terms: list[str] = Field(default_factory=list)
+    scope_note: str
+
+
+class IdeaCheckResult(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid4()))
+    idea: str
+    project_id: UUID | None = None
+    search_terms: list[str] = Field(default_factory=list)
+    search_scope: str = "论文标题、摘要和公开元数据"
+    arxiv_status: ArxivCheckStatus = "not_checked"
+    papers: list[PaperRecord] = Field(default_factory=list)
+    evidence: list[EvidenceCard] = Field(default_factory=list)
+    novelty: NoveltyCheck
+    # Flattened fields make the first-version API convenient for a table or a
+    # spreadsheet export, while ``novelty`` keeps the assessment grouped.
+    similarity_level: NoveltyLevel
+    similarity_reason: str
+    current_conclusion: str
+    confidence: Confidence = "low"
+    manual_review_status: ManualReviewStatus = "needs_review"
+    alternative_ideas: list[InnovationCandidate] = Field(default_factory=list)
+    validation_steps: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class GraphCompareCreate(BaseModel):
+    """Select several saved graphs (and optionally a node subset) to compare."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    graph_ids: list[str] = Field(min_length=2, max_length=6)
+    node_ids: list[str] = Field(default_factory=list, max_length=60)
+    focus: str = Field(
+        default="找出可以互相借鉴的机制，并给出最小验证实验",
+        min_length=1,
+        max_length=1000,
+    )
+
+    @model_validator(mode="after")
+    def unique_graphs(self) -> "GraphCompareCreate":
+        if any(not graph_id for graph_id in self.graph_ids):
+            raise ValueError("graph_ids 不能包含空字符串")
+        if len(set(self.graph_ids)) != len(self.graph_ids):
+            raise ValueError("graph_ids 不能重复")
+        return self
+
+
+class GraphConnection(BaseModel):
+    source_graph_id: str
+    target_graph_id: str
+    source_node_id: str
+    target_node_id: str
+    relation: Literal["cross_domain_candidate", "shared_problem", "method_transfer"] = (
+        "cross_domain_candidate"
+    )
+    idea: str
+    source_evidence_ids: list[str] = Field(default_factory=list)
+    target_evidence_ids: list[str] = Field(default_factory=list)
+    confidence: Confidence = "low"
+    validation_steps: list[str] = Field(default_factory=list)
+    warning: str = "跨图连接是未验证假设，不代表已有证据证明可行。"
+
+
+class GraphCompareResult(BaseModel):
+    graph_ids: list[str]
+    focus: str
+    connections: list[GraphConnection] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class GraphSubsetResult(BaseModel):
+    source_graph_id: str
+    graph: ConceptGraph
+    selected_node_ids: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
 
 
 class ConceptNodeUpdate(BaseModel):

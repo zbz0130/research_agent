@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     brand_name_en: str = "WishForge"
     version: str = "0.1.0"
     cors_origins: str = "http://localhost:8000,http://localhost:3000"
+    storage_path: str = "data/wishforge.db"
 
     # Providers are deliberately separated by responsibility. A paper-search
     # credential must never be accidentally used by the experiment runner.

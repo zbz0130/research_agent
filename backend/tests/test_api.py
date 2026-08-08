@@ -6,7 +6,9 @@ from app.config import Settings, get_settings
 from app.main import app
 from app.research_schemas import ConceptGraph, ConceptNode, GraphPatchCreate, PaperRecord
 from app.services.graph_service import GraphConflict, graph_service
+from app.services.research_service import research_service
 from app.services.settings_service import api_key_slots
+from app.storage import Storage, storage
 
 client = TestClient(app)
 
@@ -468,3 +470,182 @@ def test_agent_node_explanation_is_a_patch_until_approved() -> None:
 def test_source_urls_only_allow_http_or_https() -> None:
     with pytest.raises(ValueError, match="只允许 http 或 https"):
         PaperRecord(id="bad", title="恶意来源", source="fixture", url="javascript:alert(1)")
+
+
+def test_idea_check_reports_scoped_prior_art_and_alternatives() -> None:
+    app.dependency_overrides[get_settings] = lambda: Settings(
+        paper_provider="demo",
+        explanation_provider="rule_based",
+        demo_mode=True,
+    )
+    try:
+        response = client.post(
+            "/api/v1/ideas/check",
+            json={
+                "idea": "让 PagedAttention 管理长上下文的 KV cache",
+                "max_papers": 4,
+            },
+        )
+        assert response.status_code == 200
+        result = response.json()
+        assert result["similarity_level"] == "L0"
+        assert result["novelty"]["scope_note"]
+        assert result["manual_review_status"] == "needs_review"
+        assert result["papers"]
+        assert result["alternative_ideas"]
+        assert result["validation_steps"]
+        assert "不能" in "".join(result["warnings"]) or result["novelty"]["confidence"] == "low"
+
+        check_id = result["id"]
+        restored = client.get(f"/api/v1/ideas/checks/{check_id}")
+        assert restored.status_code == 200
+        assert restored.json()["id"] == check_id
+        assert any(item["id"] == check_id for item in client.get("/api/v1/ideas/checks").json())
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_idea_check_validates_minimum_idea_length() -> None:
+    response = client.post("/api/v1/ideas/check", json={"idea": "太短"})
+    assert response.status_code == 422
+
+
+def test_idea_check_does_not_turn_provider_failure_into_a_novelty_claim() -> None:
+    app.dependency_overrides[get_settings] = lambda: Settings(
+        paper_provider="unsupported",
+        explanation_provider="rule_based",
+        demo_mode=False,
+    )
+    try:
+        response = client.post(
+            "/api/v1/ideas/check",
+            json={"idea": "A sufficiently specific research idea for checking"},
+        )
+        assert response.status_code == 503
+        assert "Provider" in response.json()["detail"]
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_graph_compare_returns_unverified_cross_domain_connections() -> None:
+    first = ConceptGraph(
+        id="graph-a",
+        name="长序列推理",
+        root_id="root-a",
+        nodes=[
+            ConceptNode(id="root-a", label="LLM 推理", node_type="concept"),
+            ConceptNode(id="problem-a", label="KV cache 显存占用", node_type="problem"),
+        ],
+    )
+    second = ConceptGraph(
+        id="graph-b",
+        name="操作系统缓存",
+        root_id="root-b",
+        nodes=[
+            ConceptNode(id="root-b", label="操作系统", node_type="concept"),
+            ConceptNode(id="method-b", label="分页虚拟内存", node_type="method"),
+        ],
+    )
+    graph_service.save(first)
+    graph_service.save(second)
+    response = client.post(
+        "/api/v1/graphs/compare",
+        json={
+            "graph_ids": [first.id, second.id],
+            "node_ids": ["problem-a", "method-b"],
+            "focus": "找出可以互相借鉴的缓存机制",
+        },
+    )
+    assert response.status_code == 200
+    result = response.json()
+    assert result["connections"]
+    connection = result["connections"][0]
+    assert connection["confidence"] == "low"
+    assert connection["relation"] == "method_transfer"
+    assert connection["validation_steps"]
+    assert result["warnings"]
+
+
+def test_graph_subset_keeps_ancestors_without_mutating_source() -> None:
+    graph = ConceptGraph(
+        id="graph-subset",
+        name="可裁剪图",
+        root_id="root",
+        nodes=[
+            ConceptNode(id="root", label="根"),
+            ConceptNode(id="branch", label="分支", node_type="method"),
+            ConceptNode(id="leaf", label="叶子", node_type="idea"),
+        ],
+        edges=[
+            {"source": "root", "target": "branch", "relation": "is_a"},
+            {"source": "branch", "target": "leaf", "relation": "part_of"},
+        ],
+    )
+    graph_service.save(graph)
+    response = client.get(f"/api/v1/graphs/{graph.id}/subset?node_ids=leaf")
+    assert response.status_code == 200
+    subset = response.json()
+    assert subset["source_graph_id"] == graph.id
+    assert {node["id"] for node in subset["graph"]["nodes"]} == {"root", "branch", "leaf"}
+    assert client.get(f"/api/v1/graphs/{graph.id}").json()["version"] == 1
+
+
+def test_analysis_and_graph_survive_service_cache_reset() -> None:
+    app.dependency_overrides[get_settings] = lambda: Settings(
+        paper_provider="demo",
+        explanation_provider="rule_based",
+        demo_mode=True,
+    )
+    try:
+        created = client.post(
+            "/api/v1/analyses",
+            json={"concept": "Attention Mechanism", "level": "literature", "max_papers": 4},
+        )
+        assert created.status_code == 202
+        job_id = created.json()["id"]
+        for _ in range(30):
+            job = client.get(f"/api/v1/analyses/{job_id}").json()
+            if job["status"] in {"completed", "failed"}:
+                break
+        assert job["status"] == "completed"
+        graph_id = job["result"]["graph"]["id"]
+
+        # Simulate a service restart: durable rows remain, process-local caches
+        # do not. The public GET/list APIs must hydrate from SQLite.
+        research_service._jobs.clear()
+        graph_service._graphs.clear()
+        graph_service._patches.clear()
+
+        restored_job = client.get(f"/api/v1/analyses/{job_id}")
+        restored_graph = client.get(f"/api/v1/graphs/{graph_id}")
+        listed_jobs = client.get("/api/v1/analyses")
+        listed_graphs = client.get("/api/v1/graphs")
+
+        assert restored_job.status_code == 200
+        assert restored_job.json()["status"] == "completed"
+        assert restored_graph.status_code == 200
+        assert restored_graph.json()["id"] == graph_id
+        assert any(item["id"] == job_id for item in listed_jobs.json())
+        assert any(item["id"] == graph_id for item in listed_graphs.json())
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_storage_path_is_configurable_and_clear_is_available(tmp_path, monkeypatch) -> None:
+    database_path = tmp_path / "custom-wishforge.db"
+    monkeypatch.setenv("WISHFORGE_STORAGE_PATH", str(database_path))
+    settings = Settings()
+    assert settings.storage_path == str(database_path)
+
+    isolated = Storage(str(database_path))
+    assert database_path.exists()
+    isolated.clear()
+    isolated.close()
+
+
+def test_shared_storage_clear_removes_analysis_and_graph_rows() -> None:
+    graph = _seed_graph()
+    assert storage.get_graph(graph.id) is not None
+    storage.clear()
+    assert storage.get_graph(graph.id) is None
+    assert storage.list_analyses() == []

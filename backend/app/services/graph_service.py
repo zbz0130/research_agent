@@ -1,17 +1,24 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import hashlib
+import re
 from threading import RLock
 
 from app.research_schemas import (
     ConceptEdge,
     ConceptGraph,
-    GraphMetadataUpdate,
     ConceptNode,
+    GraphMetadataUpdate,
     GraphOperation,
     GraphPatch,
     GraphPatchCreate,
+    GraphCompareCreate,
+    GraphCompareResult,
+    GraphConnection,
+    GraphSubsetResult,
 )
+from app.storage import storage
 
 
 class GraphNotFound(KeyError):
@@ -23,7 +30,13 @@ class GraphConflict(ValueError):
 
 
 class GraphService:
-    """Versioned in-memory graph store used by the first research MVP."""
+    """Versioned concept-graph repository with SQLite persistence.
+
+    The service keeps validation and patch semantics here, while ``Storage``
+    provides durable documents.  A successful graph write uses an indexed
+    ``version`` compare-and-swap so two server workers cannot silently
+    overwrite one another's edits.
+    """
 
     def __init__(self) -> None:
         self._graphs: dict[str, ConceptGraph] = {}
@@ -32,43 +45,187 @@ class GraphService:
 
     def save(self, graph: ConceptGraph) -> ConceptGraph:
         with self._lock:
-            # Store a validated copy so callers cannot mutate the in-memory
-            # graph behind the versioning/patch mechanism.
             stored = ConceptGraph.model_validate(graph.model_dump())
-            self._graphs[stored.id] = stored
+            storage.save_graph(stored)
+            self._graphs[stored.id] = stored.model_copy(deep=True)
             return stored.model_copy(deep=True)
 
     def get(self, graph_id: str) -> ConceptGraph:
         with self._lock:
-            graph = self._graphs.get(graph_id)
+            graph = storage.get_graph(graph_id)
             if graph is None:
                 raise GraphNotFound(graph_id)
+            self._graphs[graph.id] = graph.model_copy(deep=True)
             return graph.model_copy(deep=True)
 
     def list(self, project_id=None) -> list[ConceptGraph]:
-        """Return graph snapshots for the graph picker in the workspace."""
-
         with self._lock:
-            graphs = [
-                graph
-                for graph in self._graphs.values()
-                if project_id is None or graph.project_id == project_id
-            ]
+            graphs = storage.list_graphs(str(project_id) if project_id else None)
+            self._graphs = {graph.id: graph.model_copy(deep=True) for graph in graphs}
             return [graph.model_copy(deep=True) for graph in graphs]
 
     def list_patches(self, graph_id: str) -> list[GraphPatch]:
         with self._lock:
-            if graph_id not in self._graphs:
+            if storage.get_graph(graph_id) is None:
                 raise GraphNotFound(graph_id)
-            patches = [patch for patch in self._patches.values() if patch.graph_id == graph_id]
-            patches.sort(key=lambda item: item.created_at)
+            patches = storage.list_patches(graph_id)
+            self._patches = {patch.id: patch.model_copy(deep=True) for patch in patches}
             return [patch.model_copy(deep=True) for patch in patches]
+
+    def compare(self, payload: GraphCompareCreate) -> GraphCompareResult:
+        """Find cautious cross-graph connections without mutating either graph.
+
+        The first version uses graph structure and node labels as a stable
+        fallback.  The output is intentionally a proposal list: a later
+        model-backed agent may enrich the wording and attach paper evidence,
+        but it must still write back through a reviewed GraphPatch.
+        """
+
+        with self._lock:
+            graphs: list[ConceptGraph] = []
+            for graph_id in payload.graph_ids:
+                graph = storage.get_graph(graph_id)
+                if graph is None:
+                    raise GraphNotFound(graph_id)
+                graphs.append(graph)
+
+            selected: dict[str, list[ConceptNode]] = {}
+            requested = set(payload.node_ids)
+            for graph in graphs:
+                nodes = [
+                    node
+                    for node in graph.nodes
+                    if node.node_type in {"concept", "method", "problem", "idea", "note"}
+                    and (not requested or node.id in requested)
+                ]
+                # Keep a comparison bounded and readable. Prefer explicit
+                # problem/method nodes over the automatically generated paper
+                # leaves when a graph is large.
+                nodes.sort(
+                    key=lambda node: (
+                        {"problem": 0, "method": 1, "idea": 2, "concept": 3, "note": 4}.get(
+                            node.node_type, 5
+                        ),
+                        node.id,
+                    )
+                )
+                selected[graph.id] = nodes[:12]
+
+            connections: list[GraphConnection] = []
+            for left_index, left in enumerate(graphs):
+                for right in graphs[left_index + 1 :]:
+                    pairs: list[tuple[int, ConceptNode, ConceptNode, str]] = []
+                    for source in selected[left.id]:
+                        for target in selected[right.id]:
+                            if source.id == target.id and source.id == left.root_id:
+                                continue
+                            relation, score = _compare_relation(source, target)
+                            if score <= 0:
+                                continue
+                            pairs.append((score, source, target, relation))
+                    pairs.sort(key=lambda item: (-item[0], item[1].id, item[2].id))
+                    for _, source, target, relation in pairs[:4]:
+                        connections.append(
+                            GraphConnection(
+                                source_graph_id=left.id,
+                                target_graph_id=right.id,
+                                source_node_id=source.id,
+                                target_node_id=target.id,
+                                relation=relation,
+                                idea=(
+                                    f"能否把“{source.label}”中的机制借鉴到“{target.label}”，"
+                                    f"围绕“{payload.focus}”设计一个最小对照实验？"
+                                ),
+                                source_evidence_ids=list(source.evidence_ids),
+                                target_evidence_ids=list(target.evidence_ids),
+                                confidence="low",
+                                validation_steps=[
+                                    "先阅读两个节点关联的原始论文，确认术语和适用条件不是表面相似",
+                                    "固定数据、预算和评价指标，只替换一个跨域机制",
+                                    "报告正例、失败案例、额外开销和消融结果",
+                                ],
+                            )
+                        )
+
+            warnings = [
+                "跨图连接是模型/规则生成的未验证假设，不代表论文已经证明该组合有效。",
+                "当前比较使用节点标签、类型和已有证据 ID；尚未做全文语义验证。",
+            ]
+            if payload.node_ids and not any(selected.values()):
+                warnings.append("指定的节点子集在所选概念图中都不存在，因此没有可比较节点。")
+            if not connections:
+                warnings.append("当前节点子集没有形成明显的跨域候选，可以扩大节点选择或修改研究焦点。")
+            return GraphCompareResult(
+                graph_ids=list(payload.graph_ids),
+                focus=payload.focus,
+                connections=connections[:12],
+                warnings=warnings,
+            )
+
+    def subset(
+        self,
+        graph_id: str,
+        node_ids: list[str],
+        *,
+        include_ancestors: bool = True,
+    ) -> GraphSubsetResult:
+        """Return an ephemeral, non-persisted view of part of a graph."""
+
+        with self._lock:
+            graph = storage.get_graph(graph_id)
+            if graph is None:
+                raise GraphNotFound(graph_id)
+            requested = {node_id for node_id in node_ids if node_id}
+            known = {node.id for node in graph.nodes}
+            selected = requested & known
+            warnings: list[str] = []
+            if requested - known:
+                warnings.append("部分 node_id 不存在，已忽略。")
+            if not selected:
+                raise GraphConflict("至少需要一个存在于图谱中的 node_id")
+
+            if include_ancestors:
+                parents: dict[str, set[str]] = {}
+                for edge in graph.edges:
+                    if edge.relation in {"is_a", "part_of"}:
+                        parents.setdefault(edge.target, set()).add(edge.source)
+                frontier = list(selected)
+                while frontier:
+                    current = frontier.pop()
+                    for parent in parents.get(current, set()):
+                        if parent in known and parent not in selected:
+                            selected.add(parent)
+                            frontier.append(parent)
+            selected.add(graph.root_id)
+            nodes = [node for node in graph.nodes if node.id in selected]
+            edges = [
+                edge
+                for edge in graph.edges
+                if edge.source in selected and edge.target in selected
+            ]
+            digest = hashlib.sha1(",".join(sorted(selected)).encode("utf-8")).hexdigest()[:12]
+            subset_graph = ConceptGraph(
+                id=f"{graph.id}:subset:{digest}",
+                project_id=graph.project_id,
+                name=f"{graph.name} · 局部视图",
+                description="临时裁剪视图，不会修改或覆盖原概念图。",
+                root_id=graph.root_id,
+                version=graph.version,
+                nodes=nodes,
+                edges=edges,
+                created_at=graph.created_at,
+                updated_at=graph.updated_at,
+            )
+            return GraphSubsetResult(
+                source_graph_id=graph.id,
+                graph=subset_graph,
+                selected_node_ids=sorted(selected),
+                warnings=warnings,
+            )
 
     def update_metadata(self, graph_id: str, payload: GraphMetadataUpdate) -> ConceptGraph:
         with self._lock:
-            graph = self._graphs.get(graph_id)
-            if graph is None:
-                raise GraphNotFound(graph_id)
+            graph = self.get(graph_id)
             expected_version = payload.base_version or graph.version
             if expected_version != graph.version:
                 raise GraphConflict(
@@ -83,20 +240,22 @@ class GraphService:
             candidate.version += 1
             candidate.updated_at = datetime.now(timezone.utc)
             validated = ConceptGraph.model_validate(candidate.model_dump())
-            self._graphs[graph_id] = validated
+            if not storage.update_graph_if_version(validated, expected_version):
+                raise GraphConflict(
+                    f"graph version changed: expected {expected_version}, current version is newer"
+                )
+            self._graphs[graph_id] = validated.model_copy(deep=True)
             return validated.model_copy(deep=True)
 
     def clear(self) -> None:
         with self._lock:
             self._graphs.clear()
             self._patches.clear()
+            storage.clear_graphs()
 
     def create_patch(self, graph_id: str, payload: GraphPatchCreate) -> GraphPatch:
         with self._lock:
-            graph = self._graphs.get(graph_id)
-            if graph is None:
-                raise GraphNotFound(graph_id)
-
+            graph = self.get(graph_id)
             expected_version = payload.base_version or graph.version
             patch = GraphPatch(
                 graph_id=graph_id,
@@ -107,38 +266,54 @@ class GraphService:
                 status="proposed",
             )
 
-            # Validate against a copy before persisting a proposal. This
-            # catches stale versions and invalid operations at proposal time,
-            # while keeping the real graph untouched for agent patches.
+            # Validate against a copy before persisting a proposal. This also
+            # catches stale versions without changing the real graph.
             self._validate_patch_locked(graph, patch)
             if payload.actor == "user":
+                previous_version = graph.version
                 self._apply_patch_locked(graph, patch)
                 patch.status = "applied"
-            self._patches[patch.id] = patch
+                if not storage.update_graph_and_patch_if_version(graph, patch, previous_version):
+                    raise GraphConflict(
+                        f"graph version changed: expected {previous_version}, current version is newer"
+                    )
+                self._graphs[graph.id] = graph.model_copy(deep=True)
+            else:
+                storage.save_patch(patch)
+            self._patches[patch.id] = patch.model_copy(deep=True)
             return patch.model_copy(deep=True)
 
     def apply_patch(self, graph_id: str, patch_id: str) -> GraphPatch:
         with self._lock:
-            graph = self._graphs.get(graph_id)
-            patch = self._patches.get(patch_id)
-            if graph is None:
-                raise GraphNotFound(graph_id)
+            graph = self.get(graph_id)
+            patch = storage.get_patch(patch_id)
             if patch is None or patch.graph_id != graph_id:
                 raise GraphNotFound(patch_id)
+            self._patches[patch.id] = patch.model_copy(deep=True)
             if patch.status != "proposed":
                 raise GraphConflict(f"patch {patch_id} is already {patch.status}")
+            previous_version = graph.version
             self._apply_patch_locked(graph, patch)
             patch.status = "applied"
+            if not storage.update_graph_and_patch_if_version(graph, patch, previous_version):
+                raise GraphConflict(
+                    f"graph version changed: expected {previous_version}, current version is newer"
+                )
+            self._graphs[graph.id] = graph.model_copy(deep=True)
+            self._patches[patch.id] = patch.model_copy(deep=True)
             return patch.model_copy(deep=True)
 
     def reject_patch(self, graph_id: str, patch_id: str) -> GraphPatch:
         with self._lock:
-            patch = self._patches.get(patch_id)
+            self.get(graph_id)
+            patch = storage.get_patch(patch_id)
             if patch is None or patch.graph_id != graph_id:
                 raise GraphNotFound(patch_id)
             if patch.status != "proposed":
                 raise GraphConflict(f"patch {patch_id} is already {patch.status}")
             patch.status = "rejected"
+            storage.save_patch(patch)
+            self._patches[patch.id] = patch.model_copy(deep=True)
             return patch.model_copy(deep=True)
 
     def _apply_patch_locked(self, graph: ConceptGraph, patch: GraphPatch) -> None:
@@ -148,8 +323,7 @@ class GraphService:
             )
 
         # Apply to an isolated candidate first. If any operation fails, the
-        # stored graph remains byte-for-byte unchanged (transaction-like
-        # behavior for the in-memory MVP).
+        # stored graph remains unchanged (transaction-like behavior).
         candidate = graph.model_copy(deep=True)
         nodes = {node.id: node for node in candidate.nodes}
         edges = {edge.id: edge for edge in candidate.edges}
@@ -167,8 +341,6 @@ class GraphService:
         graph.updated_at = validated.updated_at
 
     def _validate_patch_locked(self, graph: ConceptGraph, patch: GraphPatch) -> None:
-        """Validate a patch without changing the stored graph."""
-
         candidate = graph.model_copy(deep=True)
         self._apply_patch_locked(candidate, patch)
 
@@ -192,8 +364,6 @@ class GraphService:
             if not current.editable:
                 raise GraphConflict("node is locked and cannot be updated")
             updates = operation.updates.model_dump(exclude_unset=True)
-            # Re-validate after merging; model_copy(update=...) bypasses
-            # Pydantic validation and would otherwise permit malformed values.
             nodes[operation.node_id] = ConceptNode.model_validate(
                 {**current.model_dump(), **updates}
             )
@@ -227,6 +397,32 @@ class GraphService:
             if not edge_id or edge_id not in edges:
                 raise GraphConflict("unknown edge")
             del edges[edge_id]
+
+def _compare_relation(source: ConceptNode, target: ConceptNode) -> tuple[str, int]:
+    """Return a simple, explainable priority for a cross-graph pair."""
+
+    if source.node_type == "problem" and target.node_type in {"method", "idea"}:
+        return "method_transfer", 5
+    if target.node_type == "problem" and source.node_type in {"method", "idea"}:
+        return "method_transfer", 5
+    if source.node_type == "problem" or target.node_type == "problem":
+        return "shared_problem", 4
+    if source.node_type in {"method", "idea"} and target.node_type in {"method", "idea"}:
+        return "cross_domain_candidate", 3
+    shared = _label_terms(source.label) & _label_terms(target.label)
+    if shared:
+        return "cross_domain_candidate", 2
+    if source.node_type != target.node_type:
+        return "cross_domain_candidate", 1
+    return "cross_domain_candidate", 0
+
+
+def _label_terms(value: str) -> set[str]:
+    return {
+        token
+        for token in re.findall(r"[a-z][a-z0-9_-]{2,}|[\u4e00-\u9fff]{2,}", value.lower())
+        if token not in {"概念", "方法", "问题", "机制", "相关"}
+    }
 
 
 graph_service = GraphService()

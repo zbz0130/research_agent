@@ -14,7 +14,9 @@
       ├── 摘要级 EvidenceCard
       ├── 解释 Provider（OpenAI-compatible / 规则回退）
       ├── ConceptGraph 构建
-      └── research 模式：谨慎的 InnovationCandidate
+      ├── research 模式：谨慎的 InnovationCandidate
+      ├── IdeaCheckService：范围化 prior-art 判断
+      └── SQLite Storage：任务、项目、图谱、Patch 和查重记录
       │
       ▼
 前端展示、用户编辑或批准 Agent GraphPatch
@@ -29,7 +31,7 @@ Browser（静态 HTML/CSS/JS）
   │ HTTP + 轮询
   ▼
 FastAPI API (/api/v1)
-  ├── ProjectService       研究项目（Stage 1 仍为内存）
+  ├── ProjectService       研究项目（SQLite）
   ├── ResearchService      分析任务编排与进度
   │     ├── SearchProvider
   │     │     ├── SemanticScholarProvider
@@ -38,6 +40,7 @@ FastAPI API (/api/v1)
   │           ├── OpenAICompatibleExplanationProvider
   │           └── RuleBasedExplanationProvider
   ├── GraphService         版本化概念图和 GraphPatch 审批
+  ├── IdeaCheckService     想法查重、相似度分级和替代验证方向
   └── SettingsService      分用途 API Key 状态（不返回明文）
 ```
 
@@ -48,6 +51,7 @@ FastAPI API (/api/v1)
 - `WISHFORGE_EXPERIMENT_API_KEY` 预留给未来执行器，本阶段不会使用；
 - 外部论文或网页内容是“不可信输入”，不能改变系统提示词、工具权限或 API Key；
 - 论文全文只应来自开放来源或用户合法提供的文件。本阶段默认只处理 Semantic Scholar 元数据和摘要。
+- IdeaCheck 的 L0–L4 是检索范围内的分诊信号，不是专利或论文法律意义上的新颖性结论。
 
 ## 3. API 契约
 
@@ -60,9 +64,14 @@ FastAPI API (/api/v1)
 | POST | `/api/v1/analyses` | 创建异步概念分析任务，返回 `202` 和任务 ID |
 | GET | `/api/v1/analyses` | 查看最近分析任务摘要 |
 | GET | `/api/v1/analyses/{analysis_id}` | 查看状态、阶段进度和完成结果 |
-| GET | `/api/v1/graphs` | 获取当前进程中的概念图列表，可按 `project_id` 过滤 |
+| POST | `/api/v1/ideas/check` | 对一个研究想法做有界 prior-art 判断并保存结果 |
+| GET | `/api/v1/ideas/checks` | 获取已保存的想法查重记录 |
+| GET | `/api/v1/ideas/checks/{check_id}` | 获取一条想法查重记录 |
+| GET | `/api/v1/graphs` | 获取 SQLite 中的概念图列表，可按 `project_id` 过滤 |
 | GET | `/api/v1/graphs/{graph_id}` | 获取当前概念图和版本号 |
+| GET | `/api/v1/graphs/{graph_id}/subset?node_ids=a,b` | 获取不修改原图的局部裁剪视图 |
 | PATCH | `/api/v1/graphs/{graph_id}` | 修改概念图名称、说明或根节点（带版本检查） |
+| POST | `/api/v1/graphs/compare` | 选择多棵图或节点子集，生成未验证的跨图连接候选 |
 | POST | `/api/v1/graphs/{graph_id}/patches` | 创建用户修改或 Agent 修改提案 |
 | GET | `/api/v1/graphs/{graph_id}/patches` | 获取该图的修改提案历史 |
 | POST | `/api/v1/graphs/{graph_id}/nodes/{node_id}/explanation-patch` | 让 Agent 生成节点解释提案（仍需批准） |
@@ -77,7 +86,10 @@ FastAPI API (/api/v1)
 - `explanation`：一句话、直觉类比、技术机制、演变、相关概念、限制和关联证据 ID；
 - `graph`：节点、边、根节点和版本；
 - `innovation_candidates`：研究模式下的候选、最近工作、风险和验证步骤；
+- `IdeaCheckResult`：想法、检索词、匹配论文、L0–L4、置信度、替代方向和验证步骤；
 - `warnings` / `novelty_note`：明确说明 Demo、回退和新颖性检索边界。
+
+持久化表为 `projects`、`analysis_jobs`、`concept_graphs`、`graph_patches` 和 `idea_checks`。图谱应用修改使用版本 compare-and-swap，并把图和 Patch 放在同一 SQLite 事务中提交。
 
 ## 4. GraphPatch 为什么是必要的
 
@@ -108,8 +120,7 @@ Agent 生成 GraphPatch
 - “确保 arXiv 没有相同论文”或任何绝对新颖性承诺；
 - 全量 PDF 图表理解和商业数据库的版权内容；
 - 真实仪器控制、耗材管理和任意代码执行；
-- 多用户权限、团队协作和跨多个概念树的自动合并；
-- 服务器重启后仍可恢复的持久化数据库。
+- 多用户权限、团队协作和跨多个概念树的自动合并（当前只生成跨图候选，不自动合并）；
 
 社区讨论若在后续接入，应标记为探索性痛点信号；模型脑暴应标记为未验证假设；论文 `Discussion`、`Conclusion`、`Limitations` 和 `Future Work` 应单独保存原文定位，不能与事实证据混成一栏。
 
@@ -132,4 +143,6 @@ Agent 生成 GraphPatch
 4. 手动编辑一个节点；
 5. 提交一个 Agent GraphPatch，预览后批准；
 6. 观察版本从 `v1` 变为 `v2`；
-7. 切换“研究线索”，检查候选和新颖性免责声明。
+7. 切换“研究线索”，检查候选和新颖性免责声明；
+8. 在“想法查重”中输入 `PagedAttention 管理 KV cache`，确认会显示 L0–L4、匹配论文和人工核验步骤；
+9. 创建第二棵概念图，在“跨图借鉴”中选择两棵图，确认结果带有低置信度和验证步骤，且原图版本不变。

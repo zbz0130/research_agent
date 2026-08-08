@@ -24,6 +24,7 @@ from app.research_schemas import (
     GraphPatch,
     GraphPatchCreate,
 )
+from app.storage import storage
 from app.services.graph_service import graph_service
 from app.services.research_providers import (
     DemoSearchProvider,
@@ -57,6 +58,7 @@ class ResearchService:
         )
         with self._lock:
             self._jobs[job.id] = job
+            storage.save_analysis(job)
         self._executor.submit(self._run, job.id, payload, settings)
         return job.model_copy(deep=True)
 
@@ -64,12 +66,16 @@ class ResearchService:
         with self._lock:
             job = self._jobs.get(job_id)
             if job is None:
-                raise AnalysisNotFound(job_id)
+                job = storage.get_analysis(str(job_id))
+                if job is None:
+                    raise AnalysisNotFound(job_id)
+                self._jobs[job.id] = job
             return job.model_copy(deep=True)
 
     def list(self) -> list[AnalysisSummary]:
         with self._lock:
-            jobs = sorted(self._jobs.values(), key=lambda item: item.created_at, reverse=True)
+            jobs = storage.list_analyses()
+            self._jobs = {job.id: job for job in jobs}
             return [
                 AnalysisSummary(
                     id=job.id,
@@ -88,6 +94,7 @@ class ResearchService:
         with self._lock:
             self._jobs.clear()
         graph_service.clear()
+        storage.clear_research()
 
     def propose_node_explanation(
         self,
@@ -276,6 +283,7 @@ class ResearchService:
             if job is not None:
                 for key, value in changes.items():
                     setattr(job, key, value)
+                storage.save_analysis(job)
 
 
 def _search_provider(settings: Settings) -> SearchProvider:

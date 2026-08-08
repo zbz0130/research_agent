@@ -24,6 +24,19 @@ const innovationsEl = document.querySelector("#innovations");
 const noveltyNoteEl = document.querySelector("#novelty-note");
 const patchCardEl = document.querySelector("#patch-card");
 const patchesEl = document.querySelector("#patches");
+const ideaCheckForm = document.querySelector("#idea-check-form");
+const ideaCheckInput = document.querySelector("#idea-check-input");
+const ideaMaxPapersInput = document.querySelector("#idea-max-papers");
+const ideaCheckSubmit = document.querySelector("#idea-check-submit");
+const ideaCheckMessageEl = document.querySelector("#idea-check-message");
+const ideaCheckResultEl = document.querySelector("#idea-check-result");
+const graphCompareForm = document.querySelector("#graph-compare-form");
+const graphComparePickerEl = document.querySelector("#graph-compare-picker");
+const graphCompareNodesInput = document.querySelector("#graph-compare-nodes");
+const graphCompareFocusInput = document.querySelector("#graph-compare-focus");
+const graphCompareSubmit = document.querySelector("#graph-compare-submit");
+const graphCompareMessageEl = document.querySelector("#graph-compare-message");
+const graphCompareResultEl = document.querySelector("#graph-compare-result");
 
 const state = {
   analysisId: null,
@@ -68,6 +81,15 @@ const displayLabels = {
   unclear: "关系未核验",
   unverified: "未人工核验",
   reviewed: "已人工核验",
+  needs_review: "待人工核验",
+  dismissed: "已忽略",
+  cross_domain_candidate: "跨领域候选",
+  shared_problem: "共同问题",
+  method_transfer: "方法迁移候选",
+  not_checked: "未单独检查",
+  indirect_metadata: "由论文元数据间接发现",
+  checked: "已检查",
+  unavailable: "检查不可用",
 };
 
 function displayLabel(value) {
@@ -278,6 +300,78 @@ function renderInnovations(result) {
   noveltyNoteEl.textContent = result.novelty_note || "当前没有可用的新颖性范围说明。";
 }
 
+const noveltyLabels = {
+  L0: "L0 · 直接已有工作",
+  L1: "L1 · 核心方法高度相似",
+  L2: "L2 · 组件或组合相似",
+  L3: "L3 · 问题相近但机制不同",
+  L4: "L4 · 当前范围未发现直接等价",
+};
+
+function setIdeaCheckMessage(text, kind = "") {
+  ideaCheckMessageEl.textContent = text;
+  ideaCheckMessageEl.className = `form-message ${kind}`;
+}
+
+function renderIdeaCheck(result) {
+  const novelty = result.novelty || {};
+  const papers = result.papers || [];
+  const alternatives = result.alternative_ideas || [];
+  ideaCheckResultEl.classList.remove("hidden");
+  ideaCheckResultEl.innerHTML = `
+    ${(result.warnings || []).length ? `<div class="warning-box"><strong>判断边界</strong><ul>${result.warnings.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul></div>` : ""}
+    <div class="idea-verdict">
+      <div>
+        <p class="section-label">当前检索结论</p>
+        <h3>${escapeHtml(noveltyLabels[result.similarity_level] || result.similarity_level || "未分级")}</h3>
+        <p>${escapeHtml(result.current_conclusion || result.similarity_reason || "暂无结论")}</p>
+      </div>
+      <span class="tag tag-missing">置信度 ${escapeHtml(result.confidence || novelty.confidence || "low")}</span>
+    </div>
+    <dl class="idea-meta">
+      <div><dt>匹配理由</dt><dd>${escapeHtml(result.similarity_reason || novelty.reason || "暂无")}</dd></div>
+      <div><dt>检索范围</dt><dd>${escapeHtml(novelty.scope_note || result.search_scope || "标题、摘要和元数据")}</dd></div>
+      <div><dt>arXiv 状态</dt><dd>${escapeHtml(displayLabel(result.arxiv_status || "not_checked"))}（没有单独查询不能当作排除证明）</dd></div>
+      <div><dt>人工状态</dt><dd>${escapeHtml(displayLabel(result.manual_review_status || "needs_review"))}</dd></div>
+    </dl>
+    ${papers.length ? `<div class="idea-papers"><p class="section-label">最相关资料（摘要级）</p>${papers.slice(0, 5).map((paper) => `
+      <div class="idea-paper-row"><strong>${escapeHtml(paper.title)}</strong><span>${escapeHtml(paper.year || "年份未知")} · ${escapeHtml(displayLabel(paper.source_kind || "academic"))}</span></div>
+    `).join("")}</div>` : `<p class="empty">没有返回论文，建议补充英文术语后重试。</p>`}
+    ${alternatives.length ? `<div class="idea-alternatives"><p class="section-label">从当前想法改造出的候选</p>${alternatives.map((candidate) => `
+      <article class="innovation-row"><h3>${escapeHtml(candidate.title)}</h3><p>${escapeHtml(candidate.rationale)}</p><div class="validation-box"><strong>最小验证</strong><ol>${(candidate.validation_steps || []).map((step) => `<li>${escapeHtml(step)}</li>`).join("")}</ol></div><p class="warning-inline">${escapeHtml(candidate.warning || "未验证")}</p></article>
+    `).join("")}</div>` : ""}
+    <div class="validation-box"><strong>建议下一步</strong><ol>${(result.validation_steps || []).map((step) => `<li>${escapeHtml(step)}</li>`).join("")}</ol></div>
+  `;
+}
+
+async function checkIdea(idea, maxPapers) {
+  const response = await fetch("/api/v1/ideas/check", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ idea, max_papers: maxPapers, language: "zh-CN" }),
+  });
+  if (!response.ok) throw new Error(await response.text());
+  return response.json();
+}
+
+ideaCheckForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const idea = ideaCheckInput.value.trim();
+  if (!idea) return;
+  ideaCheckSubmit.disabled = true;
+  ideaCheckResultEl.classList.add("hidden");
+  setIdeaCheckMessage("正在检索相似工作…");
+  try {
+    const result = await checkIdea(idea, Number(ideaMaxPapersInput.value));
+    renderIdeaCheck(result);
+    setIdeaCheckMessage("查重完成；请打开匹配论文并人工核对。", "");
+  } catch (error) {
+    setIdeaCheckMessage(`查重失败：${error.message}`, "error-text");
+  } finally {
+    ideaCheckSubmit.disabled = false;
+  }
+});
+
 function graphDepths(graph) {
   const parentByNode = {};
   graph.edges.filter((edge) => ["is_a", "part_of"].includes(edge.relation)).forEach((edge) => {
@@ -358,8 +452,12 @@ async function loadGraphPicker(selectedId = state.graphId) {
   const response = await fetch("/api/v1/graphs");
   if (!response.ok) return;
   const graphs = await response.json();
+  const previousCompareSelection = new Set(
+    [...graphComparePickerEl.selectedOptions].map((option) => option.value),
+  );
   if (!graphs.length) {
     graphPickerEl.classList.add("hidden");
+    graphComparePickerEl.innerHTML = '<option disabled>完成分析后这里会出现概念图</option>';
     return;
   }
   graphPickerEl.classList.remove("hidden");
@@ -367,6 +465,12 @@ async function loadGraphPicker(selectedId = state.graphId) {
     `<option value="${escapeHtml(graph.id)}">${escapeHtml(graph.name)} · v${escapeHtml(graph.version)}</option>`,
   ).join("");
   if (selectedId && graphs.some((graph) => graph.id === selectedId)) graphPickerEl.value = selectedId;
+  graphComparePickerEl.innerHTML = graphs.map((graph) =>
+    `<option value="${escapeHtml(graph.id)}">${escapeHtml(graph.name)} · v${escapeHtml(graph.version)}</option>`,
+  ).join("");
+  [...graphComparePickerEl.options].forEach((option) => {
+    option.selected = previousCompareSelection.has(option.value) || option.value === selectedId;
+  });
 }
 
 graphPickerEl.addEventListener("change", async () => {
@@ -375,6 +479,61 @@ graphPickerEl.addEventListener("change", async () => {
     await refreshGraph();
   } catch (error) {
     setGraphMessage(`概念图加载失败：${error.message}`, "error-text");
+  }
+});
+
+function setGraphCompareMessage(text, kind = "") {
+  graphCompareMessageEl.textContent = text;
+  graphCompareMessageEl.className = `form-message ${kind}`;
+}
+
+function renderGraphCompare(result) {
+  graphCompareResultEl.classList.remove("hidden");
+  const connections = result.connections || [];
+  graphCompareResultEl.innerHTML = `
+    ${(result.warnings || []).length ? `<div class="warning-box"><strong>使用前请注意</strong><ul>${result.warnings.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul></div>` : ""}
+    ${connections.length ? `<div class="cross-connection-list">${connections.map((connection) => `
+      <article class="cross-connection-row">
+        <div class="paper-title-line"><h3>${escapeHtml(connection.relation || "cross_domain_candidate")}</h3><span class="tag tag-missing">${escapeHtml(connection.confidence || "low")} · 未验证</span></div>
+        <p class="cross-connection-path">${escapeHtml(connection.source_node_id)} → ${escapeHtml(connection.target_node_id)}</p>
+        <p>${escapeHtml(connection.idea)}</p>
+        <div class="validation-box"><strong>验证步骤</strong><ol>${(connection.validation_steps || []).map((step) => `<li>${escapeHtml(step)}</li>`).join("")}</ol></div>
+      </article>
+    `).join("")}</div>` : '<p class="empty">没有生成跨图候选。可以扩大节点选择或调整比较焦点。</p>'}
+  `;
+}
+
+graphCompareForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const graphIds = [...graphComparePickerEl.selectedOptions].map((option) => option.value);
+  if (graphIds.length < 2) {
+    setGraphCompareMessage("请至少选择两棵概念图。", "error-text");
+    return;
+  }
+  const nodeIds = graphCompareNodesInput.value
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+  graphCompareSubmit.disabled = true;
+  graphCompareResultEl.classList.add("hidden");
+  setGraphCompareMessage("正在比较图谱中的机制和问题…");
+  try {
+    const response = await fetch("/api/v1/graphs/compare", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        graph_ids: graphIds,
+        node_ids: nodeIds,
+        focus: graphCompareFocusInput.value.trim() || "找出可以互相借鉴的机制，并给出最小验证实验",
+      }),
+    });
+    if (!response.ok) throw new Error(await response.text());
+    renderGraphCompare(await response.json());
+    setGraphCompareMessage("跨图候选已生成；它不会自动改动原图。", "");
+  } catch (error) {
+    setGraphCompareMessage(`跨图比较失败：${error.message}`, "error-text");
+  } finally {
+    graphCompareSubmit.disabled = false;
   }
 });
 
