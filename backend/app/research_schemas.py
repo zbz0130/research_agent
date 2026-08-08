@@ -5,6 +5,8 @@ from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.evidence_schemas import EvidenceLedger
+
 
 AnalysisLevel = Literal["quick", "literature", "research"]
 AnalysisStatus = Literal["queued", "running", "completed", "failed"]
@@ -376,6 +378,10 @@ class AnalysisResult(BaseModel):
     innovation_candidates: list[InnovationCandidate] = Field(default_factory=list)
     novelty_note: str | None = None
     research_brief: ResearchBrief | None = None
+    # Claim-level provenance is kept alongside the original evidence cards so
+    # the UI can show which generated statements are supported, contradicted,
+    # or still unverified without changing the existing response contract.
+    evidence_ledger: EvidenceLedger | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 

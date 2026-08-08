@@ -2,7 +2,7 @@
 
 面向科研人员的证据驱动研究工作台：把一个模糊想法变成有来源、能理解、可继续研究的知识。
 
-当前仓库处于 **Stage 1：概念分析与研究线索 MVP**。这一阶段已经打通“概念 → 论文检索 → 证据卡 → 易懂解释 → 概念图”的首条闭环，并新增“研究想法 → 范围化 prior-art 判断”“三路研究 Agent Brief”和“多图 → 跨领域候选”的可验收入口。真实社交平台实时抓取、全文页码级证据、团队权限和实验执行仍属于后续阶段。
+当前仓库处于 **Stage 1：概念分析与研究线索 MVP**。这一阶段已经打通“概念 → 论文检索 → 证据卡 → 主张—证据账本 → 易懂解释 → 概念图”的首条闭环，并新增“研究想法 → 范围化 prior-art 判断”“三路研究 Agent Brief”“多图 → 跨领域候选”和“创新候选 → 实验方案草案”的可验收入口。真实社交平台实时抓取、全文页码级证据、团队权限和实验执行仍属于后续阶段。
 
 ## 当前分支
 
@@ -10,7 +10,7 @@
 
 ```text
 main
-  └── codex/literature-explanation  # 当前阶段：概念分析 + 研究 Brief + 多图视图（待验收）
+  └── codex/first-version-evidence-ledger  # 当前阶段：证据账本 + 实验方案草案（待验收）
 ```
 
 每个阶段完成后先由项目负责人验收，再合并到 `main`。未通过验收的阶段不会直接进入 `main`。
@@ -26,6 +26,8 @@ main
 - **想法查重**：输入一段研究想法，展示实际检索词、匹配论文、摘要级证据、L0–L4 相似度分级、替代方向和最小验证步骤；结果保存到 SQLite，方便回看。
 - **跨图借鉴**：保存多棵概念图后，可选择多图和节点子集，生成带关系类型、证据 ID、风险提示和验证步骤的跨领域候选；候选不会自动写回原图。
 - **多图画布**：在网页中选择多棵已保存概念图并排查看，也可以按节点 ID生成临时局部视图；局部视图不改变源图。
+- **主张—证据账本**：把解释中的定义、机制、演变和限制拆成可追踪主张，显示证据关联、覆盖率、置信度和下一步人工核验动作；没有人工核验时不会把摘要线索显示成“已证实”。
+- **实验方案草案**：从自由文本、创新候选或 prior-art 结果生成假设、基线、变量、控制项、指标、消融、预期结果、失败判据、资源估计和证据来源。草案可以保存并由用户批准/退回/拒绝，但本阶段始终不执行代码或实验。
 
 概念图支持改名、节点手动编辑/新增，以及让 Agent 为节点生成解释。所有 Agent 修改都通过 `GraphPatch`：先进入“待批准”状态，服务端按图谱版本检查冲突后才应用；用户自己的修改则立即应用。
 
@@ -137,6 +139,23 @@ Invoke-RestMethod -Method Post http://localhost:8000/api/v1/ideas/check `
 
 返回的 `similarity_level` 使用以下含义：`L0` 直接已有工作、`L1` 核心方法高度相似、`L2` 组件或组合相似、`L3` 问题相近但机制不同、`L4` 当前检索范围未发现直接等价。所有级别都需要人工复核。
 
+实验方案草案示例：
+
+```powershell
+$plan = Invoke-RestMethod -Method Post http://localhost:8000/api/v1/experiments/plans `
+  -ContentType "application/json" `
+  -Body '{"idea":"降低长上下文 LLM 推理的 KV Cache 显存占用","baseline":"标准 KV Cache 管理"}'
+
+Invoke-RestMethod "http://localhost:8000/api/v1/experiments/plans/$($plan.id)"
+
+Invoke-RestMethod -Method Post `
+  "http://localhost:8000/api/v1/experiments/plans/$($plan.id)/review" `
+  -ContentType "application/json" `
+  -Body '{"status":"approved","note":"先做小规模预实验","reviewer":"researcher"}'
+```
+
+无论审阅状态是什么，返回中的 `execution_status` 都保持 `not_started`。它是“可审阅协议”，不是实验观测结果。
+
 ## Docker 运行
 
 ```powershell
@@ -162,5 +181,7 @@ docker compose up --build
 - `python -m pytest` 全部通过；
 - README、架构说明和后续执行器边界清晰；
 - 不在本阶段引入任意代码执行权限。
+- 实验方案可以保存、重启后恢复并记录人工审阅状态；批准不会启动执行器；
+- 分析结果可以通过 `GET /api/v1/analyses/{analysis_id}/evidence-ledger` 查看主张—证据账本。
 
-下一阶段优先实现全文/用户文献库、主张级证据绑定、arXiv/OpenAlex/Crossref 多源检索、真实社区连接器、Discussion/Future Work 结构化阅读和更严格的 Agent 预算/重试；之后再接入经过人工批准、默认只读的隔离计算实验执行器。
+下一阶段优先实现全文/用户文献库、arXiv/OpenAlex/Crossref 多源检索、真实社区连接器、Discussion/Future Work 结构化阅读、证据冲突和覆盖度驱动的自适应检索，以及更严格的 Agent 预算/重试；之后再接入经过人工批准、默认只读的隔离计算实验执行器。

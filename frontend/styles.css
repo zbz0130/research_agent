@@ -101,6 +101,19 @@ select { width: 100%; margin-top: 7px; border: 1px solid #34465b; border-radius:
 .evidence-item p { margin: 5px 0; color: #d1deeb; line-height: 1.6; }
 .evidence-item small { color: #8295aa; line-height: 1.5; }
 .evidence-label { color: #8fbee7; font-size: 0.72rem; font-weight: 800; letter-spacing: 0.08em; }
+.evidence-ledger { margin-top: 22px; border-top: 1px solid #2a3a4e; padding-top: 18px; }
+.ledger-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
+.ledger-heading h3 { margin: 3px 0 0; color: #dceafa; }
+.ledger-claims { display: grid; gap: 10px; margin-top: 12px; }
+.ledger-claim { border: 1px solid #3d5067; border-radius: 11px; padding: 11px 13px; background: rgba(37, 55, 75, 0.28); }
+.ledger-claim.contradicted { border-color: rgba(210, 128, 128, 0.7); }
+.ledger-claim.hypothesis { border-style: dashed; border-color: rgba(223, 193, 126, 0.65); }
+.ledger-claim-heading { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; }
+.ledger-claim > p { margin: 9px 0 5px; color: #d2dfed; line-height: 1.55; }
+.ledger-scope { color: #8295aa; line-height: 1.45; }
+.ledger-links { margin: 8px 0 0; padding-left: 19px; color: #a9bfd4; line-height: 1.5; }
+.ledger-links li { margin: 4px 0; }
+.ledger-links small { display: block; color: #8195aa; }
 .graph-card { overflow: hidden; }
 .graph-placeholder { min-height: 250px; }
 .graph-node { position: relative; margin: 8px 0 8px calc(var(--depth) * 18px); border-left: 3px solid #4d7195; border-radius: 10px; padding: 11px 12px; background: #151e29; }
@@ -162,6 +175,7 @@ button.secondary { padding: 8px 12px; color: #c3d6e9; background: #26384c; }
 .innovation-card { margin-top: 18px; }
 .innovation-list { display: grid; gap: 14px; }
 .innovation-row { border: 1px solid #42526a; border-radius: 13px; padding: 16px; background: linear-gradient(135deg, rgba(45, 62, 86, 0.45), #151e29); }
+.innovation-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 13px; }
 .innovation-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 14px; }
 .innovation-heading h3 { color: #e4effb; line-height: 1.45; }
 .innovation-details { display: grid; gap: 10px; margin: 13px 0 0; }
@@ -193,6 +207,37 @@ button.secondary { padding: 8px 12px; color: #c3d6e9; background: #26384c; }
 .brief-candidate p { margin: 7px 0; color: #b7c8d8; line-height: 1.5; }
 .brief-candidate small, .brief-coverage { color: #d0b77f; line-height: 1.5; }
 .brief-coverage { margin: 0; font-size: 0.78rem; }
+.experiment-card { margin-top: 18px; }
+.experiment-form-grid { grid-template-columns: 1fr 1fr; }
+.experiment-plan-result { margin-top: 20px; border-top: 1px solid #2a3a4e; padding-top: 20px; }
+.experiment-plan-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; margin-bottom: 14px; }
+.experiment-plan-heading h3 { margin: 3px 0 4px; color: #e4effb; line-height: 1.45; }
+.experiment-plan-id { color: #8295aa; font-family: "SFMono-Regular", Consolas, monospace; font-size: 0.7rem; word-break: break-all; }
+.experiment-plan-status { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 7px; }
+.experiment-section { margin-top: 16px; border-top: 1px solid #2a3a4e; padding-top: 14px; }
+.experiment-section > p:not(.section-label) { margin: 5px 0 0; color: #becddd; line-height: 1.65; }
+.experiment-section-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.experiment-section-grid .experiment-section { margin-top: 12px; }
+.experiment-item-list { display: grid; gap: 8px; margin-top: 8px; }
+.experiment-item { border: 1px solid #34495f; border-radius: 10px; padding: 10px 12px; background: rgba(45, 62, 86, 0.22); }
+.experiment-item-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.experiment-item strong { color: #dbe9f8; line-height: 1.4; }
+.experiment-item p { margin: 6px 0 0; color: #b6c7d8; line-height: 1.5; }
+.experiment-item small { display: block; margin-top: 5px; color: #8295aa; line-height: 1.5; }
+.failure-item { border-color: rgba(210, 128, 128, 0.55); }
+.experiment-step { border-left: 3px solid #6f9ac5; padding: 8px 11px; color: #b8c8d9; background: rgba(111, 154, 197, 0.08); line-height: 1.55; }
+.experiment-resource-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin: 9px 0 0; }
+.experiment-resource-grid div { border: 1px solid #304357; border-radius: 9px; padding: 8px 10px; background: rgba(42, 61, 83, 0.2); }
+.experiment-resource-grid dt { color: #8fb3d4; font-size: 0.72rem; font-weight: 800; }
+.experiment-resource-grid dd { margin: 4px 0 0; color: #c2d2e2; font-size: 0.82rem; }
+.resource-note { margin: 9px 0 0; color: #8295aa; font-size: 0.8rem; line-height: 1.5; }
+.experiment-review { margin-top: 18px; border: 1px solid #536b87; border-radius: 13px; padding: 14px; background: linear-gradient(135deg, rgba(56, 83, 113, 0.32), rgba(21, 30, 41, 0.8)); }
+.experiment-review-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.experiment-review-heading .settings-note { margin: 4px 0 0; }
+.experiment-review textarea { margin-top: 9px; }
+.experiment-review-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.danger-button { color: #e4b5b5 !important; background: #3a2931 !important; }
+.danger-button:hover { background: #52343d !important; }
 .patch-card { margin-top: 18px; }
 .patch-list { display: grid; gap: 12px; }
 .patch-row { display: flex; justify-content: space-between; align-items: flex-start; gap: 18px; border: 1px solid #5a536b; border-radius: 12px; padding: 14px 16px; background: rgba(78, 64, 96, 0.18); }
@@ -210,6 +255,10 @@ button.secondary { padding: 8px 12px; color: #c3d6e9; background: #26384c; }
   .paper-row { flex-direction: column; }
   .patch-row { flex-direction: column; }
   .innovation-details div { grid-template-columns: 1fr; gap: 3px; }
+  .experiment-form-grid, .experiment-section-grid { grid-template-columns: 1fr; }
+  .experiment-plan-heading, .experiment-review-heading { align-items: flex-start; flex-direction: column; }
+  .experiment-plan-status { justify-content: flex-start; }
+  .experiment-resource-grid { grid-template-columns: 1fr 1fr; }
   .brief-columns { grid-template-columns: 1fr; }
   .agent-run-row { align-items: flex-start; flex-direction: column; }
   .agent-run-row .tag { max-width: 100%; white-space: normal; }

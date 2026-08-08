@@ -9,11 +9,13 @@ same operations without changing the API contracts.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 from threading import RLock
 
 from app.config import Settings
+from app.experiment_schemas import ExperimentPlan
 from app.research_schemas import AnalysisJob, ConceptGraph, GraphPatch, IdeaCheckResult
 from app.schemas import Project
 
@@ -104,6 +106,13 @@ class Storage:
                     created_at TEXT NOT NULL,
                     similarity_level TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS experiment_plans (
+                    id TEXT PRIMARY KEY,
+                    payload TEXT NOT NULL,
+                    project_id TEXT,
+                    created_at TEXT NOT NULL,
+                    approval_status TEXT NOT NULL
+                );
                 CREATE INDEX IF NOT EXISTS idx_analysis_created
                     ON analysis_jobs(created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_graph_project
@@ -112,6 +121,10 @@ class Storage:
                     ON graph_patches(graph_id, created_at ASC);
                 CREATE INDEX IF NOT EXISTS idx_idea_checks_created
                     ON idea_checks(created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_experiment_plans_created
+                    ON experiment_plans(created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_experiment_plans_project
+                    ON experiment_plans(project_id);
                 """
             )
 
@@ -215,6 +228,55 @@ class Storage:
                 "SELECT payload FROM idea_checks ORDER BY created_at DESC"
             ).fetchall()
             return [IdeaCheckResult.model_validate_json(row["payload"]) for row in rows]
+
+        return self._run(read)
+
+    # ----- experiment plans ------------------------------------------
+    def save_experiment_plan(self, plan: ExperimentPlan) -> ExperimentPlan:
+        self._run(
+            lambda connection: connection.execute(
+                """
+                INSERT INTO experiment_plans(id, payload, project_id, created_at, approval_status)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,
+                    project_id=excluded.project_id, created_at=excluded.created_at,
+                    approval_status=excluded.approval_status
+                """,
+                (
+                    plan.id,
+                    json.dumps(plan.persistence_payload(), ensure_ascii=False),
+                    str(plan.project_id) if plan.project_id else None,
+                    plan.generated_at.isoformat(),
+                    plan.approval_status,
+                ),
+            )
+        )
+        return plan.model_copy(deep=True)
+
+    def get_experiment_plan(self, plan_id: str) -> ExperimentPlan | None:
+        def read(connection: sqlite3.Connection) -> ExperimentPlan | None:
+            row = connection.execute(
+                "SELECT payload FROM experiment_plans WHERE id = ?", (plan_id,)
+            ).fetchone()
+            return ExperimentPlan.model_validate_json(row["payload"]) if row else None
+
+        return self._run(read)
+
+    def list_experiment_plans(self, project_id: str | None = None) -> list[ExperimentPlan]:
+        def read(connection: sqlite3.Connection) -> list[ExperimentPlan]:
+            if project_id is None:
+                rows = connection.execute(
+                    "SELECT payload FROM experiment_plans ORDER BY created_at DESC"
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    """
+                    SELECT payload FROM experiment_plans
+                    WHERE project_id = ? ORDER BY created_at DESC
+                    """,
+                    (project_id,),
+                ).fetchall()
+            return [ExperimentPlan.model_validate_json(row["payload"]) for row in rows]
 
         return self._run(read)
 
@@ -444,6 +506,7 @@ class Storage:
             connection.execute("DELETE FROM concept_graphs")
             connection.execute("DELETE FROM analysis_jobs")
             connection.execute("DELETE FROM idea_checks")
+            connection.execute("DELETE FROM experiment_plans")
 
         self._run(clear)
 
@@ -455,6 +518,7 @@ class Storage:
             connection.execute("DELETE FROM concept_graphs")
             connection.execute("DELETE FROM analysis_jobs")
             connection.execute("DELETE FROM idea_checks")
+            connection.execute("DELETE FROM experiment_plans")
             connection.execute("DELETE FROM projects")
 
         self._run(clear_all)

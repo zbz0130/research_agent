@@ -3,6 +3,8 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from app.config import Settings, get_settings
+from app.evidence_schemas import EvidenceLedger
+from app.experiment_schemas import ExperimentPlan, ExperimentPlanRequest, ExperimentPlanReview
 from app.research_schemas import (
     AnalysisCreate,
     AnalysisJob,
@@ -26,6 +28,8 @@ from app.services.research_service import AnalysisNotFound, research_service
 from app.services.idea_service import IdeaCheckNotFound, idea_service
 from app.services.research_providers import ProviderUnavailable
 from app.services.settings_service import api_key_status as build_api_key_status, update_api_keys
+from app.services.experiment_service import experiment_service
+from app.storage import storage
 
 router = APIRouter()
 
@@ -115,6 +119,23 @@ def get_research_brief(analysis_id: UUID) -> ResearchBrief:
     return job.result.research_brief
 
 
+@router.get(
+    "/analyses/{analysis_id}/evidence-ledger",
+    response_model=EvidenceLedger,
+    tags=["research"],
+)
+def get_evidence_ledger(analysis_id: UUID) -> EvidenceLedger:
+    """Return claim-level provenance for a completed analysis."""
+
+    try:
+        job = research_service.get(analysis_id)
+    except AnalysisNotFound as exc:
+        raise HTTPException(status_code=404, detail="分析任务不存在") from exc
+    if job.result is None or job.result.evidence_ledger is None:
+        raise HTTPException(status_code=404, detail="该分析没有可用的证据账本")
+    return job.result.evidence_ledger
+
+
 @router.post("/ideas/check", response_model=IdeaCheckResult, tags=["research"])
 def check_idea(
     payload: IdeaCheckCreate,
@@ -139,6 +160,45 @@ def get_idea_check(check_id: str) -> IdeaCheckResult:
         return idea_service.get(check_id)
     except IdeaCheckNotFound as exc:
         raise HTTPException(status_code=404, detail="想法查重记录不存在") from exc
+
+
+@router.post(
+    "/experiments/plans",
+    response_model=ExperimentPlan,
+    status_code=status.HTTP_201_CREATED,
+    tags=["experiments"],
+)
+def create_experiment_plan(payload: ExperimentPlanRequest) -> ExperimentPlan:
+    """Draft a structured experiment plan; this endpoint never executes code."""
+
+    plan = experiment_service.generate(payload)
+    return storage.save_experiment_plan(plan)
+
+
+@router.get("/experiments/plans", response_model=list[ExperimentPlan], tags=["experiments"])
+def list_experiment_plans(project_id: UUID | None = None) -> list[ExperimentPlan]:
+    return storage.list_experiment_plans(str(project_id) if project_id else None)
+
+
+@router.get("/experiments/plans/{plan_id}", response_model=ExperimentPlan, tags=["experiments"])
+def get_experiment_plan(plan_id: str) -> ExperimentPlan:
+    plan = storage.get_experiment_plan(plan_id)
+    if plan is None:
+        raise HTTPException(status_code=404, detail="实验方案不存在")
+    return plan
+
+
+@router.post(
+    "/experiments/plans/{plan_id}/review",
+    response_model=ExperimentPlan,
+    tags=["experiments"],
+)
+def review_experiment_plan(plan_id: str, payload: ExperimentPlanReview) -> ExperimentPlan:
+    plan = storage.get_experiment_plan(plan_id)
+    if plan is None:
+        raise HTTPException(status_code=404, detail="实验方案不存在")
+    reviewed = experiment_service.review(plan, payload)
+    return storage.save_experiment_plan(reviewed)
 
 
 @router.get("/graphs/{graph_id}", response_model=ConceptGraph, tags=["graphs"])

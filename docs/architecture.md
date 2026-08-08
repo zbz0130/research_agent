@@ -14,9 +14,11 @@
       ├── 摘要级 EvidenceCard
       ├── 解释 Provider（OpenAI-compatible / 规则回退）
       ├── ConceptGraph 构建
+      ├── Claim/Evidence Ledger（主张级溯源与覆盖率）
       ├── research 模式：三路 AgentRun + ResearchBrief + 谨慎候选
       ├── IdeaCheckService：范围化 prior-art 判断
-      └── SQLite Storage：任务、项目、图谱、Patch 和查重记录
+      ├── ExperimentService：只生成可审阅实验方案草案
+      └── SQLite Storage：任务、项目、图谱、Patch、查重记录和实验方案
       │
       ▼
 前端展示、用户编辑或批准 Agent GraphPatch
@@ -46,6 +48,7 @@ FastAPI API (/api/v1)
   │     └── Synthesis Agent（来源分层、候选去重和范围化 arXiv 检查）
   ├── GraphService         版本化概念图和 GraphPatch 审批
   ├── IdeaCheckService     想法查重、相似度分级和替代验证方向
+  ├── ExperimentService    假设、基线、指标、消融和失败判据草案
   └── SettingsService      分用途 API Key 状态（不返回明文）
 ```
 
@@ -73,6 +76,7 @@ FastAPI API (/api/v1)
 | GET | `/api/v1/analyses` | 查看最近分析任务摘要 |
 | GET | `/api/v1/analyses/{analysis_id}` | 查看状态、阶段进度和完成结果 |
 | GET | `/api/v1/analyses/{analysis_id}/research-brief` | 单独读取 research 模式的三路 Agent Brief |
+| GET | `/api/v1/analyses/{analysis_id}/evidence-ledger` | 读取主张—证据账本和覆盖率 |
 | POST | `/api/v1/ideas/check` | 对一个研究想法做有界 prior-art 判断并保存结果 |
 | GET | `/api/v1/ideas/checks` | 获取已保存的想法查重记录 |
 | GET | `/api/v1/ideas/checks/{check_id}` | 获取一条想法查重记录 |
@@ -86,6 +90,10 @@ FastAPI API (/api/v1)
 | POST | `/api/v1/graphs/{graph_id}/nodes/{node_id}/explanation-patch` | 让 Agent 生成节点解释提案（仍需批准） |
 | POST | `/api/v1/graphs/{graph_id}/patches/{patch_id}/apply` | 批准 Agent 提案并应用 |
 | POST | `/api/v1/graphs/{graph_id}/patches/{patch_id}/reject` | 拒绝 Agent 提案 |
+| POST | `/api/v1/experiments/plans` | 生成并保存只读实验方案草案 |
+| GET | `/api/v1/experiments/plans` | 列出已保存实验方案，可按项目过滤 |
+| GET | `/api/v1/experiments/plans/{plan_id}` | 读取一份实验方案草案 |
+| POST | `/api/v1/experiments/plans/{plan_id}/review` | 记录人工审阅状态，不启动执行 |
 
 分析结果目前包含：
 
@@ -96,10 +104,12 @@ FastAPI API (/api/v1)
 - `graph`：节点、边、根节点和版本；
 - `innovation_candidates`：研究模式下的候选、最近工作、风险和验证步骤；
 - `research_brief`：`AgentRun`、社区信号、模型脑暴、论文摘要级限制线索、综合候选、证据覆盖率和 arXiv 范围状态；
+- `evidence_ledger`：定义、机制、演变、限制和相关概念等主张，以及每条主张关联的证据卡、状态、置信度和下一步核验动作；
 - `IdeaCheckResult`：想法、检索词、匹配论文、L0–L4、置信度、替代方向和验证步骤；
+- `ExperimentPlan`：假设、基线、变量、控制项、指标、消融、预期结果、失败判据、资源估计、来源和审阅状态；`execution_status` 固定为 `not_started`；
 - `warnings` / `novelty_note`：明确说明 Demo、回退和新颖性检索边界。
 
-持久化表为 `projects`、`analysis_jobs`、`concept_graphs`、`graph_patches` 和 `idea_checks`。图谱应用修改使用版本 compare-and-swap，并把图和 Patch 放在同一 SQLite 事务中提交。
+持久化表为 `projects`、`analysis_jobs`、`concept_graphs`、`graph_patches`、`idea_checks` 和 `experiment_plans`。图谱应用修改使用版本 compare-and-swap，并把图和 Patch 放在同一 SQLite 事务中提交。实验方案使用显式的 canonical payload 保存，兼容字段不会进入数据库。
 
 ## 4. GraphPatch 为什么是必要的
 
@@ -130,6 +140,7 @@ Agent 生成 GraphPatch
 - “确保 arXiv 没有相同论文”或任何绝对新颖性承诺；
 - 全量 PDF 图表理解和商业数据库的版权内容；
 - 真实仪器控制、耗材管理和任意代码执行；
+- 实验方案批准后的自动执行（本阶段只记录审阅状态，绝不启动命令或网络任务）；
 - 多用户权限、团队协作和跨多个概念树的自动合并（当前只生成跨图候选；网页并排画布和临时局部裁剪不会自动合并或写回）；
 
 社区讨论若在后续接入，应标记为探索性痛点信号；模型脑暴应标记为未验证假设；当前论文分支只有摘要级线索，已明确标为 `abstract_signal`，不能声称读过全文 `Discussion`。接入合法的 PDF / HTML 全文后，再把 `Discussion`、`Conclusion`、`Limitations` 和 `Future Work` 单独保存原文定位，不能与事实证据混成一栏。

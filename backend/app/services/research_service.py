@@ -6,6 +6,11 @@ from threading import RLock
 from uuid import UUID
 
 from app.config import Settings
+from app.evidence_schemas import (
+    ClaimEvidenceLink,
+    ClaimRecord,
+    EvidenceLedger,
+)
 from app.research_schemas import (
     AnalysisCreate,
     AnalysisJob,
@@ -257,6 +262,12 @@ class ResearchService:
                 project_id=payload.project_id,
                 graph_name=payload.graph_name,
             )
+            evidence_ledger = _build_evidence_ledger(
+                str(job_id),
+                explanation,
+                evidence,
+                papers,
+            )
             with self._lock:
                 if generation != self._generation:
                     return
@@ -315,6 +326,7 @@ class ResearchService:
                     else None
                 ),
                 research_brief=research_brief,
+                evidence_ledger=evidence_ledger,
             )
             self._update(
                 job_id,
@@ -397,6 +409,164 @@ def _build_evidence(concept: str, papers: list[PaperRecord]) -> list[EvidenceCar
             )
         )
     return cards
+
+
+def _build_evidence_ledger(
+    analysis_id: str,
+    explanation: ExplanationResult,
+    evidence: list[EvidenceCard],
+    papers: list[PaperRecord],
+) -> EvidenceLedger:
+    """Create a conservative claim-to-evidence view for an analysis.
+
+    The first version often has abstract snippets rather than manually
+    reviewed full text. Therefore a linked claim is not automatically called
+    ``supported``: it remains ``unverified`` until the underlying evidence
+    card is reviewed.
+    """
+
+    evidence_by_id = {card.id: card for card in evidence}
+    claims: list[ClaimRecord] = []
+    type_map = {
+        "definition": "definition",
+        "mechanism": "mechanism",
+        "result": "result",
+        "limitation": "limitation",
+        "future_work": "research_gap",
+        "context": "definition",
+    }
+
+    def valid_ids(ids: list[str]) -> list[str]:
+        return [evidence_id for evidence_id in ids if evidence_id in evidence_by_id]
+
+    def claim_status(linked_ids: list[str], *, hypothesis: bool = False) -> tuple[str, str]:
+        if hypothesis or not linked_ids:
+            return ("hypothesis" if hypothesis else "unverified"), "low"
+        linked_cards = [evidence_by_id[item] for item in linked_ids]
+        if any(card.relation == "contradicts" for card in linked_cards):
+            return "contradicted", "low"
+        if any(card.relation == "qualified_support" for card in linked_cards):
+            reviewed = any(card.verification_status == "reviewed" for card in linked_cards)
+            return "partially_supported", "medium" if reviewed else "low"
+        reviewed_cards = [card for card in linked_cards if card.verification_status == "reviewed"]
+        if len(reviewed_cards) == len(linked_cards):
+            confidence = "high" if all(card.confidence == "high" for card in linked_cards) else "medium"
+            return "supported", confidence
+        if reviewed_cards:
+            return "partially_supported", "medium" if any(card.confidence in {"high", "medium"} for card in reviewed_cards) else "low"
+        return "unverified", "medium" if any(card.confidence == "medium" for card in linked_cards) else "low"
+
+    def add_claim(
+        text: str,
+        claim_type: str,
+        evidence_ids: list[str],
+        *,
+        scope: str = "",
+        hypothesis: bool = False,
+        next_action: str = "人工核对原文和适用边界",
+    ) -> None:
+        text = text.strip()
+        if not text:
+            return
+        linked_ids = valid_ids(evidence_ids)
+        status, confidence = claim_status(linked_ids, hypothesis=hypothesis)
+        links = [
+            ClaimEvidenceLink(
+                evidence_id=evidence_id,
+                relation="background" if hypothesis else "supports",
+                note=(
+                    "模型/规则生成的待验证假设"
+                    if hypothesis
+                    else "该证据目前未完成全文级人工核验"
+                ),
+            )
+            for evidence_id in linked_ids
+        ]
+        claims.append(
+            ClaimRecord(
+                text=text,
+                claim_type=claim_type,
+                status=status,
+                confidence=confidence,
+                scope=scope,
+                evidence_links=links,
+                next_action=next_action,
+            )
+        )
+
+    all_evidence_ids = [card.id for card in evidence]
+    add_claim(
+        explanation.one_sentence,
+        "definition",
+        explanation.evidence_ids or all_evidence_ids,
+        next_action="核对定义是否适用于当前任务和读者场景",
+    )
+    add_claim(
+        explanation.technical,
+        "mechanism",
+        explanation.evidence_ids or all_evidence_ids,
+        next_action="回到论文方法部分，确认机制、假设和计算条件",
+    )
+    for index, item in enumerate(explanation.evolution[:12]):
+        nearest = [evidence[index].id] if index < len(evidence) else all_evidence_ids
+        add_claim(item, "evolution", nearest, next_action="核对时间线和论文版本关系")
+    limitation_ids = [card.id for card in evidence if card.evidence_type == "limitation"] or all_evidence_ids
+    for item in explanation.limitations[:12]:
+        add_claim(item, "limitation", limitation_ids, next_action="确认限制出现的实验条件和适用边界")
+    for item in explanation.related_concepts[:12]:
+        add_claim(
+            f"“{item}”与当前概念存在值得继续核验的关联。",
+            "related_concept",
+            [],
+            hypothesis=True,
+            next_action="检索该关联的定义、关系类型和代表性论文",
+        )
+
+    for card in evidence:
+        claim_type = type_map.get(card.evidence_type, "definition")
+        status = "contradicted" if card.relation == "contradicts" else "unverified"
+        locator = card.location or (card.locator.kind if card.locator else "未知")
+        relation = {
+            "supports": "supports",
+            "contradicts": "contradicts",
+            "qualified_support": "qualifies",
+            "background": "background",
+        }.get(card.relation, "background")
+        claims.append(
+            ClaimRecord(
+                text=card.claim,
+                claim_type=claim_type,
+                status=status,
+                confidence=card.confidence,
+                scope=f"来源：{card.paper_id}；位置：{locator}",
+                evidence_links=[
+                    ClaimEvidenceLink(
+                        evidence_id=card.id,
+                        relation=relation,
+                        note="由证据卡直接抽取；当前通常仍是摘要级线索",
+                    )
+                ],
+                next_action="打开来源并核对原文上下文",
+            )
+        )
+
+    linked_claim_count = sum(1 for claim in claims if claim.evidence_links)
+    coverage = linked_claim_count / len(claims) if claims else 0.0
+    warnings: list[str] = []
+    if not evidence:
+        warnings.append("本次分析没有可用证据卡；解释和相关概念只能作为模型/规则假设。")
+    elif all(card.verification_status != "reviewed" for card in evidence):
+        warnings.append("当前所有证据卡尚未完成人工全文核验，主张状态保持为未验证。")
+    if any(paper.source_kind == "demo" for paper in papers):
+        warnings.append("账本中包含演示资料；演示资料不能作为正式论文证据引用。")
+    return EvidenceLedger(
+        analysis_id=analysis_id,
+        claims=claims,
+        evidence_count=len(evidence),
+        linked_claim_count=linked_claim_count,
+        coverage=round(coverage, 4),
+        warnings=warnings,
+    )
 
 
 def _dedupe_papers(papers: list[PaperRecord]) -> list[PaperRecord]:

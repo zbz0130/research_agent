@@ -159,6 +159,41 @@
         <p id="novelty-note" class="novelty-note"></p>
       </section>
 
+      <section class="card experiment-card" id="experiment-card">
+        <div class="card-heading">
+          <div>
+            <p class="eyebrow">EXPERIMENT PLAN DRAFT</p>
+            <h2>把想法整理成可审阅的实验方案</h2>
+          </div>
+          <span class="tag tag-beta">只生成草案</span>
+        </div>
+        <p class="settings-note">
+          输入一个研究想法，许愿机会生成假设、基线、变量、指标、消融和失败判据。这里不会执行代码、命令、网络调用或真实实验；批准只代表人工审阅通过。
+        </p>
+        <form id="experiment-plan-form" class="analysis-form">
+          <label class="concept-field">
+            研究想法
+            <textarea id="experiment-idea" required minlength="3" maxlength="4000" rows="3" placeholder="例如：用分页机制管理长上下文 LLM 的 KV cache，降低推理显存峰值。"></textarea>
+          </label>
+          <div class="form-grid experiment-form-grid">
+            <label>
+              方案标题（可选）
+              <input id="experiment-title" maxlength="300" placeholder="例如：分页 KV Cache 的最小验证" />
+            </label>
+            <label>
+              对照基线（可选）
+              <input id="experiment-baseline" maxlength="2000" placeholder="例如：标准连续 KV cache 管理" />
+            </label>
+          </div>
+          <div class="form-actions">
+            <button type="submit" id="experiment-plan-submit">生成实验方案草案</button>
+            <button type="button" class="secondary" id="experiment-plan-clear">清空结果</button>
+            <span id="experiment-plan-message" class="form-message" role="status"></span>
+          </div>
+        </form>
+        <div id="experiment-plan-result" class="experiment-plan-result hidden"></div>
+      </section>
+
       <section class="card research-brief-card hidden" id="research-brief-card">
         <div class="card-heading">
           <div>
@@ -183,6 +218,17 @@
         </div>
         <div id="papers" class="paper-list">
           <p class="empty">完成一次文献分析后，这里会显示来源和原文摘要。</p>
+        </div>
+        <div id="evidence-ledger" class="evidence-ledger hidden">
+          <div class="ledger-heading">
+            <div>
+              <p class="section-label">CLAIM → EVIDENCE</p>
+              <h3>主张—证据账本</h3>
+            </div>
+            <span id="ledger-coverage" class="tag">未生成</span>
+          </div>
+          <p id="ledger-message" class="settings-note"></p>
+          <div id="ledger-claims" class="ledger-claims"></div>
         </div>
       </section>
 

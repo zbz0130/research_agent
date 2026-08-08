@@ -527,6 +527,43 @@ def test_idea_check_does_not_turn_provider_failure_into_a_novelty_claim() -> Non
         app.dependency_overrides.clear()
 
 
+def test_experiment_plan_api_is_plan_only_and_reviewable() -> None:
+    response = client.post(
+        "/api/v1/experiments/plans",
+        json={
+            "idea": "降低长上下文 LLM 推理的 KV Cache 显存占用",
+            "baseline": "标准 KV Cache 管理",
+        },
+    )
+    assert response.status_code == 201
+    plan = response.json()
+    assert plan["approval_status"] == "draft"
+    assert plan["execution_status"] == "not_started"
+    assert plan["hypothesis"]
+    assert plan["metrics"]
+    assert plan["failure_criteria"]
+    assert any("不执行" in warning for warning in plan["warnings"])
+
+    plan_id = plan["id"]
+    listed = client.get("/api/v1/experiments/plans")
+    assert listed.status_code == 200
+    assert any(item["id"] == plan_id for item in listed.json())
+
+    reviewed = client.post(
+        f"/api/v1/experiments/plans/{plan_id}/review",
+        json={"status": "approved", "note": "先做小规模预实验", "reviewer": "researcher"},
+    )
+    assert reviewed.status_code == 200
+    assert reviewed.json()["approval_status"] == "approved"
+    assert reviewed.json()["review_note"] == "先做小规模预实验"
+    assert reviewed.json()["execution_status"] == "not_started"
+
+
+def test_experiment_plan_requires_a_source() -> None:
+    response = client.post("/api/v1/experiments/plans", json={})
+    assert response.status_code == 422
+
+
 def test_graph_compare_returns_unverified_cross_domain_connections() -> None:
     first = ConceptGraph(
         id="graph-a",

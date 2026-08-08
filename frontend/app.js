@@ -16,6 +16,10 @@ const graphVersionEl = document.querySelector("#graph-version");
 const graphPickerEl = document.querySelector("#graph-picker");
 const analysisProviderEl = document.querySelector("#analysis-provider");
 const paperCountEl = document.querySelector("#paper-count");
+const evidenceLedgerEl = document.querySelector("#evidence-ledger");
+const ledgerCoverageEl = document.querySelector("#ledger-coverage");
+const ledgerMessageEl = document.querySelector("#ledger-message");
+const ledgerClaimsEl = document.querySelector("#ledger-claims");
 const nodeForm = document.querySelector("#node-form");
 const graphActionsEl = document.querySelector("#graph-actions");
 const graphMessageEl = document.querySelector("#graph-message");
@@ -26,6 +30,14 @@ const graphRootInput = document.querySelector("#graph-root");
 const innovationCardEl = document.querySelector("#innovation-card");
 const innovationsEl = document.querySelector("#innovations");
 const noveltyNoteEl = document.querySelector("#novelty-note");
+const experimentPlanForm = document.querySelector("#experiment-plan-form");
+const experimentIdeaInput = document.querySelector("#experiment-idea");
+const experimentTitleInput = document.querySelector("#experiment-title");
+const experimentBaselineInput = document.querySelector("#experiment-baseline");
+const experimentPlanSubmit = document.querySelector("#experiment-plan-submit");
+const experimentPlanClearButton = document.querySelector("#experiment-plan-clear");
+const experimentPlanMessageEl = document.querySelector("#experiment-plan-message");
+const experimentPlanResultEl = document.querySelector("#experiment-plan-result");
 const researchBriefCardEl = document.querySelector("#research-brief-card");
 const researchBriefEl = document.querySelector("#research-brief");
 const patchCardEl = document.querySelector("#patch-card");
@@ -56,6 +68,7 @@ const state = {
   graph: null,
   graphs: [],
   pendingPatches: new Map(),
+  experimentPlan: null,
 };
 
 function escapeHtml(value) {
@@ -111,6 +124,17 @@ const displayLabels = {
   paper_future_work: "论文限制线索",
   synthesis: "综合候选",
   abstract_signal: "摘要级线索",
+  supported: "已有证据关联",
+  partially_supported: "部分支持",
+  contradicted: "存在反驳线索",
+  hypothesis: "待验证假设",
+  definition: "定义",
+  mechanism: "机制",
+  evolution: "演变",
+  limitation: "限制",
+  result: "结果",
+  related_concept: "相关概念",
+  research_gap: "研究空白",
 };
 
 function displayLabel(value) {
@@ -282,8 +306,16 @@ function resetAnalysisView() {
   innovationCardEl.classList.add("hidden");
   innovationsEl.innerHTML = "";
   noveltyNoteEl.textContent = "";
+  evidenceLedgerEl.classList.add("hidden");
+  ledgerCoverageEl.textContent = "未生成";
+  ledgerMessageEl.textContent = "";
+  ledgerClaimsEl.innerHTML = "";
   researchBriefCardEl.classList.add("hidden");
   researchBriefEl.innerHTML = "";
+  state.experimentPlan = null;
+  experimentPlanResultEl.classList.add("hidden");
+  experimentPlanResultEl.innerHTML = "";
+  setExperimentPlanMessage("", "");
   renderPatches();
   graphGalleryEl.innerHTML = '<p class="empty">正在读取概念图列表…</p>';
   setGraphGalleryMessage("", "");
@@ -365,6 +397,38 @@ function renderPapers(result) {
   }).join("");
 }
 
+function renderEvidenceLedger(result) {
+  const ledger = result.evidence_ledger;
+  if (!ledger) {
+    evidenceLedgerEl.classList.add("hidden");
+    ledgerClaimsEl.innerHTML = "";
+    return;
+  }
+  evidenceLedgerEl.classList.remove("hidden");
+  const coverage = Math.round(Number(ledger.coverage || 0) * 100);
+  ledgerCoverageEl.textContent = `证据覆盖 ${coverage}% · ${ledger.linked_claim_count || 0}/${ledger.claims?.length || 0} 条主张`;
+  ledgerMessageEl.textContent = (ledger.warnings || []).join(" ") || "每条主张都可以展开查看关联证据。";
+  const evidenceById = new Map((result.evidence || []).map((item) => [item.id, item]));
+  ledgerClaimsEl.innerHTML = (ledger.claims || []).map((claim) => {
+    const links = (claim.evidence_links || []).map((link) => {
+      const card = evidenceById.get(link.evidence_id);
+      return `<li><span class="tag">${escapeHtml(displayLabel(link.relation || "background"))}</span> ${escapeHtml(card?.claim || link.evidence_id)}<small>${escapeHtml(link.note || "")}</small></li>`;
+    }).join("");
+    const statusClass = ["supported", "partially_supported"].includes(claim.status) ? "tag-configured" : "tag-missing";
+    return `
+      <article class="ledger-claim ${escapeHtml(claim.status || "unverified")}">
+        <div class="ledger-claim-heading">
+          <span class="tag">${escapeHtml(displayLabel(claim.claim_type || "definition"))}</span>
+          <span class="tag ${statusClass}">${escapeHtml(displayLabel(claim.status || "unverified"))} · ${escapeHtml(claim.confidence || "low")}</span>
+        </div>
+        <p>${escapeHtml(claim.text)}</p>
+        ${claim.scope ? `<small class="ledger-scope">${escapeHtml(claim.scope)}</small>` : ""}
+        ${links ? `<ul class="ledger-links">${links}</ul>` : `<p class="warning-inline">${escapeHtml(claim.next_action || "需要人工核验")}</p>`}
+      </article>
+    `;
+  }).join("") || '<p class="empty">当前没有可展示的主张。</p>';
+}
+
 function renderInnovations(result) {
   const candidates = result.innovation_candidates || [];
   if (!candidates.length) {
@@ -391,10 +455,240 @@ function renderInnovations(result) {
       ${candidate.nearest_work?.length ? `<p class="innovation-nearest"><strong>最近资料：</strong>${candidate.nearest_work.map(escapeHtml).join("；")}</p>` : ""}
       <div class="validation-box"><strong>建议的最小验证</strong><ol>${(candidate.validation_steps || []).map((step) => `<li>${escapeHtml(step)}</li>`).join("")}</ol></div>
       ${candidate.warning ? `<p class="warning-inline">${escapeHtml(candidate.warning)}</p>` : ""}
+      <div class="innovation-actions">
+        <button type="button" class="secondary experiment-from-candidate" data-experiment-candidate="${escapeHtml([candidate.title, candidate.problem, candidate.mechanism].filter(Boolean).join("；"))}">生成实验方案</button>
+      </div>
     </article>
   `).join("");
   noveltyNoteEl.textContent = result.novelty_note || "当前没有可用的新颖性范围说明。";
 }
+
+const experimentStatusLabels = {
+  draft: "草案",
+  needs_review: "待审阅",
+  approved: "已批准（未执行）",
+  rejected: "已拒绝",
+  not_started: "尚未执行",
+};
+
+function experimentStatusLabel(value) {
+  return experimentStatusLabels[value] || displayLabel(value) || "未知";
+}
+
+function setExperimentPlanMessage(text, kind = "") {
+  experimentPlanMessageEl.textContent = text;
+  experimentPlanMessageEl.className = `form-message ${kind}`;
+}
+
+function renderExperimentList(items, renderItem, emptyText = "暂无") {
+  if (!Array.isArray(items) || !items.length) return `<p class="empty">${escapeHtml(emptyText)}</p>`;
+  return `<div class="experiment-item-list">${items.map(renderItem).join("")}</div>`;
+}
+
+function renderExperimentPlan(plan) {
+  state.experimentPlan = plan;
+  experimentPlanResultEl.classList.remove("hidden");
+  const variables = plan.variables || [];
+  const controls = plan.controls || [];
+  const metrics = plan.metrics || [];
+  const ablation = plan.ablation || [];
+  const outcomes = plan.expected_outcomes || [];
+  const failures = plan.failure_criteria || plan.risks || [];
+  const resources = plan.resource_estimate || plan.resources || {};
+  const provenance = plan.provenance || [];
+  const approvalStatus = plan.approval_status || "draft";
+  const executionStatus = plan.execution_status || "not_started";
+  const reviewNote = plan.review_note || "";
+
+  const renderVariable = (item) => `
+    <article class="experiment-item">
+      <div class="experiment-item-heading"><strong>${escapeHtml(item.name)}</strong><span class="tag">${escapeHtml(item.role || "independent")}</span></div>
+      ${item.description ? `<p>${escapeHtml(item.description)}</p>` : ""}
+      ${item.levels?.length || item.values?.length ? `<small>取值：${escapeHtml((item.levels || item.values || []).join("、"))}</small>` : ""}
+      ${item.measurement ? `<small>测量：${escapeHtml(item.measurement)}</small>` : ""}
+    </article>`;
+  const renderControl = (item) => `
+    <article class="experiment-item">
+      <div class="experiment-item-heading"><strong>${escapeHtml(item.name)}</strong><span class="tag">${escapeHtml(item.control_type || item.type || "constant")}</span></div>
+      ${item.description ? `<p>${escapeHtml(item.description)}</p>` : ""}
+      ${item.rationale ? `<small>原因：${escapeHtml(item.rationale)}</small>` : ""}
+    </article>`;
+  const renderMetric = (item) => `
+    <article class="experiment-item">
+      <div class="experiment-item-heading"><strong>${escapeHtml(item.name)}</strong>${item.primary ? '<span class="tag tag-configured">主指标</span>' : ""}</div>
+      ${item.description ? `<p>${escapeHtml(item.description)}</p>` : ""}
+      <small>方向：${escapeHtml(item.direction || "monitor")}${item.unit ? ` · 单位：${escapeHtml(item.unit)}` : ""}${item.aggregation ? ` · 聚合：${escapeHtml(item.aggregation)}` : ""}</small>
+    </article>`;
+  const renderAblation = (item) => `
+    <article class="experiment-item">
+      <div class="experiment-item-heading"><strong>${escapeHtml(item.component)}</strong><span class="tag">${escapeHtml(item.ablation_type || item.type || "remove")}</span></div>
+      <p>${escapeHtml(item.variant || "移除该组件")}</p>
+      ${item.rationale ? `<small>原因：${escapeHtml(item.rationale)}</small>` : ""}
+      ${item.expected_effect ? `<small>预期影响：${escapeHtml(item.expected_effect)}</small>` : ""}
+    </article>`;
+  const renderOutcome = (item) => `
+    <article class="experiment-item">
+      <div class="experiment-item-heading"><strong>${escapeHtml(item.scenario)}</strong><span class="tag">${escapeHtml(item.confidence || "low")}</span></div>
+      <p>${escapeHtml(item.prediction)}</p>
+      ${item.metric || item.threshold !== undefined ? `<small>指标：${escapeHtml(item.metric || "未指定")}${item.threshold !== undefined && item.threshold !== null ? ` · 阈值：${escapeHtml(item.threshold)}` : ""}</small>` : ""}
+    </article>`;
+  const renderFailure = (item) => `
+    <article class="experiment-item failure-item">
+      <div class="experiment-item-heading"><strong>${escapeHtml(item.condition)}</strong><span class="tag tag-missing">${escapeHtml(item.severity || "major")}</span></div>
+      <p>${escapeHtml(item.action || "暂停并人工复核")}</p>
+    </article>`;
+
+  experimentPlanResultEl.innerHTML = `
+    <div class="experiment-plan-heading">
+      <div>
+        <p class="section-label">方案草案</p>
+        <h3>${escapeHtml(plan.title || "未命名实验方案")}</h3>
+        <small class="experiment-plan-id">ID：${escapeHtml(plan.id || "未保存")}</small>
+      </div>
+      <div class="experiment-plan-status">
+        <span class="tag ${approvalStatus === "approved" ? "tag-configured" : approvalStatus === "rejected" ? "tag-missing" : "tag-beta"}">审阅：${escapeHtml(experimentStatusLabel(approvalStatus))}</span>
+        <span class="tag tag-missing">执行：${escapeHtml(experimentStatusLabel(executionStatus))}</span>
+      </div>
+    </div>
+    ${(plan.warnings || []).length ? `<div class="warning-box"><strong>边界提醒</strong><ul>${plan.warnings.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul></div>` : ""}
+    <div class="experiment-section-grid">
+      <section class="experiment-section">
+        <p class="section-label">研究假设</p>
+        <p>${escapeHtml(plan.hypothesis || "暂无")}</p>
+      </section>
+      <section class="experiment-section">
+        <p class="section-label">对照基线</p>
+        <p>${escapeHtml(plan.baseline || "暂无")}</p>
+      </section>
+    </div>
+    <section class="experiment-section"><p class="section-label">变量</p>${renderExperimentList(variables, renderVariable)}</section>
+    <section class="experiment-section"><p class="section-label">控制项</p>${renderExperimentList(controls, renderControl)}</section>
+    <section class="experiment-section"><p class="section-label">评估指标</p>${renderExperimentList(metrics, renderMetric)}</section>
+    <section class="experiment-section"><p class="section-label">消融 / 对比</p>${renderExperimentList(ablation, renderAblation)}</section>
+    <section class="experiment-section"><p class="section-label">预期结果（事前假设）</p>${renderExperimentList(outcomes, renderOutcome)}</section>
+    <section class="experiment-section"><p class="section-label">失败判据</p>${renderExperimentList(failures, renderFailure)}</section>
+    <section class="experiment-section">
+      <p class="section-label">资源估计</p>
+      <dl class="experiment-resource-grid">
+        <div><dt>计算</dt><dd>${escapeHtml(resources.compute || "未指定")}</dd></div>
+        <div><dt>时间</dt><dd>${escapeHtml(resources.time_estimate_hours ?? resources.wall_clock_hours ?? "未指定")} 小时</dd></div>
+        <div><dt>GPU</dt><dd>${escapeHtml(resources.gpu_hours ?? "未指定")} 小时</dd></div>
+        <div><dt>显存</dt><dd>${escapeHtml(resources.memory_gb ?? "未指定")} GB</dd></div>
+        <div><dt>存储</dt><dd>${escapeHtml(resources.storage_gb ?? "未指定")} GB</dd></div>
+        <div><dt>人员</dt><dd>${escapeHtml(resources.personnel_hours ?? "未指定")} 小时</dd></div>
+      </dl>
+      ${resources.notes ? `<p class="resource-note">${escapeHtml(resources.notes)}</p>` : ""}
+    </section>
+    <section class="experiment-section"><p class="section-label">验证步骤</p>${renderExperimentList(plan.validation_steps, (step) => `<article class="experiment-step">${escapeHtml(step)}</article>`, "暂无验证步骤")}</section>
+    ${provenance.length ? `<section class="experiment-section"><p class="section-label">来源与溯源</p>${renderExperimentList(provenance, (item) => `<article class="experiment-item"><div class="experiment-item-heading"><strong>${escapeHtml(item.source)}</strong><span class="tag">${escapeHtml(item.verification_status || "unverified")}</span></div><small>${escapeHtml(item.notes || item.source_type || "用户输入")}</small></article>`)}</section>` : ""}
+    <section class="experiment-review">
+      <div class="experiment-review-heading">
+        <div>
+          <p class="section-label">人工审阅</p>
+          <p class="settings-note">批准不会启动实验；执行状态会保持“尚未执行”。</p>
+        </div>
+        ${reviewNote ? `<span class="tag">${escapeHtml(reviewNote)}</span>` : ""}
+      </div>
+      <textarea rows="2" maxlength="3000" data-experiment-review-note placeholder="可选：写下审阅意见，例如先做小规模预实验">${escapeHtml(reviewNote)}</textarea>
+      <div class="experiment-review-actions">
+        <button type="button" data-experiment-review-status="approved">批准方案</button>
+        <button type="button" class="secondary" data-experiment-review-status="needs_review">退回修改</button>
+        <button type="button" class="secondary danger-button" data-experiment-review-status="rejected">拒绝方案</button>
+      </div>
+    </section>
+  `;
+}
+
+async function createExperimentPlan(payload) {
+  const response = await fetch("/api/v1/experiments/plans", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) throw new Error(await response.text());
+  return response.json();
+}
+
+async function reviewExperimentPlan(planId, status, note) {
+  const response = await fetch(`/api/v1/experiments/plans/${encodeURIComponent(planId)}/review`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ status, note: note || "", reviewer: "user" }),
+  });
+  if (!response.ok) throw new Error(await response.text());
+  return response.json();
+}
+
+function fillExperimentIdea(idea) {
+  const value = String(idea || "").trim();
+  if (!value) return;
+  experimentIdeaInput.value = value;
+  if (!experimentTitleInput.value.trim()) experimentTitleInput.value = `验证：${value.slice(0, 80)}`;
+  setExperimentPlanMessage("已填入候选想法；你可以修改后再生成方案。", "");
+  experimentIdeaInput.focus();
+  document.querySelector("#experiment-card")?.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+experimentPlanForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const idea = experimentIdeaInput.value.trim();
+  if (idea.length < 3) {
+    setExperimentPlanMessage("请至少输入 3 个字符的研究想法。", "error-text");
+    return;
+  }
+  const payload = { idea };
+  const title = experimentTitleInput.value.trim();
+  const baseline = experimentBaselineInput.value.trim();
+  if (title) payload.title = title;
+  if (baseline) payload.baseline = baseline;
+  experimentPlanSubmit.disabled = true;
+  experimentPlanResultEl.classList.add("hidden");
+  setExperimentPlanMessage("正在整理实验假设与验证边界…");
+  try {
+    const plan = await createExperimentPlan(payload);
+    renderExperimentPlan(plan);
+    setExperimentPlanMessage("实验方案草案已生成；请审阅后再决定是否进入后续执行流程。", "");
+  } catch (error) {
+    setExperimentPlanMessage(`生成失败：${error.message}`, "error-text");
+  } finally {
+    experimentPlanSubmit.disabled = false;
+  }
+});
+
+experimentPlanClearButton.addEventListener("click", () => {
+  state.experimentPlan = null;
+  experimentPlanResultEl.classList.add("hidden");
+  experimentPlanResultEl.innerHTML = "";
+  setExperimentPlanMessage("已清空当前方案结果。", "");
+});
+
+experimentPlanResultEl.addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-experiment-review-status]");
+  if (!button || !state.experimentPlan?.id) return;
+  const status = button.dataset.experimentReviewStatus;
+  const note = experimentPlanResultEl.querySelector("[data-experiment-review-note]")?.value.trim() || "";
+  const buttons = experimentPlanResultEl.querySelectorAll("[data-experiment-review-status]");
+  buttons.forEach((item) => { item.disabled = true; });
+  setExperimentPlanMessage("正在保存人工审阅状态…");
+  try {
+    const plan = await reviewExperimentPlan(state.experimentPlan.id, status, note);
+    renderExperimentPlan(plan);
+    setExperimentPlanMessage(`已记录审阅状态：${experimentStatusLabel(plan.approval_status)}。执行状态仍为“${experimentStatusLabel(plan.execution_status)}”。`, "");
+  } catch (error) {
+    buttons.forEach((item) => { item.disabled = false; });
+    setExperimentPlanMessage(`审阅失败：${error.message}`, "error-text");
+  }
+});
+
+function handleExperimentCandidateClick(event) {
+  const button = event.target.closest("[data-experiment-candidate]");
+  if (!button) return;
+  fillExperimentIdea(button.dataset.experimentCandidate);
+}
+
+innovationCardEl.addEventListener("click", handleExperimentCandidateClick);
+ideaCheckResultEl.addEventListener("click", handleExperimentCandidateClick);
+researchBriefCardEl.addEventListener("click", handleExperimentCandidateClick);
 
 function renderResearchBrief(result) {
   const brief = result.research_brief;
@@ -426,6 +720,7 @@ function renderResearchBrief(result) {
       </div>
       <p>${escapeHtml(candidate.problem || candidate.rationale || "暂无说明")}</p>
       <small>${escapeHtml(candidate.warning || "需要人工核验")}</small>
+      <div class="innovation-actions"><button type="button" class="secondary experiment-from-candidate" data-experiment-candidate="${escapeHtml([candidate.title, candidate.problem, candidate.mechanism].filter(Boolean).join("；"))}">生成实验方案</button></div>
     </article>
   `;
   researchBriefEl.innerHTML = `
@@ -499,7 +794,7 @@ function renderIdeaCheck(result) {
       <div class="idea-paper-row"><strong>${escapeHtml(paper.title)}</strong><span>${escapeHtml(paper.year || "年份未知")} · ${escapeHtml(displayLabel(paper.source_kind || "academic"))}</span></div>
     `).join("")}</div>` : `<p class="empty">没有返回论文，建议补充英文术语后重试。</p>`}
     ${alternatives.length ? `<div class="idea-alternatives"><p class="section-label">从当前想法改造出的候选</p>${alternatives.map((candidate) => `
-      <article class="innovation-row"><h3>${escapeHtml(candidate.title)}</h3><p>${escapeHtml(candidate.rationale)}</p><div class="validation-box"><strong>最小验证</strong><ol>${(candidate.validation_steps || []).map((step) => `<li>${escapeHtml(step)}</li>`).join("")}</ol></div><p class="warning-inline">${escapeHtml(candidate.warning || "未验证")}</p></article>
+      <article class="innovation-row"><h3>${escapeHtml(candidate.title)}</h3><p>${escapeHtml(candidate.rationale)}</p><div class="validation-box"><strong>最小验证</strong><ol>${(candidate.validation_steps || []).map((step) => `<li>${escapeHtml(step)}</li>`).join("")}</ol></div><p class="warning-inline">${escapeHtml(candidate.warning || "未验证")}</p><div class="innovation-actions"><button type="button" class="secondary experiment-from-candidate" data-experiment-candidate="${escapeHtml([candidate.title, candidate.rationale].filter(Boolean).join("；"))}">生成实验方案</button></div></article>
     `).join("")}</div>` : ""}
     <div class="validation-box"><strong>建议下一步</strong><ol>${(result.validation_steps || []).map((step) => `<li>${escapeHtml(step)}</li>`).join("")}</ol></div>
   `;
@@ -1065,6 +1360,7 @@ function renderAnalysis(result) {
   analysisProviderEl.textContent = result.provider;
   renderExplanation(result);
   renderPapers(result);
+  renderEvidenceLedger(result);
   renderInnovations(result);
   renderResearchBrief(result);
   renderGraph(result.graph);
