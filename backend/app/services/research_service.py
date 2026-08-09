@@ -233,6 +233,7 @@ class ResearchService:
                         ]
                     )
                 papers = []
+                retrieval_interrupted = False
                 for index, query in enumerate(query_plan):
                     search_terms.append(query)
                     progress = 25 + min(index * 8, 20)
@@ -245,6 +246,7 @@ class ResearchService:
                     try:
                         papers.extend(search_provider.search(query, payload.max_papers))
                     except ProviderUnavailable as exc:
+                        retrieval_interrupted = True
                         if not settings.demo_mode and index == 0:
                             raise
                         warnings.append(str(exc))
@@ -255,7 +257,13 @@ class ResearchService:
                 papers = _dedupe_papers(papers)
                 papers = papers[: payload.max_papers]
                 if not papers:
-                    warnings.append("检索没有返回论文，请尝试补充英文关键词或切换数据源。")
+                    if retrieval_interrupted:
+                        warnings.append(
+                            "论文检索因 Provider 限流或不可用而未完成，不能据此判断没有相关论文；"
+                            "请根据上方 Provider 提示稍后重试、配置论文检索 API Key 或切换数据源。"
+                        )
+                    else:
+                        warnings.append("检索没有返回论文，请尝试补充英文关键词或切换数据源。")
 
             self._update(job_id, generation=generation, progress=52, message="正在生成段落级证据卡")
             evidence = _build_evidence(payload.concept, papers)

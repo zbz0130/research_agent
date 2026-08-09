@@ -1,8 +1,11 @@
 import json
 import re
 import hashlib
+import math
+import time
 from datetime import datetime, timezone
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from email.utils import parsedate_to_datetime
 from typing import Protocol
 
 import httpx
@@ -19,6 +22,124 @@ from app.research_schemas import (
 
 class ProviderUnavailable(RuntimeError):
     """Raised when an external provider cannot be reached or understood."""
+
+    code = "provider_unavailable"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str | None = None,
+        provider: str | None = None,
+        retry_after_seconds: float | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code or self.code
+        self.provider = provider
+        self.retry_after_seconds = retry_after_seconds
+
+    def public_detail(self) -> dict[str, str | float | None]:
+        """Return stable metadata without exposing provider internals or keys.
+
+        Callers still render ``str(exc)`` for backwards compatibility, while
+        API layers that need a structured error can use this method instead of
+        attempting to parse a human-facing message.
+        """
+
+        return {
+            "code": self.code,
+            "provider": self.provider,
+            "message": str(self),
+            "retry_after_seconds": self.retry_after_seconds,
+        }
+
+
+class ProviderRateLimited(ProviderUnavailable):
+    """A bounded, actionable Semantic Scholar rate-limit failure."""
+
+    def __init__(
+        self,
+        *,
+        api_key_configured: bool,
+        retries_attempted: int,
+        waited_seconds: float,
+        max_wait_seconds: float,
+        retry_after_seconds: float | None,
+        stopped_by_wait_cap: bool = False,
+    ) -> None:
+        self.api_key_configured = api_key_configured
+        self.retries_attempted = retries_attempted
+        self.waited_seconds = waited_seconds
+        self.max_wait_seconds = max_wait_seconds
+        self.stopped_by_wait_cap = stopped_by_wait_cap
+
+        message_parts = ["Semantic Scholar 请求过于频繁，已被限流（HTTP 429）。"]
+        if api_key_configured:
+            message_parts.append(
+                "当前已配置论文检索 API Key，但仍受到服务端速率或配额限制；请稍后重试并检查该 Key 的配额。"
+            )
+        else:
+            message_parts.append(
+                "当前为匿名/未配置论文检索 API Key 的请求，公开额度较低；"
+                "可在设置页填写论文检索 Key（WISHFORGE_PAPER_API_KEY）后再试。"
+            )
+        if retry_after_seconds is not None:
+            message_parts.append(
+                f"服务端建议至少等待 {_format_wait_seconds(retry_after_seconds)} 后再请求。"
+            )
+        if retries_attempted:
+            message_parts.append(
+                f"客户端已按退避策略重试 {retries_attempted} 次，累计等待 {_format_wait_seconds(waited_seconds)}。"
+            )
+        if stopped_by_wait_cap:
+            message_parts.append(
+                f"为避免长时间阻塞，本次最多等待 {_format_wait_seconds(max_wait_seconds)}，"
+                "因此没有在服务端要求的等待时间之前再次请求。"
+            )
+        message_parts.append(
+            "仅在启用演示模式时，系统才会回退到演示资料；演示资料不能作为正式科学证据引用。"
+        )
+        super().__init__(
+            "".join(message_parts),
+            code="provider_rate_limited",
+            provider="semantic_scholar",
+            retry_after_seconds=retry_after_seconds,
+        )
+
+
+def _format_wait_seconds(seconds: float) -> str:
+    """Format a delay compactly for a Chinese user-facing provider message."""
+
+    value = float(seconds)
+    if value.is_integer():
+        return f"{int(value)} 秒"
+    return f"{value:.1f} 秒"
+
+
+def _parse_retry_after(value: str | None) -> float | None:
+    """Parse an RFC Retry-After value as a non-negative number of seconds.
+
+    Semantic Scholar normally returns an integer number of seconds, but HTTP
+    also permits an IMF-fixdate. Invalid values are intentionally ignored and
+    fall back to the local exponential backoff rather than causing a parsing
+    failure that masks the original rate-limit response.
+    """
+
+    if not value:
+        return None
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        try:
+            retry_at = parsedate_to_datetime(value)
+        except (TypeError, ValueError, IndexError, OverflowError):
+            return None
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=timezone.utc)
+        seconds = (retry_at - datetime.now(timezone.utc)).total_seconds()
+    if not math.isfinite(seconds):
+        return None
+    return max(0.0, seconds)
 
 
 class SearchProvider(Protocol):
@@ -75,9 +196,37 @@ class SynthesisProvider(Protocol):
 class SemanticScholarProvider:
     name = "semantic_scholar"
 
-    def __init__(self, api_key: str | None = None, timeout: float = 20.0) -> None:
+    # A retrieval task should not tie up its worker for tens of seconds just
+    # because a public API is saturated. These values mean one initial request
+    # plus at most two retries, with no more than three seconds of deliberate
+    # waiting in total. Constructor parameters keep the policy testable while
+    # retaining safe bounded defaults for production callers.
+    _DEFAULT_MAX_RETRIES = 2
+    _DEFAULT_BACKOFF_SECONDS = 0.5
+    _DEFAULT_MAX_RETRY_WAIT_SECONDS = 3.0
+
+    def __init__(
+        self,
+        api_key: str | None = None,
+        timeout: float = 20.0,
+        *,
+        max_retries: int = _DEFAULT_MAX_RETRIES,
+        retry_backoff_seconds: float = _DEFAULT_BACKOFF_SECONDS,
+        max_retry_wait_seconds: float = _DEFAULT_MAX_RETRY_WAIT_SECONDS,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
+        if max_retries < 0:
+            raise ValueError("max_retries 不能小于 0")
+        if retry_backoff_seconds < 0:
+            raise ValueError("retry_backoff_seconds 不能小于 0")
+        if max_retry_wait_seconds < 0:
+            raise ValueError("max_retry_wait_seconds 不能小于 0")
         self.api_key = api_key
         self.timeout = timeout
+        self.max_retries = max_retries
+        self.retry_backoff_seconds = retry_backoff_seconds
+        self.max_retry_wait_seconds = max_retry_wait_seconds
+        self._sleep = sleep
 
     def search(self, concept: str, limit: int) -> list[PaperRecord]:
         headers = {"User-Agent": "WishForge/0.1"}
@@ -88,15 +237,68 @@ class SemanticScholarProvider:
             "limit": limit,
             "fields": "paperId,title,abstract,authors,year,venue,url,openAccessPdf,citationCount,externalIds",
         }
-        try:
-            response = httpx.get(
-                "https://api.semanticscholar.org/graph/v1/paper/search",
-                params=params,
-                headers=headers,
-                timeout=self.timeout,
+        total_wait_seconds = 0.0
+        last_retry_after_seconds: float | None = None
+        response: httpx.Response | None = None
+
+        # Retry HTTP 429 only. Transport failures and 4xx/5xx responses keep
+        # their existing fail-fast behavior so we do not amplify an outage.
+        for retry_index in range(self.max_retries + 1):
+            try:
+                response = httpx.get(
+                    "https://api.semanticscholar.org/graph/v1/paper/search",
+                    params=params,
+                    headers=headers,
+                    timeout=self.timeout,
+                )
+            except httpx.HTTPError as exc:
+                raise ProviderUnavailable(f"Semantic Scholar 暂时不可用：{exc}") from exc
+
+            if response.status_code != httpx.codes.TOO_MANY_REQUESTS:
+                break
+
+            last_retry_after_seconds = _parse_retry_after(response.headers.get("Retry-After"))
+            if retry_index >= self.max_retries:
+                raise ProviderRateLimited(
+                    api_key_configured=bool(self.api_key),
+                    retries_attempted=retry_index,
+                    waited_seconds=total_wait_seconds,
+                    max_wait_seconds=self.max_retry_wait_seconds,
+                    retry_after_seconds=last_retry_after_seconds,
+                )
+
+            # Retry-After is a server-imposed lower bound. We therefore take
+            # the larger of it and our exponential backoff, never silently
+            # retry before the value supplied by the service.
+            exponential_delay = self.retry_backoff_seconds * (2**retry_index)
+            delay = max(last_retry_after_seconds or 0.0, exponential_delay)
+            if total_wait_seconds + delay > self.max_retry_wait_seconds:
+                raise ProviderRateLimited(
+                    api_key_configured=bool(self.api_key),
+                    retries_attempted=retry_index,
+                    waited_seconds=total_wait_seconds,
+                    max_wait_seconds=self.max_retry_wait_seconds,
+                    retry_after_seconds=last_retry_after_seconds,
+                    stopped_by_wait_cap=True,
+                )
+            if delay:
+                self._sleep(delay)
+                total_wait_seconds += delay
+
+        # A loop exit at this point always has a non-429 response. The guard
+        # is kept explicit so later maintenance cannot accidentally turn an
+        # exhausted rate-limit path into an empty-paper result.
+        if response is None or response.status_code == httpx.codes.TOO_MANY_REQUESTS:
+            raise ProviderRateLimited(
+                api_key_configured=bool(self.api_key),
+                retries_attempted=self.max_retries,
+                waited_seconds=total_wait_seconds,
+                max_wait_seconds=self.max_retry_wait_seconds,
+                retry_after_seconds=last_retry_after_seconds,
             )
+        try:
             response.raise_for_status()
-        except (httpx.HTTPError, httpx.TimeoutException) as exc:
+        except httpx.HTTPError as exc:
             raise ProviderUnavailable(f"Semantic Scholar 暂时不可用：{exc}") from exc
 
         try:
