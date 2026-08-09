@@ -65,6 +65,129 @@ const graphGalleryNodesInput = document.querySelector("#graph-gallery-nodes");
 const graphGallerySubmit = document.querySelector("#graph-gallery-submit");
 const graphGalleryMessageEl = document.querySelector("#graph-gallery-message");
 const graphGalleryEl = document.querySelector("#graph-gallery");
+const apiBaseForm = document.querySelector("#api-base-form");
+const apiBaseInput = document.querySelector("#api-base-url");
+const apiBaseStatusEl = document.querySelector("#api-base-status");
+const apiBaseMessageEl = document.querySelector("#api-base-message");
+const resetApiBaseButton = document.querySelector("#reset-api-base");
+const routeLinks = [...document.querySelectorAll("[data-route-link]")];
+const appViews = [...document.querySelectorAll("[data-view]")];
+
+const API_BASE_STORAGE_KEY = "wishforge.api_base_url";
+const routes = {
+  workspace: { title: "研究工作台" },
+  "concept-graphs": { title: "概念图" },
+  innovations: { title: "创新与查重" },
+  experiments: { title: "实验方案" },
+  settings: { title: "设置" },
+};
+
+function normalizeApiBaseUrl(value) {
+  const candidate = String(value ?? "").trim().replace(/\/+$/, "");
+  if (!candidate) return "";
+  if (!/^https?:\/\//i.test(candidate)) return null;
+  try {
+    const parsed = new URL(candidate);
+    if (!["http:", "https:"].includes(parsed.protocol)) return null;
+    return parsed.href.replace(/\/+$/, "");
+  } catch (error) {
+    return null;
+  }
+}
+
+function readStoredApiBaseUrl() {
+  try {
+    return window.localStorage.getItem(API_BASE_STORAGE_KEY) || "";
+  } catch (error) {
+    return "";
+  }
+}
+
+function resolveApiBaseUrl() {
+  const stored = normalizeApiBaseUrl(readStoredApiBaseUrl());
+  if (stored) return { value: stored, source: "浏览器保存" };
+  const runtimeConfig = window.WISHFORGE_RUNTIME_CONFIG || {};
+  const deployed = normalizeApiBaseUrl(runtimeConfig.apiBaseUrl || window.WISHFORGE_API_BASE_URL);
+  if (deployed) return { value: deployed, source: "页面配置" };
+  return { value: "", source: "当前页面同源" };
+}
+
+let apiBaseConfiguration = resolveApiBaseUrl();
+
+function apiUrl(path) {
+  const requestPath = String(path || "");
+  if (/^https?:\/\//i.test(requestPath) || !apiBaseConfiguration.value) return requestPath;
+  return `${apiBaseConfiguration.value}${requestPath.startsWith("/") ? requestPath : `/${requestPath}`}`;
+}
+
+function apiFetch(path, options) {
+  return window.fetch(apiUrl(path), options);
+}
+
+function setApiBaseMessage(text, kind = "") {
+  apiBaseMessageEl.textContent = text;
+  apiBaseMessageEl.className = `form-message ${kind}`;
+}
+
+function renderApiBaseConfiguration() {
+  apiBaseInput.value = apiBaseConfiguration.value;
+  apiBaseStatusEl.textContent = apiBaseConfiguration.value
+    ? `${apiBaseConfiguration.source} · 已设置`
+    : "当前页面同源";
+  apiBaseStatusEl.className = `tag ${apiBaseConfiguration.value ? "tag-configured" : "tag-missing"}`;
+}
+
+function setStoredApiBaseUrl(value) {
+  try {
+    if (value) {
+      window.localStorage.setItem(API_BASE_STORAGE_KEY, value);
+    } else {
+      window.localStorage.removeItem(API_BASE_STORAGE_KEY);
+    }
+    return true;
+  } catch (error) {
+    return false;
+  }
+}
+
+function currentRoute() {
+  const route = window.location.hash.replace(/^#/, "").split(/[/?]/, 1)[0];
+  return routes[route] ? route : "workspace";
+}
+
+function renderRoute(route = currentRoute()) {
+  const activeRoute = routes[route] ? route : "workspace";
+  appViews.forEach((view) => {
+    const isActive = view.dataset.view === activeRoute;
+    view.classList.toggle("is-active", isActive);
+    view.setAttribute("aria-hidden", String(!isActive));
+  });
+  routeLinks.forEach((link) => {
+    const isActive = link.dataset.routeLink === activeRoute;
+    link.classList.toggle("is-active", isActive);
+    if (isActive) {
+      link.setAttribute("aria-current", "page");
+    } else {
+      link.removeAttribute("aria-current");
+    }
+  });
+  document.title = `${routes[activeRoute].title} · 许愿机 / WishForge`;
+}
+
+function navigateTo(route, selector = "") {
+  const nextRoute = routes[route] ? route : "workspace";
+  if (window.location.hash === `#${nextRoute}`) {
+    renderRoute(nextRoute);
+  } else {
+    window.location.hash = nextRoute;
+    renderRoute(nextRoute);
+  }
+  if (selector) {
+    window.requestAnimationFrame(() => {
+      document.querySelector(selector)?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  }
+}
 
 const state = {
   analysisId: null,
@@ -155,7 +278,7 @@ function setHealth(text, ok) {
 
 async function loadHealth() {
   try {
-    const response = await fetch("/api/v1/health");
+    const response = await apiFetch("/api/v1/health");
     if (!response.ok) throw new Error("health check failed");
     const data = await response.json();
     setHealth(`${data.service} · ${data.version}`, true);
@@ -164,29 +287,112 @@ async function loadHealth() {
   }
 }
 
+apiBaseForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  const rawValue = apiBaseInput.value.trim();
+  const normalized = normalizeApiBaseUrl(rawValue);
+  if (rawValue && !normalized) {
+    setApiBaseMessage("请输入完整的 http:// 或 https:// 后端地址，或清空后使用当前页面同源。", "error-text");
+    return;
+  }
+  const stored = setStoredApiBaseUrl(normalized || "");
+  apiBaseConfiguration = normalized
+    ? { value: normalized, source: stored ? "浏览器保存" : "当前会话" }
+    : resolveApiBaseUrl();
+  renderApiBaseConfiguration();
+  setApiBaseMessage(
+    normalized
+      ? `已切换到 ${apiBaseConfiguration.value}；正在刷新连接状态。`
+      : "已恢复默认后端地址；正在刷新连接状态。",
+    "",
+  );
+  loadHealth();
+  loadProjects();
+  loadApiKeys();
+});
+
+resetApiBaseButton.addEventListener("click", () => {
+  const stored = setStoredApiBaseUrl("");
+  apiBaseConfiguration = resolveApiBaseUrl();
+  renderApiBaseConfiguration();
+  setApiBaseMessage(
+    stored ? "已清除浏览器保存的地址，恢复为默认连接。" : "无法写入浏览器存储，已在当前会话恢复默认连接。",
+    stored ? "" : "error-text",
+  );
+  loadHealth();
+  loadProjects();
+  loadApiKeys();
+});
+
 function renderApiKeys(slots) {
+  const detailsBySlot = {
+    paper_search: {
+      icon: "⌕",
+      description: "用于论文检索、相关工作发现和 prior-art 查重。",
+      scope: "学术资料服务",
+    },
+    community_search: {
+      icon: "◌",
+      description: "用于探索性社区信号；是否实际调用取决于后端连接器。",
+      scope: "社区讨论服务",
+    },
+    explanation_model: {
+      icon: "✦",
+      description: "用于概念解释、节点解释、研究简报和假设整理。",
+      scope: "语言模型服务",
+    },
+    experiment_runner: {
+      icon: "▣",
+      description: "预留给未来实验执行器；第一版仅生成可审阅的方案草案。",
+      scope: "实验执行服务",
+    },
+  };
   apiKeysEl.innerHTML = slots.map((slot) => `
-    <div class="setting-row api-key-row" data-api-key-slot="${escapeHtml(slot.id)}">
-      <div class="setting-main">
-        <div class="setting-title-line">
-          <h3>${escapeHtml(slot.label)}</h3>
-          <span class="tag ${slot.configured ? "tag-configured" : "tag-missing"}">
-            ${slot.configured ? `已配置 ${escapeHtml(slot.masked || "")}` : "未配置"}
-          </span>
-        </div>
-        <p><span class="provider-name">${escapeHtml(slot.provider)}</span> · <code>${escapeHtml(slot.environment_variable)}</code></p>
-        <input
-          type="password"
-          class="api-key-input"
-          data-api-key-input="${escapeHtml(slot.id)}"
-          autocomplete="new-password"
-          spellcheck="false"
-          placeholder="${slot.configured ? "输入新密钥以替换（留空保持不变）" : "粘贴该用途的 API Key"}"
-          aria-label="${escapeHtml(slot.label)} API Key"
-        />
-      </div>
-      <button type="button" class="secondary api-key-clear" data-api-key-clear="${escapeHtml(slot.id)}">清除当前值</button>
-    </div>
+    ${(() => {
+      const detail = detailsBySlot[slot.id] || {
+        icon: "•",
+        description: "为该服务单独配置凭据。",
+        scope: "独立服务",
+      };
+      const inputId = `api-key-${slot.id}`;
+      return `
+        <article class="service-card api-key-row ${slot.configured ? "is-configured" : "is-unconfigured"}" data-api-key-slot="${escapeHtml(slot.id)}">
+          <div class="service-card-heading">
+            <span class="service-card-icon" aria-hidden="true">${escapeHtml(detail.icon)}</span>
+            <div class="service-card-title">
+              <div class="setting-title-line">
+                <div>
+                  <p class="service-card-scope">${escapeHtml(detail.scope)}</p>
+                  <h3>${escapeHtml(slot.label)}</h3>
+                </div>
+                <span class="service-status ${slot.configured ? "is-configured" : "is-unconfigured"}">
+                  <span aria-hidden="true" class="service-status-dot"></span>
+                  ${slot.configured ? `已连接 ${escapeHtml(slot.masked || "")}` : "等待连接"}
+                </span>
+              </div>
+              <p>${escapeHtml(detail.description)}</p>
+              <p class="service-provider"><span class="provider-name">${escapeHtml(slot.provider)}</span><code>${escapeHtml(slot.environment_variable)}</code></p>
+            </div>
+          </div>
+          <div class="service-card-control">
+            <label for="${escapeHtml(inputId)}">${slot.configured ? "更新服务密钥" : "连接服务密钥"}</label>
+            <div class="service-key-row">
+              <input
+                id="${escapeHtml(inputId)}"
+                type="password"
+                class="api-key-input"
+                data-api-key-input="${escapeHtml(slot.id)}"
+                autocomplete="new-password"
+                spellcheck="false"
+                placeholder="${slot.configured ? "输入新密钥以替换（留空保持不变）" : "粘贴该用途的 API Key"}"
+                aria-label="${escapeHtml(slot.label)} API Key"
+              />
+              <button type="button" class="secondary api-key-clear" data-api-key-clear="${escapeHtml(slot.id)}">断开</button>
+            </div>
+          </div>
+        </article>
+      `;
+    })()}
   `).join("");
 }
 
@@ -197,7 +403,7 @@ function setApiKeyMessage(text, kind = "") {
 
 async function loadApiKeys() {
   try {
-    const response = await fetch("/api/v1/settings/api-keys");
+    const response = await apiFetch("/api/v1/settings/api-keys");
     if (!response.ok) throw new Error("settings request failed");
     const data = await response.json();
     renderApiKeys(data.slots);
@@ -208,7 +414,7 @@ async function loadApiKeys() {
 }
 
 async function updateApiKeys(payload) {
-  const response = await fetch("/api/v1/settings/api-keys", {
+  const response = await apiFetch("/api/v1/settings/api-keys", {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -276,7 +482,7 @@ function renderProjects(projects) {
 
 async function loadProjects() {
   try {
-    const response = await fetch("/api/v1/projects");
+    const response = await apiFetch("/api/v1/projects");
     if (!response.ok) throw new Error("project request failed");
     renderProjects(await response.json());
   } catch (error) {
@@ -611,7 +817,7 @@ function renderExperimentPlan(plan) {
 }
 
 async function createExperimentPlan(payload) {
-  const response = await fetch("/api/v1/experiments/plans", {
+  const response = await apiFetch("/api/v1/experiments/plans", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -621,7 +827,7 @@ async function createExperimentPlan(payload) {
 }
 
 async function reviewExperimentPlan(planId, status, note) {
-  const response = await fetch(`/api/v1/experiments/plans/${encodeURIComponent(planId)}/review`, {
+  const response = await apiFetch(`/api/v1/experiments/plans/${encodeURIComponent(planId)}/review`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ status, note: note || "", reviewer: "user" }),
@@ -636,8 +842,8 @@ function fillExperimentIdea(idea) {
   experimentIdeaInput.value = value;
   if (!experimentTitleInput.value.trim()) experimentTitleInput.value = `验证：${value.slice(0, 80)}`;
   setExperimentPlanMessage("已填入候选想法；你可以修改后再生成方案。", "");
-  experimentIdeaInput.focus();
-  document.querySelector("#experiment-card")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  navigateTo("experiments", "#experiment-card");
+  window.requestAnimationFrame(() => experimentIdeaInput.focus());
 }
 
 experimentPlanForm.addEventListener("submit", async (event) => {
@@ -833,7 +1039,7 @@ ideaCheckResultEl.addEventListener("click", async (event) => {
   [...ideaCheckResultEl.querySelectorAll("[data-idea-review]")].forEach((item) => { item.disabled = true; });
   if (message) message.textContent = "正在保存人工核验状态…";
   try {
-    const response = await fetch(`/api/v1/ideas/checks/${encodeURIComponent(state.ideaCheck.id)}/review`, {
+    const response = await apiFetch(`/api/v1/ideas/checks/${encodeURIComponent(state.ideaCheck.id)}/review`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ status, reviewer: "local-user" }),
@@ -850,7 +1056,7 @@ ideaCheckResultEl.addEventListener("click", async (event) => {
 });
 
 async function checkIdea(idea, maxPapers) {
-  const response = await fetch("/api/v1/ideas/check", {
+  const response = await apiFetch("/api/v1/ideas/check", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ idea, max_papers: maxPapers, language: "zh-CN" }),
@@ -944,10 +1150,10 @@ function setGraphMessage(text, kind = "") {
 
 async function refreshGraph() {
   if (!state.graphId) return;
-  const graphResponse = await fetch(`/api/v1/graphs/${encodeURIComponent(state.graphId)}`);
+  const graphResponse = await apiFetch(`/api/v1/graphs/${encodeURIComponent(state.graphId)}`);
   if (!graphResponse.ok) throw new Error("graph request failed");
   renderGraph(await graphResponse.json());
-  const patchesResponse = await fetch(`/api/v1/graphs/${encodeURIComponent(state.graphId)}/patches`);
+  const patchesResponse = await apiFetch(`/api/v1/graphs/${encodeURIComponent(state.graphId)}/patches`);
   if (patchesResponse.ok) {
     const patches = await patchesResponse.json();
     state.pendingPatches = new Map(
@@ -959,7 +1165,7 @@ async function refreshGraph() {
 }
 
 async function loadGraphPicker(selectedId = state.graphId) {
-  const response = await fetch("/api/v1/graphs");
+  const response = await apiFetch("/api/v1/graphs");
   if (!response.ok) return;
   const graphs = await response.json();
   state.graphs = graphs;
@@ -1040,7 +1246,7 @@ graphCompareForm.addEventListener("submit", async (event) => {
   graphCompareResultEl.classList.add("hidden");
   setGraphCompareMessage("正在比较图谱中的机制和问题…");
   try {
-    const response = await fetch("/api/v1/graphs/compare", {
+    const response = await apiFetch("/api/v1/graphs/compare", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -1120,11 +1326,11 @@ function renderGraphGallery(graphs, warnings = []) {
 async function loadGalleryGraph(graphId, nodeIds) {
   if (nodeIds.length) {
     const query = encodeURIComponent(nodeIds.join(","));
-    const response = await fetch(`/api/v1/graphs/${encodeURIComponent(graphId)}/subset?node_ids=${query}`);
+    const response = await apiFetch(`/api/v1/graphs/${encodeURIComponent(graphId)}/subset?node_ids=${query}`);
     if (!response.ok) throw new Error(await response.text());
     return response.json().then((data) => data.graph);
   }
-  const response = await fetch(`/api/v1/graphs/${encodeURIComponent(graphId)}`);
+  const response = await apiFetch(`/api/v1/graphs/${encodeURIComponent(graphId)}`);
   if (!response.ok) throw new Error(await response.text());
   return response.json();
 }
@@ -1167,7 +1373,7 @@ graphGalleryEl.addEventListener("click", async (event) => {
   graphPickerEl.value = graphId;
   try {
     await refreshGraph();
-    document.querySelector(".graph-card")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    navigateTo("concept-graphs", ".graph-card");
   } catch (error) {
     setGraphGalleryMessage(`切换概念图失败：${error.message}`, "error-text");
   }
@@ -1175,7 +1381,7 @@ graphGalleryEl.addEventListener("click", async (event) => {
 
 async function applyUserPatch(operations, reason) {
   if (!state.graphId) return;
-  const response = await fetch(`/api/v1/graphs/${encodeURIComponent(state.graphId)}/patches`, {
+  const response = await apiFetch(`/api/v1/graphs/${encodeURIComponent(state.graphId)}/patches`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -1231,7 +1437,7 @@ function describeOperation(operation) {
 
 async function reviewPatch(patchId, action) {
   if (!state.graphId) return;
-  const response = await fetch(
+  const response = await apiFetch(
     `/api/v1/graphs/${encodeURIComponent(state.graphId)}/patches/${encodeURIComponent(patchId)}/${action}`,
     { method: "POST" },
   );
@@ -1265,7 +1471,7 @@ async function proposeAgentPatch() {
   }
   const nodeId = `agent-${Date.now()}`;
   const edgeId = `agent-edge-${Date.now()}`;
-  const response = await fetch(`/api/v1/graphs/${encodeURIComponent(state.graphId)}/patches`, {
+  const response = await apiFetch(`/api/v1/graphs/${encodeURIComponent(state.graphId)}/patches`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -1318,7 +1524,7 @@ graphAgentForm.addEventListener("submit", async (event) => {
   graphAgentMessageEl.textContent = "正在把自然语言请求转换成受限提案…";
   graphAgentMessageEl.className = "form-message";
   try {
-    const response = await fetch(`/api/v1/graphs/${encodeURIComponent(state.graphId)}/agent-patch`, {
+    const response = await apiFetch(`/api/v1/graphs/${encodeURIComponent(state.graphId)}/agent-patch`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ request, base_version: state.graph.version, max_operations: 4 }),
@@ -1343,7 +1549,7 @@ graphMetaForm.addEventListener("submit", async (event) => {
   const name = graphNameInput.value.trim();
   const rootId = graphRootInput.value;
   if (!name && !rootId) return;
-  const response = await fetch(`/api/v1/graphs/${encodeURIComponent(state.graphId)}`, {
+  const response = await apiFetch(`/api/v1/graphs/${encodeURIComponent(state.graphId)}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ name: name || undefined, root_id: rootId || undefined, base_version: state.graph.version }),
@@ -1363,7 +1569,7 @@ graphEl.addEventListener("click", async (event) => {
   if (explainButton && state.graph) {
     const nodeId = explainButton.dataset.nodeExplain;
     try {
-      const response = await fetch(
+      const response = await apiFetch(
         `/api/v1/graphs/${encodeURIComponent(state.graphId)}/nodes/${encodeURIComponent(nodeId)}/explanation-patch`,
         {
           method: "POST",
@@ -1420,7 +1626,7 @@ nodeForm.addEventListener("submit", async (event) => {
 });
 
 async function pollAnalysis(id) {
-  const response = await fetch(`/api/v1/analyses/${encodeURIComponent(id)}`);
+  const response = await apiFetch(`/api/v1/analyses/${encodeURIComponent(id)}`);
   if (!response.ok) throw new Error("analysis request failed");
   const job = await response.json();
   setAnalysisMessage(`${job.message} · ${job.progress}%`);
@@ -1459,7 +1665,7 @@ analysisForm.addEventListener("submit", async (event) => {
   analysisSubmit.disabled = true;
   setAnalysisMessage("正在创建分析任务…");
   try {
-    const response = await fetch("/api/v1/analyses", {
+    const response = await apiFetch("/api/v1/analyses", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -1484,7 +1690,7 @@ projectForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   projectMessageEl.textContent = "正在创建…";
   try {
-    const response = await fetch("/api/v1/projects", {
+    const response = await apiFetch("/api/v1/projects", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -1503,7 +1709,15 @@ projectForm.addEventListener("submit", async (event) => {
 
 document.querySelector("#refresh").addEventListener("click", loadProjects);
 document.querySelector("#refresh-settings").addEventListener("click", loadApiKeys);
+window.addEventListener("hashchange", () => renderRoute());
+routeLinks.forEach((link) => {
+  link.addEventListener("click", () => {
+    window.setTimeout(() => window.scrollTo({ top: 0, behavior: "smooth" }), 0);
+  });
+});
 
+renderApiBaseConfiguration();
+renderRoute();
 loadHealth();
 loadProjects();
 loadApiKeys();

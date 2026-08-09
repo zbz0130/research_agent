@@ -3,105 +3,184 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="许愿机 WishForge：把模糊的研究想法梳理成有证据的理解。" />
     <title>许愿机 / WishForge</title>
-    <link rel="stylesheet" href="/static/styles.css" />
+    <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
     <main class="shell">
-      <header class="topbar">
-        <div>
+      <header class="topbar app-topbar">
+        <div class="brand-block">
           <p class="eyebrow">CONCEPT → EVIDENCE → UNDERSTANDING</p>
           <h1>许愿机 <span>/ WishForge</span></h1>
-          <p class="subtitle">把一个模糊的想法，锻造成有证据的理解。</p>
+          <p class="subtitle">从模糊想法到可追溯的研究线索。</p>
         </div>
-        <div id="health" class="status-pill status-pending">连接中…</div>
+        <div class="topbar-actions">
+          <div id="health" class="status-pill status-pending" role="status">连接中…</div>
+        </div>
       </header>
 
-      <section class="card analysis-card">
-        <div class="card-heading">
+      <nav class="app-nav" aria-label="许愿机主要功能">
+        <a class="nav-link" href="#workspace" data-route-link="workspace">
+          <span class="nav-link-kicker">01</span>
+          <span>工作台</span>
+        </a>
+        <a class="nav-link" href="#concept-graphs" data-route-link="concept-graphs">
+          <span class="nav-link-kicker">02</span>
+          <span>概念图</span>
+        </a>
+        <a class="nav-link" href="#innovations" data-route-link="innovations">
+          <span class="nav-link-kicker">03</span>
+          <span>创新与查重</span>
+        </a>
+        <a class="nav-link" href="#experiments" data-route-link="experiments">
+          <span class="nav-link-kicker">04</span>
+          <span>实验方案</span>
+        </a>
+        <a class="nav-link" href="#settings" data-route-link="settings">
+          <span class="nav-link-kicker">05</span>
+          <span>设置</span>
+        </a>
+      </nav>
+
+      <section class="app-view is-active" data-view="workspace" aria-labelledby="workspace-title">
+        <header class="view-heading">
           <div>
-            <p class="eyebrow">CONCEPT ANALYSIS</p>
-            <h2>从一个概念开始</h2>
+            <p class="eyebrow">RESEARCH WORKBENCH</p>
+            <h2 id="workspace-title">从一个概念开始</h2>
+            <p>检索可信资料、建立直觉、保存研究问题。分析结果会留在本页，概念图和创新候选则进入各自工作区。</p>
           </div>
           <span class="tag tag-beta">第一版</span>
-        </div>
-        <form id="analysis-form" class="analysis-form">
-          <label class="concept-field">
-            概念或想法
-            <input id="concept" required maxlength="500" placeholder="例如：注意力机制为什么适合处理长距离依赖？" />
-          </label>
-          <div class="form-grid">
-            <label>
-              分析模式
-              <select id="analysis-level">
-                <option value="quick">快速解释：不检索，先建立直觉</option>
-                <option value="literature" selected>文献解释：检索论文并生成证据卡</option>
-                <option value="research">研究线索：扩展检索 + 探索性候选</option>
-              </select>
-            </label>
-            <label>
-              面向读者
-              <select id="audience">
-                <option value="beginner" selected>初学者</option>
-                <option value="student">本科生 / 研究生</option>
-                <option value="researcher">研究者</option>
-              </select>
-            </label>
-            <label>
-              最多检索论文数
-              <input id="max-papers" type="number" min="1" max="12" value="6" />
-            </label>
-          </div>
-          <div class="form-actions">
-            <button type="submit" id="analysis-submit">开始分析</button>
-            <span id="analysis-message" class="form-message" role="status"></span>
-          </div>
-        </form>
-      </section>
+        </header>
 
-      <section class="card idea-check-card">
-        <div class="card-heading">
-          <div>
-            <p class="eyebrow">PRIOR-ART CHECK</p>
-            <h2>判断一个想法有没有被做过</h2>
-          </div>
-          <span class="tag tag-beta">范围化判断</span>
-        </div>
-        <p class="settings-note">
-          许愿机会检索论文标题、摘要和公开元数据，给出 L0–L4 相似度分级。它帮助你决定下一步读什么，不能证明全球范围内绝对没有相似工作。
-        </p>
-        <form id="idea-check-form" class="analysis-form">
-          <label class="concept-field">
-            研究想法
-            <textarea id="idea-check-input" required maxlength="2000" rows="3" placeholder="例如：用分页机制管理长上下文 LLM 的 KV cache"></textarea>
-          </label>
-          <div class="form-grid idea-form-grid">
-            <label>
-              最多检索论文数
-              <input id="idea-max-papers" type="number" min="1" max="12" value="8" />
-            </label>
-            <div class="form-actions idea-actions">
-              <button type="submit" id="idea-check-submit">开始查重</button>
-              <span id="idea-check-message" class="form-message" role="status"></span>
-            </div>
-          </div>
-        </form>
-        <div id="idea-check-result" class="idea-result hidden"></div>
-      </section>
-
-      <section class="analysis-layout">
-        <article class="card result-card">
+        <section class="card analysis-card">
           <div class="card-heading">
             <div>
-              <p class="eyebrow">EXPLANATION</p>
-              <h2>易懂解释</h2>
+              <p class="eyebrow">CONCEPT ANALYSIS</p>
+              <h2>发起分析</h2>
             </div>
-            <span id="analysis-provider" class="tag">尚未分析</span>
+            <span class="tag">证据优先</span>
           </div>
-          <div id="explanation" class="result-placeholder">
-            输入一个概念后，这里会显示一句话定义、直觉类比、技术机制、演变过程和限制。
+          <form id="analysis-form" class="analysis-form">
+            <label class="concept-field">
+              概念或想法
+              <input id="concept" required maxlength="500" placeholder="例如：注意力机制为什么适合处理长距离依赖？" />
+            </label>
+            <div class="form-grid">
+              <label>
+                分析模式
+                <select id="analysis-level">
+                  <option value="quick">快速解释：不检索，先建立直觉</option>
+                  <option value="literature" selected>文献解释：检索论文并生成证据卡</option>
+                  <option value="research">研究线索：扩展检索 + 探索性候选</option>
+                </select>
+              </label>
+              <label>
+                面向读者
+                <select id="audience">
+                  <option value="beginner" selected>初学者</option>
+                  <option value="student">本科生 / 研究生</option>
+                  <option value="researcher">研究者</option>
+                </select>
+              </label>
+              <label>
+                最多检索论文数
+                <input id="max-papers" type="number" min="1" max="12" value="6" />
+              </label>
+            </div>
+            <div class="form-actions">
+              <button type="submit" id="analysis-submit">开始分析</button>
+              <span id="analysis-message" class="form-message" role="status"></span>
+            </div>
+          </form>
+        </section>
+
+        <section class="analysis-layout">
+          <article class="card result-card">
+            <div class="card-heading">
+              <div>
+                <p class="eyebrow">EXPLANATION</p>
+                <h2>易懂解释</h2>
+              </div>
+              <span id="analysis-provider" class="tag">尚未分析</span>
+            </div>
+            <div id="explanation" class="result-placeholder">
+              输入一个概念后，这里会显示一句话定义、直觉类比、技术机制、演变过程和限制。
+            </div>
+          </article>
+
+          <aside class="card workbench-guide-card">
+            <p class="eyebrow">HOW RESULTS FLOW</p>
+            <h2>把结果带到下一步</h2>
+            <ol class="workbench-guide-list">
+              <li><strong>概念图</strong><span>保存并编辑层级、节点和跨图关联。</span></li>
+              <li><strong>创新与查重</strong><span>核对相似工作，审阅探索性候选。</span></li>
+              <li><strong>实验方案</strong><span>把经过人工判断的想法整理成验证草案。</span></li>
+            </ol>
+            <p class="settings-note">结果不会自动成为结论；请沿着原文、证据卡和人工复核继续判断。</p>
+          </aside>
+        </section>
+
+        <section class="card evidence-card">
+          <div class="card-heading">
+            <div>
+              <p class="eyebrow">EVIDENCE LEDGER</p>
+              <h2>文献与证据卡</h2>
+            </div>
+            <span id="paper-count" class="tag">0 篇</span>
           </div>
-        </article>
+          <div id="papers" class="paper-list">
+            <p class="empty">完成一次文献分析后，这里会显示来源和原文摘要。</p>
+          </div>
+          <div id="evidence-ledger" class="evidence-ledger hidden">
+            <div class="ledger-heading">
+              <div>
+                <p class="section-label">CLAIM → EVIDENCE</p>
+                <h3>主张—证据账本</h3>
+              </div>
+              <span id="ledger-coverage" class="tag">未生成</span>
+            </div>
+            <p id="ledger-message" class="settings-note"></p>
+            <div id="ledger-claims" class="ledger-claims"></div>
+          </div>
+        </section>
+
+        <section class="card projects-card">
+          <div class="card-heading">
+            <div>
+              <p class="eyebrow">RESEARCH BOARD</p>
+              <h2>研究项目</h2>
+            </div>
+            <button id="refresh" class="secondary" type="button">刷新</button>
+          </div>
+          <p class="settings-note">把值得继续追踪的问题保存为项目草稿，方便后续回到同一条研究线索。</p>
+          <form id="project-form">
+            <label>
+              项目名称
+              <input id="project-name" required maxlength="120" placeholder="例如：长序列注意力机制调研" />
+            </label>
+            <label>
+              研究问题
+              <textarea id="research-question" required maxlength="2000" rows="3" placeholder="你想验证什么？"></textarea>
+            </label>
+            <button type="submit">创建草稿项目</button>
+            <p id="form-message" class="form-message" role="status"></p>
+          </form>
+          <div id="projects" class="projects-list compact-projects">
+            <p class="empty">还没有项目。</p>
+          </div>
+        </section>
+      </section>
+
+      <section class="app-view" data-view="concept-graphs" aria-labelledby="graphs-title">
+        <header class="view-heading">
+          <div>
+            <p class="eyebrow">CONCEPT GRAPH STUDIO</p>
+            <h2 id="graphs-title">概念图</h2>
+            <p>在树中定位概念，在图之间寻找可迁移的方法。所有 Agent 修改都先成为待审核提案。</p>
+          </div>
+          <span class="tag tag-beta">可编辑 · 可复核</span>
+        </header>
 
         <article class="card graph-card">
           <div class="card-heading">
@@ -114,7 +193,7 @@
               <span id="graph-version" class="tag">v—</span>
             </div>
           </div>
-          <div id="graph" class="graph-placeholder">分析完成后会生成概念关系图。</div>
+          <div id="graph" class="graph-placeholder">在工作台完成分析后会生成概念关系图。</div>
           <form id="graph-meta-form" class="graph-meta-form hidden">
             <label>
               概念图名称
@@ -153,195 +232,285 @@
             <button type="submit" class="secondary">添加到概念图</button>
           </form>
         </article>
-      </section>
 
-      <section class="card innovation-card hidden" id="innovation-card">
-        <div class="card-heading">
-          <div>
-            <p class="eyebrow">RESEARCH LEADS</p>
-            <h2>探索性创新候选</h2>
-          </div>
-          <span class="tag tag-beta">需要人工核验</span>
-        </div>
-        <p class="settings-note">
-          这些内容是基于当前检索结果生成的研究假设，不是“保证原创”的结论。先核对相似论文，再决定是否做实验。
-        </p>
-        <div id="innovations" class="innovation-list"></div>
-        <p id="novelty-note" class="novelty-note"></p>
-      </section>
-
-      <section class="card experiment-card" id="experiment-card">
-        <div class="card-heading">
-          <div>
-            <p class="eyebrow">EXPERIMENT PLAN DRAFT</p>
-            <h2>把想法整理成可审阅的实验方案</h2>
-          </div>
-          <span class="tag tag-beta">只生成草案</span>
-        </div>
-        <p class="settings-note">
-          输入一个研究想法，许愿机会生成假设、基线、变量、指标、消融和失败判据。这里不会执行代码、命令、网络调用或真实实验；批准只代表人工审阅通过。
-        </p>
-        <form id="experiment-plan-form" class="analysis-form">
-          <label class="concept-field">
-            研究想法
-            <textarea id="experiment-idea" required minlength="3" maxlength="4000" rows="3" placeholder="例如：用分页机制管理长上下文 LLM 的 KV cache，降低推理显存峰值。"></textarea>
-          </label>
-          <div class="form-grid experiment-form-grid">
-            <label>
-              方案标题（可选）
-              <input id="experiment-title" maxlength="300" placeholder="例如：分页 KV Cache 的最小验证" />
-            </label>
-            <label>
-              对照基线（可选）
-              <input id="experiment-baseline" maxlength="2000" placeholder="例如：标准连续 KV cache 管理" />
-            </label>
-          </div>
-          <div class="form-actions">
-            <button type="submit" id="experiment-plan-submit">生成实验方案草案</button>
-            <button type="button" class="secondary" id="experiment-plan-clear">清空结果</button>
-            <span id="experiment-plan-message" class="form-message" role="status"></span>
-          </div>
-        </form>
-        <div id="experiment-plan-result" class="experiment-plan-result hidden"></div>
-      </section>
-
-      <section class="card research-brief-card hidden" id="research-brief-card">
-        <div class="card-heading">
-          <div>
-            <p class="eyebrow">MULTI-AGENT RESEARCH BRIEF</p>
-            <h2>三路研究线索与综合结果</h2>
-          </div>
-          <span class="tag tag-beta">来源分层</span>
-        </div>
-        <p class="settings-note">
-          社区 Agent 用来发现痛点，脑暴 Agent 用来提出假设，论文 Agent 用来整理限制或 Future Work；三者都不会自动变成科学结论。
-        </p>
-        <div id="research-brief" class="research-brief-content"></div>
-      </section>
-
-      <section class="card evidence-card">
-        <div class="card-heading">
-          <div>
-            <p class="eyebrow">EVIDENCE LEDGER</p>
-            <h2>文献与证据卡</h2>
-          </div>
-          <span id="paper-count" class="tag">0 篇</span>
-        </div>
-        <div id="papers" class="paper-list">
-          <p class="empty">完成一次文献分析后，这里会显示来源和原文摘要。</p>
-        </div>
-        <div id="evidence-ledger" class="evidence-ledger hidden">
-          <div class="ledger-heading">
-            <div>
-              <p class="section-label">CLAIM → EVIDENCE</p>
-              <h3>主张—证据账本</h3>
-            </div>
-            <span id="ledger-coverage" class="tag">未生成</span>
-          </div>
-          <p id="ledger-message" class="settings-note"></p>
-          <div id="ledger-claims" class="ledger-claims"></div>
-        </div>
-      </section>
-
-      <section class="card patch-card hidden" id="patch-card">
-        <div class="card-heading">
-          <div>
-            <p class="eyebrow">GRAPH PATCH REVIEW</p>
-            <h2>Agent 修改提案</h2>
-          </div>
-          <span class="tag tag-beta">人工确认</span>
-        </div>
-        <div id="patches" class="patch-list">
-          <p class="empty">还没有待审核的提案。</p>
-        </div>
-      </section>
-
-      <section class="card graph-compare-card">
-        <div class="card-heading">
-          <div>
-            <p class="eyebrow">CROSS-GRAPH IDEATION</p>
-            <h2>让多棵概念图互相借鉴</h2>
-          </div>
-          <span class="tag tag-beta">未验证假设</span>
-        </div>
-        <p class="settings-note">
-          选择至少两棵已保存的图。你也可以输入节点 ID，只比较局部节点；结果不会直接改动原图，若要写回必须生成并审批 GraphPatch。
-        </p>
-        <form id="graph-compare-form" class="analysis-form">
-          <label>
-            参与比较的概念图（可多选）
-            <select id="graph-compare-picker" multiple size="4" aria-label="选择多棵概念图">
-              <option disabled>完成分析后这里会出现概念图</option>
-            </select>
-          </label>
-          <label>
-            可选：节点 ID（逗号分隔）
-            <input id="graph-compare-nodes" maxlength="1200" placeholder="例如：problem-a, method-b；留空表示比较各图的主要节点" />
-          </label>
-          <label>
-            比较焦点
-            <input id="graph-compare-focus" maxlength="1000" value="找出可以互相借鉴的机制，并给出最小验证实验" />
-          </label>
-          <div class="form-actions">
-            <button type="submit" id="graph-compare-submit">生成跨图候选</button>
-            <span id="graph-compare-message" class="form-message" role="status"></span>
-          </div>
-        </form>
-        <div id="graph-compare-result" class="graph-compare-result hidden"></div>
-      </section>
-
-      <section class="card graph-gallery-card">
-        <div class="card-heading">
-          <div>
-            <p class="eyebrow">MULTI-GRAPH CANVAS</p>
-            <h2>同时查看多棵概念树</h2>
-          </div>
-          <span class="tag tag-beta">局部视图</span>
-        </div>
-        <p class="settings-note">
-          选择两棵或更多概念图并排查看。填写节点 ID 后，每一列会保留这些节点及其层级祖先；这是临时视图，不会修改数据库中的原图。
-        </p>
-        <form id="graph-gallery-form" class="analysis-form">
-          <label>
-            要显示的概念图（可多选）
-            <select id="graph-gallery-picker" multiple size="4" aria-label="选择要并排显示的概念图">
-              <option disabled>完成分析后这里会出现概念图</option>
-            </select>
-          </label>
-          <label>
-            可选：只显示这些节点（逗号分隔）
-            <input id="graph-gallery-nodes" maxlength="1200" placeholder="例如：root,problem-a,method-b；留空表示整棵图" />
-          </label>
-          <div class="form-actions">
-            <button type="submit" id="graph-gallery-submit">显示选中概念图</button>
-            <span id="graph-gallery-message" class="form-message" role="status"></span>
-          </div>
-        </form>
-        <div id="graph-gallery" class="graph-gallery">
-          <p class="empty">选择概念图后，这里会并排显示它们的层级结构。</p>
-        </div>
-      </section>
-
-      <section class="grid">
-        <article class="card settings-card">
+        <section class="card patch-card hidden" id="patch-card">
           <div class="card-heading">
             <div>
-              <p class="eyebrow">PROVIDER CREDENTIALS</p>
-              <h2>API Key 配置</h2>
+              <p class="eyebrow">GRAPH PATCH REVIEW</p>
+              <h2>Agent 修改提案</h2>
             </div>
-            <button id="refresh-settings" class="secondary" type="button">刷新状态</button>
+            <span class="tag tag-beta">人工确认</span>
+          </div>
+          <div id="patches" class="patch-list">
+            <p class="empty">还没有待审核的提案。</p>
+          </div>
+        </section>
+
+        <section class="card graph-compare-card">
+          <div class="card-heading">
+            <div>
+              <p class="eyebrow">CROSS-GRAPH IDEATION</p>
+              <h2>让多棵概念图互相借鉴</h2>
+            </div>
+            <span class="tag tag-beta">未验证假设</span>
           </div>
           <p class="settings-note">
-            论文检索、社区探索、解释模型和实验执行使用不同密钥。可以在这里临时配置当前 API 进程使用的密钥；
-            网页只显示状态和掩码，不会显示明文。重启服务后，网页配置会清除，持久配置请放在本地 <code>.env</code> 或 Secret Manager。
+            选择至少两棵已保存的图。你也可以输入节点 ID，只比较局部节点；结果不会直接改动原图，若要写回必须生成并审批 GraphPatch。
           </p>
-          <form id="api-key-form" class="api-key-form">
-            <div id="api-keys" class="settings-list">
-              <p class="empty">正在读取配置状态…</p>
+          <form id="graph-compare-form" class="analysis-form">
+            <label>
+              参与比较的概念图（可多选）
+              <select id="graph-compare-picker" multiple size="4" aria-label="选择多棵概念图">
+                <option disabled>完成分析后这里会出现概念图</option>
+              </select>
+            </label>
+            <label>
+              可选：节点 ID（逗号分隔）
+              <input id="graph-compare-nodes" maxlength="1200" placeholder="例如：problem-a, method-b；留空表示比较各图的主要节点" />
+            </label>
+            <label>
+              比较焦点
+              <input id="graph-compare-focus" maxlength="1000" value="找出可以互相借鉴的机制，并给出最小验证实验" />
+            </label>
+            <div class="form-actions">
+              <button type="submit" id="graph-compare-submit">生成跨图候选</button>
+              <span id="graph-compare-message" class="form-message" role="status"></span>
+            </div>
+          </form>
+          <div id="graph-compare-result" class="graph-compare-result hidden"></div>
+        </section>
+
+        <section class="card graph-gallery-card">
+          <div class="card-heading">
+            <div>
+              <p class="eyebrow">MULTI-GRAPH CANVAS</p>
+              <h2>同时查看多棵概念树</h2>
+            </div>
+            <span class="tag tag-beta">局部视图</span>
+          </div>
+          <p class="settings-note">
+            选择两棵或更多概念图并排查看。填写节点 ID 后，每一列会保留这些节点及其层级祖先；这是临时视图，不会修改数据库中的原图。
+          </p>
+          <form id="graph-gallery-form" class="analysis-form">
+            <label>
+              要显示的概念图（可多选）
+              <select id="graph-gallery-picker" multiple size="4" aria-label="选择要并排显示的概念图">
+                <option disabled>完成分析后这里会出现概念图</option>
+              </select>
+            </label>
+            <label>
+              可选：只显示这些节点（逗号分隔）
+              <input id="graph-gallery-nodes" maxlength="1200" placeholder="例如：root,problem-a,method-b；留空表示整棵图" />
+            </label>
+            <div class="form-actions">
+              <button type="submit" id="graph-gallery-submit">显示选中概念图</button>
+              <span id="graph-gallery-message" class="form-message" role="status"></span>
+            </div>
+          </form>
+          <div id="graph-gallery" class="graph-gallery">
+            <p class="empty">选择概念图后，这里会并排显示它们的层级结构。</p>
+          </div>
+        </section>
+      </section>
+
+      <section class="app-view" data-view="innovations" aria-labelledby="innovations-title">
+        <header class="view-heading">
+          <div>
+            <p class="eyebrow">NOVELTY EXPLORATION</p>
+            <h2 id="innovations-title">创新与查重</h2>
+            <p>先找相似工作，再阅读证据。这里呈现的是范围内线索和待验证假设，不是“绝对原创”的保证。</p>
+          </div>
+          <span class="tag tag-beta">先检索，再判断</span>
+        </header>
+
+        <section class="card idea-check-card">
+          <div class="card-heading">
+            <div>
+              <p class="eyebrow">PRIOR-ART CHECK</p>
+              <h2>判断一个想法有没有被做过</h2>
+            </div>
+            <span class="tag tag-beta">范围化判断</span>
+          </div>
+          <p class="settings-note">
+            许愿机会检索论文标题、摘要和公开元数据，给出 L0–L4 相似度分级。它帮助你决定下一步读什么，不能证明全球范围内绝对没有相似工作。
+          </p>
+          <form id="idea-check-form" class="analysis-form">
+            <label class="concept-field">
+              研究想法
+              <textarea id="idea-check-input" required maxlength="2000" rows="3" placeholder="例如：用分页机制管理长上下文 LLM 的 KV cache"></textarea>
+            </label>
+            <div class="form-grid idea-form-grid">
+              <label>
+                最多检索论文数
+                <input id="idea-max-papers" type="number" min="1" max="12" value="8" />
+              </label>
+              <div class="form-actions idea-actions">
+                <button type="submit" id="idea-check-submit">开始查重</button>
+                <span id="idea-check-message" class="form-message" role="status"></span>
+              </div>
+            </div>
+          </form>
+          <div id="idea-check-result" class="idea-result hidden"></div>
+        </section>
+
+        <section class="card innovation-card hidden" id="innovation-card">
+          <div class="card-heading">
+            <div>
+              <p class="eyebrow">RESEARCH LEADS</p>
+              <h2>探索性创新候选</h2>
+            </div>
+            <span class="tag tag-beta">需要人工核验</span>
+          </div>
+          <p class="settings-note">
+            这些内容是基于当前检索结果生成的研究假设，不是“保证原创”的结论。先核对相似论文，再决定是否做实验。
+          </p>
+          <div id="innovations" class="innovation-list"></div>
+          <p id="novelty-note" class="novelty-note"></p>
+        </section>
+
+        <section class="card research-brief-card hidden" id="research-brief-card">
+          <div class="card-heading">
+            <div>
+              <p class="eyebrow">MULTI-AGENT RESEARCH BRIEF</p>
+              <h2>三路研究线索与综合结果</h2>
+            </div>
+            <span class="tag tag-beta">来源分层</span>
+          </div>
+          <p class="settings-note">
+            社区 Agent 用来发现痛点，脑暴 Agent 用来提出假设，论文 Agent 用来整理限制或 Future Work；三者都不会自动变成科学结论。
+          </p>
+          <div id="research-brief" class="research-brief-content"></div>
+        </section>
+      </section>
+
+      <section class="app-view" data-view="experiments" aria-labelledby="experiments-title">
+        <header class="view-heading">
+          <div>
+            <p class="eyebrow">EXPERIMENT PLANNING</p>
+            <h2 id="experiments-title">实验方案</h2>
+            <p>将已审阅的研究想法整理成可复核的最小验证计划。本版只生成草案，不会运行代码或发起真实实验。</p>
+          </div>
+          <span class="tag tag-beta">只生成草案</span>
+        </header>
+
+        <section class="card experiment-card" id="experiment-card">
+          <div class="card-heading">
+            <div>
+              <p class="eyebrow">EXPERIMENT PLAN DRAFT</p>
+              <h2>把想法整理成可审阅的实验方案</h2>
+            </div>
+            <span class="tag tag-beta">需人工批准</span>
+          </div>
+          <p class="settings-note">
+            输入一个研究想法，许愿机会生成假设、基线、变量、指标、消融和失败判据。这里不会执行代码、命令、网络调用或真实实验；批准只代表人工审阅通过。
+          </p>
+          <form id="experiment-plan-form" class="analysis-form">
+            <label class="concept-field">
+              研究想法
+              <textarea id="experiment-idea" required minlength="3" maxlength="4000" rows="3" placeholder="例如：用分页机制管理长上下文 LLM 的 KV cache，降低推理显存峰值。"></textarea>
+            </label>
+            <div class="form-grid experiment-form-grid">
+              <label>
+                方案标题（可选）
+                <input id="experiment-title" maxlength="300" placeholder="例如：分页 KV Cache 的最小验证" />
+              </label>
+              <label>
+                对照基线（可选）
+                <input id="experiment-baseline" maxlength="2000" placeholder="例如：标准连续 KV cache 管理" />
+              </label>
             </div>
             <div class="form-actions">
-              <button type="submit" id="save-api-keys">保存到当前进程</button>
-              <span id="api-key-message" class="form-message" role="status"></span>
+              <button type="submit" id="experiment-plan-submit">生成实验方案草案</button>
+              <button type="button" class="secondary" id="experiment-plan-clear">清空结果</button>
+              <span id="experiment-plan-message" class="form-message" role="status"></span>
+            </div>
+          </form>
+          <div id="experiment-plan-result" class="experiment-plan-result hidden"></div>
+        </section>
+      </section>
+
+      <section class="app-view" data-view="settings" aria-labelledby="settings-title">
+        <header class="view-heading">
+          <div>
+            <p class="eyebrow">CONNECTION SETTINGS</p>
+            <h2 id="settings-title">服务连接与 API Key</h2>
+            <p>每种能力使用独立凭据：论文检索、社区信号、解释模型和实验执行不会共享同一把 Key。</p>
+          </div>
+          <button id="refresh-settings" class="secondary" type="button">刷新状态</button>
+        </header>
+
+        <section class="settings-overview" aria-label="API Key 使用说明">
+          <article class="settings-overview-card">
+            <span class="settings-overview-icon" aria-hidden="true">⌘</span>
+            <div>
+              <h3>按服务分开配置</h3>
+              <p>每张卡只影响对应服务，防止将论文或实验凭据误用于解释模型。</p>
+            </div>
+          </article>
+          <article class="settings-overview-card">
+            <span class="settings-overview-icon" aria-hidden="true">◌</span>
+            <div>
+              <h3>默认只在本机进程保存</h3>
+              <p>网页从不回显明文 Key；重启 API 后网页输入会清除，持久配置请使用本地 <code>.env</code> 或 Secret Manager。</p>
+            </div>
+          </article>
+          <article class="settings-overview-card">
+            <span class="settings-overview-icon" aria-hidden="true">✓</span>
+            <div>
+              <h3>随时检查连接状态</h3>
+              <p>每张服务卡会显示当前 Provider、环境变量名称和已脱敏的连接状态。</p>
+            </div>
+          </article>
+        </section>
+
+        <section class="card api-endpoint-card">
+          <div class="card-heading settings-card-heading">
+            <div>
+              <p class="eyebrow">BACKEND API ENDPOINT</p>
+              <h2>连接后端 API</h2>
+            </div>
+            <span id="api-base-status" class="tag">正在读取</span>
+          </div>
+          <p class="settings-note">
+            本地运行时可以留空，默认访问当前页面同源的后端。部署到 GitHub Pages 时，请填入你自己部署的 HTTPS 后端地址，例如 <code>https://api.example.com</code>。
+          </p>
+          <form id="api-base-form" class="api-base-form">
+            <label>
+              后端 API 基地址
+              <input id="api-base-url" type="url" inputmode="url" autocomplete="url" placeholder="https://api.example.com（留空使用当前页面同源）" />
+            </label>
+            <div class="form-actions">
+              <button type="submit" id="save-api-base">保存连接地址</button>
+              <button type="button" id="reset-api-base" class="secondary">恢复默认</button>
+              <span id="api-base-message" class="form-message" role="status"></span>
+            </div>
+          </form>
+          <p class="settings-security-note">
+            <strong>GitHub Pages 安全提示：</strong>不要把任何服务 API Key 写进 Pages 配置、URL、仓库或前端源码。若在下方填写密钥，它会被发送到所选后端；仅在你信任且已启用 HTTPS / 身份认证的后端上使用，生产密钥优先放在后端 Secret Manager 或 <code>.env</code>。
+          </p>
+        </section>
+
+        <section class="card settings-card">
+          <div class="card-heading settings-card-heading">
+            <div>
+              <p class="eyebrow">PROVIDER CREDENTIALS</p>
+              <h2>已接入的服务</h2>
+            </div>
+            <span class="tag">仅显示状态</span>
+          </div>
+          <form id="api-key-form" class="api-key-form">
+            <div id="api-keys" class="settings-list" aria-live="polite">
+              <p class="empty">正在读取配置状态…</p>
+            </div>
+            <div class="api-key-form-footer">
+              <div>
+                <strong>确认更新</strong>
+                <p>只会提交本次填写的服务密钥；留空的卡片保持不变。</p>
+              </div>
+              <div class="form-actions">
+                <button type="submit" id="save-api-keys">保存到当前进程</button>
+                <span id="api-key-message" class="form-message" role="status"></span>
+              </div>
             </div>
           </form>
           <p class="settings-hint">
@@ -349,34 +518,10 @@
             <code>WISHFORGE_EXPLANATION_API_KEY</code> ·
             <code>WISHFORGE_EXPERIMENT_API_KEY</code>
           </p>
-        </article>
-
-        <article class="card projects-card">
-          <div class="card-heading">
-            <div>
-              <p class="eyebrow">RESEARCH BOARD</p>
-              <h2>研究项目</h2>
-            </div>
-            <button id="refresh" class="secondary" type="button">刷新</button>
-          </div>
-          <form id="project-form">
-            <label>
-              项目名称
-              <input id="project-name" required maxlength="120" placeholder="例如：长序列注意力机制调研" />
-            </label>
-            <label>
-              研究问题
-              <textarea id="research-question" required maxlength="2000" rows="3" placeholder="你想验证什么？"></textarea>
-            </label>
-            <button type="submit">创建草稿项目</button>
-            <p id="form-message" class="form-message" role="status"></p>
-          </form>
-          <div id="projects" class="projects-list compact-projects">
-            <p class="empty">还没有项目。</p>
-          </div>
-        </article>
+        </section>
       </section>
     </main>
-    <script src="/static/app.js" defer></script>
+    <script src="runtime-config.js" defer></script>
+    <script src="app.js" defer></script>
   </body>
 </html>
