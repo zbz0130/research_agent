@@ -4,7 +4,7 @@ from fastapi import FastAPI
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.requests import Request
 
@@ -43,9 +43,12 @@ async def redact_secret_validation_errors(
     return await request_validation_exception_handler(request, exc)
 
 frontend_dir = Path(__file__).resolve().parents[2] / "frontend"
+# Keep the older /static URLs working for anyone who has bookmarked the first
+# version of the interface.  The new frontend uses relative asset URLs so the
+# exact same files can be served by FastAPI locally and as a static GitHub
+# Pages artifact under a repository subpath.
 app.mount("/static", StaticFiles(directory=frontend_dir), name="static")
-
-
-@app.get("/", include_in_schema=False)
-def index() -> FileResponse:
-    return FileResponse(frontend_dir / "index.html")
+# This mount is intentionally registered after the API router: /api/v1/*
+# continues to be handled by FastAPI, while /, /app.js, /styles.css and
+# /runtime-config.js resolve relative to the frontend directory.
+app.mount("/", StaticFiles(directory=frontend_dir, html=True), name="frontend")
