@@ -1,0 +1,83 @@
+name: Deploy frontend to GitHub Pages
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "frontend/**"
+      - ".github/workflows/deploy-pages.yml"
+  workflow_dispatch:
+
+# `pages: write` and `id-token: write` are required by actions/deploy-pages.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Prepare the static frontend
+        env:
+          # This is a public URL, never an API key.  Set it as a repository
+          # Variable in Settings -> Secrets and variables -> Actions.
+          WISHFORGE_API_BASE_URL: ${{ vars.WISHFORGE_API_BASE_URL }}
+        run: |
+          cp -R frontend "$RUNNER_TEMP/site"
+          export WISHFORGE_PAGES_CONFIG="$RUNNER_TEMP/site/runtime-config.js"
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          from urllib.parse import urlparse
+
+          value = os.environ.get("WISHFORGE_API_BASE_URL", "").strip().rstrip("/")
+          if value:
+              parsed = urlparse(value)
+              if parsed.scheme != "https" or not parsed.netloc:
+                  raise SystemExit(
+                      "WISHFORGE_API_BASE_URL must be a public HTTPS API base URL, "
+                      "for example https://api.example.com"
+                  )
+
+          config = (
+              "/* Generated during GitHub Pages deployment.  Do not put secrets here. */\n"
+              "window.WISHFORGE_RUNTIME_CONFIG = Object.freeze(" +
+              json.dumps({"apiBaseUrl": value}, ensure_ascii=False) + ");\n"
+              "window.WISHFORGE_API_BASE_URL = window.WISHFORGE_RUNTIME_CONFIG.apiBaseUrl;\n"
+          )
+          Path(os.environ["WISHFORGE_PAGES_CONFIG"]).write_text(config, encoding="utf-8")
+          PY
+
+      - name: Validate published JavaScript
+        run: |
+          node --check "$RUNNER_TEMP/site/runtime-config.js"
+          node --check "$RUNNER_TEMP/site/app.js"
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ${{ runner.temp }}/site
+
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

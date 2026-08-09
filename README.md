@@ -190,6 +190,10 @@ Invoke-RestMethod -Method Post `
 docker compose up --build
 ```
 
+## GitHub Pages 前端部署
+
+前端可以由 GitHub Pages 自动发布，但 GitHub Pages 只能提供静态页面，不能运行 FastAPI、SQLite、论文检索或模型调用。需要先部署独立的 HTTPS 后端，并把其**不含 `/api/v1`** 的公开地址设置为仓库 Actions Variable `WISHFORGE_API_BASE_URL`；绝不能在该 Variable 或 Pages 前端中放 API Key。完整的 CORS、Pages Source 和安全配置见 [GitHub Pages 部署说明](docs/github-pages.md)。
+
 ## 当前阶段验收标准
 
 - `GET /api/v1/health` 返回 `status=ok`，服务名称显示为许愿机；
