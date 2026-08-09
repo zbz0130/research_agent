@@ -22,11 +22,19 @@ def test_health() -> None:
 
 def test_web_shell_is_served() -> None:
     page = client.get("/")
-    stylesheet = client.get("/static/styles.css")
+    stylesheet = client.get("/styles.css")
+    app_script = client.get("/app.js")
+    runtime_config = client.get("/runtime-config.js")
+    legacy_stylesheet = client.get("/static/styles.css")
 
     assert page.status_code == 200
     assert "WishForge" in page.text
+    assert "runtime-config.js" in page.text
     assert stylesheet.status_code == 200
+    assert app_script.status_code == 200
+    assert runtime_config.status_code == 200
+    # The old path stays available for existing local bookmarks.
+    assert legacy_stylesheet.status_code == 200
 
 
 def test_create_and_list_project() -> None:
