@@ -5,6 +5,7 @@ import hashlib
 import math
 import time
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from collections.abc import Callable, Sequence
 from email.utils import parsedate_to_datetime
@@ -756,6 +757,71 @@ class RuleBasedExplanationProvider:
         )
 
 
+def _format_paper_payload(
+    papers: Sequence[PaperRecord],
+    *,
+    abstract_limit: int,
+) -> str:
+    return "\n\n".join(
+        f"- {paper.title} ({paper.year or 'n.d.'}) [{paper.id}]\n摘要：{paper.abstract[:abstract_limit]}"
+        for paper in papers[:10]
+    )
+
+
+def _select_balanced_evidence(
+    evidence: Sequence[EvidenceCard],
+    *,
+    limit: int,
+    preferred_types: set[str],
+    preferred_only: bool = False,
+) -> list[EvidenceCard]:
+    """Round-robin papers so early papers cannot consume the whole prompt budget."""
+
+    groups: dict[str, list[EvidenceCard]] = {}
+    paper_order: list[str] = []
+    for card in evidence:
+        card_types = set(card.evidence_types or [card.evidence_type])
+        if preferred_only and not card_types & preferred_types:
+            continue
+        if card.paper_id not in groups:
+            paper_order.append(card.paper_id)
+            groups[card.paper_id] = []
+        groups[card.paper_id].append(card)
+    for cards in groups.values():
+        cards.sort(
+            key=lambda card: (
+                not bool(set(card.evidence_types or [card.evidence_type]) & preferred_types),
+                card.id,
+            )
+        )
+
+    selected: list[EvidenceCard] = []
+    while len(selected) < limit:
+        added = False
+        for paper_id in paper_order:
+            cards = groups[paper_id]
+            if not cards:
+                continue
+            selected.append(cards.pop(0))
+            added = True
+            if len(selected) >= limit:
+                break
+        if not added:
+            break
+    return selected
+
+
+def _format_evidence_payload(evidence: Sequence[EvidenceCard]) -> str:
+    return "\n\n".join(
+        (
+            f"[{item.id}] paper_id={item.paper_id}\n"
+            f"类型：{'+'.join(item.evidence_types or [item.evidence_type])}\n"
+            f"卡片说明：{item.claim}\n原文：{item.excerpt[:1600]}"
+        )
+        for item in evidence
+    )
+
+
 class OpenAICompatibleExplanationProvider:
     name = "openai_compatible"
 
@@ -935,90 +1001,249 @@ class OpenAICompatibleExplanationProvider:
         audience: str,
         language: str,
     ) -> ExplanationResult:
-        evidence_payload = "\n\n".join(
-            f"[{item.id}] {item.claim}\n关系：{item.relation}\n原文：{item.excerpt}" for item in evidence[:12]
+        if not papers:
+            return self._explain_quick(concept, audience, language)
+        return self._explain_literature(concept, papers, evidence, audience, language)
+
+    def _explain_quick(
+        self,
+        concept: str,
+        audience: str,
+        language: str,
+    ) -> ExplanationResult:
+        prompt = f"""
+你是 WishForge 的科研概念解释器。请解释“{concept}”。
+目标读者：{audience}；语言：{language}。
+这是快速解释模式，没有执行论文检索。请先给直觉、再给技术说明，避免堆砌术语。
+不要伪造论文、证据 ID 或具体引用。
+
+只返回 JSON 对象，字段为：
+- one_sentence：一句话解释；
+- intuitive：直觉类比；
+- technical：技术说明；
+- evolution：不带论文引用的简短演进字符串数组；
+- claims：无来源的原子定义或机制主张，paper_ids、evidence_ids、evidence_quotes 必须为空，scope 写“通用知识，待检索核验”；
+- scope_warnings：必须说明本次没有检索论文；
+- related_concepts：标准相关术语数组。
+
+evolution_items、research_limitations、research_gap_candidates、reproducibility_checks、
+limitations、evidence_ids 必须返回空数组。不要返回 model_output_warnings。
+""".strip()
+        payload = self._request_explanation_part(
+            prompt,
+            system="你是一名善于建立直觉、同时明确知识边界的科研教师。",
+            temperature=0.2,
+            part_label="快速解释",
         )
-        paper_payload = "\n\n".join(
-            f"- {paper.title} ({paper.year or 'n.d.'}) [{paper.id}]\n摘要：{paper.abstract[:2400]}"
-            for paper in papers[:10]
+        try:
+            return _parse_explanation_result(json.dumps(payload, ensure_ascii=False))
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise ProviderUnavailable("快速解释模型返回内容缺少必要字段或无法解析。") from exc
+
+    def _explain_literature(
+        self,
+        concept: str,
+        papers: Sequence[PaperRecord],
+        evidence: Sequence[EvidenceCard],
+        audience: str,
+        language: str,
+    ) -> ExplanationResult:
+        paper_payload = _format_paper_payload(papers, abstract_limit=2200)
+        claim_evidence = _select_balanced_evidence(
+            evidence,
+            limit=24,
+            preferred_types={"definition", "mechanism", "result"},
         )
-        if papers:
-            mode_instructions = f"""
-这是“文献解释”模式。请阅读给出的论文摘要，围绕资料解释概念，不能声称读过论文全文。
-演变过程必须按年份组织，并说明每项工作带来的概念或方法变化；不得编造资料中没有的年份。
-evolution_items 中每项必须包含 year、title、summary、paper_ids、evidence_ids，并且 ID 只能来自下方资料。
-相关概念应说明与主概念紧密相关的标准术语。只能把资料支持的内容写成事实；
-证据不足时明确说证据不足。evidence_ids 只能使用下方出现的证据卡 ID。
+        limitation_evidence = _select_balanced_evidence(
+            evidence,
+            limit=20,
+            preferred_types={"limitation", "future_work"},
+            preferred_only=True,
+        )
 
-claims 必须是原子主张数组：
-- 每条只能表达一个可独立核验的事实，不能把多个论文、多个机制或机制与指标写在同一条；
-- claim_type 只能是 definition、mechanism、result、evolution；
-- 论文特定的 mechanism、result、evolution 每条只能使用一个 paper_id；
-- mechanism 每条只能描述一个主要操作；键量化、值量化、token 保留等不同操作必须拆开；
-- 数字、压缩率、速度和准确率必须单独写成 result，不能混入 mechanism；
-- paper_ids 和 evidence_ids 必须来自下方资料；没有证据的通用定义允许 ID 为空，但必须在 scope 中说明。
-- 论文特定主张必须在 evidence_quotes 中逐字复制 1 至 3 条摘要原句；禁止翻译、改写或拼接原句。
-- “首次、首个、最优、保证、无损”等强表述只有在 evidence_quotes 原文明确出现对应含义时才能使用。
+        core_prompt = f"""
+你负责 WishForge 文献解释的“核心说明”部分。解释“{concept}”。
+目标读者：{audience}；语言：{language}。
+仅依据下方论文摘要，不得声称阅读过全文。先建立直觉，再解释共同技术机制。
 
-research_limitations 只允许写“当前研究方法、理论或实验本身”的局限，不得写系统或调研过程警告。
-每项必须包含 text、limitation_kind、target、condition、consequence、paper_ids、evidence_ids、explicitness。
-limitation_kind 只能是 method_limitation、failure_mode、tradeoff、applicability_boundary、evaluation_limitation、theoretical_limit。
-只有摘要原文明确支持、能指出目标和负面后果的内容才可进入；没有明确研究局限时返回空数组。
+只返回 JSON 对象，且只包含：
+- one_sentence：一句话、易懂、不过度概括；
+- intuitive：直觉类比；
+- technical：综合多篇摘要后的技术说明；
+- related_concepts：与主概念紧密相关的标准术语数组；
+- scope_warnings：调研范围提醒数组，例如仅阅读摘要、检索数量有限。
 
-“仅阅读摘要、检索数量有限”等放入 scope_warnings；代码和数据未核验放入 reproducibility_checks；
-“当前范围可能缺少统一标准”等放入 research_gap_candidates，并明确限定为当前检索范围，不得声称整个领域不存在。
+不要生成时间线、原子主张、研究局限、研究空白或复现检查。
 
-reproducibility_checks 中的 check_type 只能是以下五个英文值之一：
-- code：代码、实现或源码是否公开；
-- data：数据集、数据处理或数据可得性；
-- environment：依赖、硬件、运行环境或随机种子；
-- license：代码或数据许可证；
-- benchmark：基准、指标或评测协议。
-“not verified”“unknown”“unverified”是状态，不是 check_type；arXiv ID 只能放入 paper_ids。
-无法判断类型时不要生成该条。合法示例：
-{{"text": "需要确认论文是否公开训练代码。", "check_type": "code", "paper_ids": ["arxiv:xxxx.xxxxx"]}}
+论文及摘要：
+{paper_payload}
+""".strip()
+
+        claims_prompt = f"""
+你负责 WishForge 文献解释的“时间线与原子主张”部分。研究概念：“{concept}”；语言：{language}。
+仅依据下方论文摘要和证据卡，不得声称阅读过全文。
+
+只返回 JSON 对象，且只包含 evolution、evolution_items、claims、evidence_ids。
+要求：
+1. evolution 按年份概括方法演进；evolution_items 每项包含 year、title、summary、paper_ids、evidence_ids；
+2. claims 每条只能表达一个可独立核验的事实，claim_type 只能是 definition、mechanism、result、evolution；
+3. 论文特定的 mechanism、result、evolution 每条只能使用一个 paper_id；
+4. mechanism 每条只描述一个主要操作；量化、剪枝、淘汰、token 保留等不同操作必须拆开；
+5. 数字、压缩率、速度和准确率单独写成 result，不能混入 mechanism；
+6. 论文特定主张必须提供 evidence_quotes，逐字复制 1 至 3 条摘要原句，禁止翻译、改写或拼接；
+7. paper_ids 和 evidence_ids 只能使用下方出现的 ID；没有证据的通用定义允许 ID 为空，但 scope 必须说明；
+8. “首次、首个、最优、保证、无损”等强表述只有在逐字证据中明确出现对应含义时才能使用。
 
 论文及摘要：
 {paper_payload}
 
 证据卡：
-{evidence_payload}
+{_format_evidence_payload(claim_evidence)}
 """.strip()
-        else:
-            mode_instructions = """
-这是“快速解释”模式，没有执行论文检索。请直接基于通用学术知识给出易懂、准确的说明，
-不要伪造论文、证据 ID 或具体引用。evolution 可以概括方法思路的演进，但 evolution_items 必须为空数组；
-claims 可包含无来源的原子定义或机制主张，但 paper_ids 和 evidence_ids 必须为空，并在 scope 标记“通用知识，待检索核验”。
-research_limitations、research_gap_candidates、reproducibility_checks 必须为空；
-scope_warnings 必须说明本次没有检索论文。limitations 和 evidence_ids 必须为空数组。
-""".strip()
-        prompt = f"""
-你是 WishForge 的科研概念解释器。请解释“{concept}”。
-目标读者：{audience}；语言：{language}。
-输出要先直觉、后技术，避免不解释的术语堆砌。
-{mode_instructions}
 
-必须返回 JSON，字段为：one_sentence、intuitive、technical、evolution（字符串数组）、
-evolution_items（对象数组，每项含 year、title、summary、paper_ids、evidence_ids）、
-claims（原子主张对象数组，每项含 claim_type、text、paper_ids、evidence_ids、scope）、
-其中论文特定主张还必须包含 evidence_quotes（从摘要逐字复制的字符串数组），
-research_limitations（研究局限对象数组）、
-research_gap_candidates（对象数组，每项含 text、scope、paper_ids、evidence_ids）、
-reproducibility_checks（对象数组，每项含 text、check_type、paper_ids）、
-scope_warnings（字符串数组）、related_concepts（字符串数组）、
-limitations（兼容字段，字符串数组，仅复制 research_limitations 的 text）、evidence_ids（证据卡 ID 数组）。
-不要返回 model_output_warnings；该字段由系统根据解析过程生成。
+        limitations_prompt = f"""
+你负责 WishForge 文献解释的“研究局限审核”部分。研究概念：“{concept}”；语言：{language}。
+这不是通用解释任务。请逐张审核限制候选证据卡，只提取当前研究方法、理论或实验本身的明确局限。
+
+只返回 JSON 对象，且必须包含：research_limitations、research_gap_candidates、reproducibility_checks。
+
+research_limitations 要求：
+1. 每项必须包含 text、limitation_kind、target、condition、consequence、paper_ids、evidence_ids、explicitness；
+2. limitation_kind 只能是 method_limitation、failure_mode、tradeoff、applicability_boundary、evaluation_limitation、theoretical_limit；
+3. paper_ids 和 evidence_ids 必须来自下方资料，且证据卡必须属于同一篇论文；
+4. 只有摘要原句明确描述负面后果时才能标记 explicit；只有“trade-off/challenge”而没有负面后果时不要生成；
+5. “仅阅读摘要、检索数量有限、需要人工核验”不是研究局限，不得写入；
+6. 找不到合格局限时返回空数组，不得猜测。
+
+合法示例：
+{{"research_limitations":[{{"text":"短上下文校准会造成长上下文通道分布估计不足。","limitation_kind":"applicability_boundary","target":"KV cache 量化校准","condition":"使用短上下文校准数据时","consequence":"长上下文中的低频通道分布未被覆盖并造成性能损失","paper_ids":["paper-id"],"evidence_ids":["evidence-id"],"explicitness":"explicit"}}],"research_gap_candidates":[],"reproducibility_checks":[]}}
+
+research_gap_candidates 只能写当前检索范围内需要扩大检索验证的候选，不得声称整个领域不存在相关工作。
+reproducibility_checks 中的 check_type 只能是以下五个英文值之一：code、data、environment、license、benchmark；
+“not verified”“unknown”“unverified”不是 check_type，arXiv ID 只能放入 paper_ids；无法判断时不生成。
+
+论文及摘要：
+{_format_paper_payload(papers, abstract_limit=1600)}
+
+限制候选证据卡（已优先完整提供）：
+{_format_evidence_payload(limitation_evidence) or '没有通过初步类型筛选的限制候选证据卡'}
 """.strip()
+
+        requests = {
+            "core": (
+                core_prompt,
+                "你负责清晰、准确的科研核心解释，不处理其他结构化任务。",
+                0.2,
+                "核心解释",
+            ),
+            "claims": (
+                claims_prompt,
+                "你负责可逐条核验的时间线和原子主张，不处理研究局限。",
+                0.1,
+                "时间线与原子主张",
+            ),
+            "limitations": (
+                limitations_prompt,
+                "你负责从摘要原句中保守审核研究局限，宁缺毋滥，但不得忽略明确负面后果。",
+                0.0,
+                "研究局限审核",
+            ),
+        }
+        parts: dict[str, dict[str, object]] = {}
+        failures: dict[str, ProviderUnavailable] = {}
+        with ThreadPoolExecutor(max_workers=3, thread_name_prefix="wishforge-explanation") as executor:
+            future_names = {
+                executor.submit(
+                    self._request_explanation_part,
+                    prompt,
+                    system=system,
+                    temperature=temperature,
+                    part_label=part_label,
+                ): name
+                for name, (prompt, system, temperature, part_label) in requests.items()
+            }
+            for future in as_completed(future_names):
+                name = future_names[future]
+                try:
+                    parts[name] = future.result()
+                except ProviderUnavailable as exc:
+                    failures[name] = exc
+
+        if "core" in failures or "core" not in parts:
+            raise failures.get("core") or ProviderUnavailable("核心解释调用没有返回结果。")
+
+        warnings: list[str] = []
+        expected_fields = {
+            "core": ("one_sentence", "intuitive", "technical", "related_concepts", "scope_warnings"),
+            "claims": ("evolution", "evolution_items", "claims", "evidence_ids"),
+            "limitations": (
+                "research_limitations",
+                "research_gap_candidates",
+                "reproducibility_checks",
+            ),
+        }
+        merged: dict[str, object] = {}
+        for name, fields in expected_fields.items():
+            part = parts.get(name, {})
+            if name in failures:
+                warnings.append(f"{requests[name][3]}调用失败，该部分已保留为空；其他解释不受影响。")
+            unknown_fields = set(part) - set(fields)
+            if unknown_fields:
+                warnings.append(
+                    f"{requests[name][3]}调用返回了 {len(unknown_fields)} 个未约定字段，系统已忽略。"
+                )
+            for field in fields:
+                if field not in part:
+                    if name in parts:
+                        warnings.append(f"{requests[name][3]}调用未返回 {field} 字段，系统已按空值处理。")
+                    merged[field] = [] if field not in _EXPLANATION_CORE_FIELDS else None
+                else:
+                    merged[field] = part[field]
+
+        if "limitations" in parts and not parts["limitations"].get("research_limitations"):
+            warnings.append("研究局限审核调用未提取到满足条件的结构化局限。")
+        merged["limitations"] = []
+        try:
+            explanation = _parse_explanation_result(json.dumps(merged, ensure_ascii=False))
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise ProviderUnavailable("拆分后的解释模型结果缺少必要字段或无法合并。") from exc
+
+        if "claims" in failures or not explanation.claims:
+            fallback_claim = AtomicClaimDraft(
+                claim_type="definition",
+                text=explanation.one_sentence,
+                paper_ids=[],
+                evidence_ids=[],
+                evidence_quotes=[],
+                scope="核心解释生成的通用定义；原子主张调用不可用或未返回主张",
+            )
+            explanation = explanation.model_copy(update={"claims": [fallback_claim]})
+        all_warnings = list(dict.fromkeys([*explanation.model_output_warnings, *warnings]))[:20]
+        return explanation.model_copy(
+            update={
+                "limitations": [item.text for item in explanation.research_limitations],
+                "model_output_warnings": all_warnings,
+            }
+        )
+
+    def _request_explanation_part(
+        self,
+        prompt: str,
+        *,
+        system: str,
+        temperature: float,
+        part_label: str,
+    ) -> dict[str, object]:
         try:
             response = httpx.post(
                 f"{self.base_url}/chat/completions",
                 headers={"Authorization": f"Bearer {self.api_key}"},
                 json={
                     "model": self.model,
-                    "temperature": 0.2,
+                    "temperature": temperature,
                     "response_format": {"type": "json_object"},
                     "messages": [
-                        {"role": "system", "content": "你是一名严谨、诚实、重视证据的科研教师。"},
+                        {"role": "system", "content": system},
                         {"role": "user", "content": prompt},
                     ],
                 },
@@ -1027,14 +1252,17 @@ limitations（兼容字段，字符串数组，仅复制 research_limitations �
             response.raise_for_status()
             content = response.json()["choices"][0]["message"]["content"]
             if not isinstance(content, str):
-                raise ProviderUnavailable("解释模型返回的 content 不是字符串。")
-            return _parse_explanation_result(content)
+                raise ValueError("content 不是字符串")
+            payload = json.loads(_strip_code_fence(content))
+            if not isinstance(payload, dict):
+                raise ValueError("返回内容不是 JSON 对象")
+            return payload
         except httpx.HTTPError as exc:
-            logger.warning("Explanation model request failed", exc_info=True)
-            raise ProviderUnavailable("解释模型请求失败，未能获得可用解释。") from exc
+            logger.warning("%s model request failed", part_label, exc_info=True)
+            raise ProviderUnavailable(f"{part_label}模型请求失败。") from exc
         except (KeyError, TypeError, ValueError, AttributeError) as exc:
-            logger.warning("Explanation model response failed core validation", exc_info=True)
-            raise ProviderUnavailable("解释模型返回内容缺少必要字段或无法解析。") from exc
+            logger.warning("%s model response could not be parsed", part_label, exc_info=True)
+            raise ProviderUnavailable(f"{part_label}模型返回内容无法解析。") from exc
 
     def brainstorm(
         self,

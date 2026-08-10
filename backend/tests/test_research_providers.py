@@ -217,9 +217,7 @@ def test_arxiv_provider_spaces_multiple_calls_without_real_wait(monkeypatch) -> 
 
 def test_compatible_model_distinguishes_quick_and_abstract_modes(monkeypatch) -> None:
     prompts: list[str] = []
-    responses = iter(
-        [
-            {
+    quick_payload = {
                 "one_sentence": "注意力机制让模型按相关性聚合信息。",
                 "intuitive": "像阅读时把注意力放在关键句上。",
                 "technical": "通过查询、键和值计算加权表示。",
@@ -240,21 +238,32 @@ def test_compatible_model_distinguishes_quick_and_abstract_modes(monkeypatch) ->
                 "related_concepts": ["Self-Attention", "Transformer"],
                 "limitations": ["本次没有检索论文，需要后续文献核验。"],
                 "evidence_ids": [],
-            },
-            {
-                "one_sentence": "注意力机制根据相关性汇聚上下文。",
-                "intuitive": "像带着问题查阅资料。",
-                "technical": "摘要资料显示自注意力支持并行序列建模。",
+    }
+    core_payload = {
+        "one_sentence": "注意力机制根据相关性汇聚上下文。",
+        "intuitive": "像带着问题查阅资料。",
+        "technical": "摘要资料显示自注意力支持并行序列建模。",
+        "related_concepts": ["Self-Attention", "Transformer"],
+        "scope_warnings": ["当前仅核对摘要。"],
+    }
+    claims_payload = {
                 "evolution": ["2017：Transformer 将自注意力作为核心结构"],
+                "evolution_items": [],
                 "claims": [
                     {
                         "claim_type": "mechanism",
                         "text": "Transformer 使用自注意力进行序列建模。",
                         "paper_ids": ["arxiv:1706.03762"],
                         "evidence_ids": ["evidence-1"],
+                        "evidence_quotes": [
+                            "The Transformer is based solely on attention mechanisms."
+                        ],
                         "scope": "摘要级线索",
                     }
                 ],
+                "evidence_ids": ["evidence-1"],
+    }
+    limitations_payload = {
                 "research_limitations": [
                     {
                         "text": "标准自注意力无法高效扩展到超长序列。",
@@ -269,17 +278,20 @@ def test_compatible_model_distinguishes_quick_and_abstract_modes(monkeypatch) ->
                 ],
                 "research_gap_candidates": [],
                 "reproducibility_checks": [],
-                "scope_warnings": ["当前仅核对摘要。"],
-                "related_concepts": ["Self-Attention", "Transformer"],
-                "limitations": ["当前仅核对摘要。"],
-                "evidence_ids": ["evidence-1"],
-            },
-        ]
-    )
+    }
 
     def fake_post(url: str, **kwargs: object) -> httpx.Response:
-        prompts.append(kwargs["json"]["messages"][1]["content"])
-        return _model_response(next(responses))
+        prompt = kwargs["json"]["messages"][1]["content"]
+        prompts.append(prompt)
+        if "快速解释模式" in prompt:
+            return _model_response(quick_payload)
+        if "核心说明" in prompt:
+            return _model_response(core_payload)
+        if "时间线与原子主张" in prompt:
+            return _model_response(claims_payload)
+        if "研究局限审核" in prompt:
+            return _model_response(limitations_payload)
+        raise AssertionError("unexpected model prompt")
 
     monkeypatch.setattr(research_providers.httpx, "post", fake_post)
     provider = OpenAICompatibleExplanationProvider(
@@ -309,6 +321,8 @@ def test_compatible_model_distinguishes_quick_and_abstract_modes(monkeypatch) ->
         paper_id=paper.id,
         claim="摘要介绍了基于注意力的 Transformer。",
         excerpt=paper.abstract,
+        evidence_type="mechanism",
+        evidence_types=["mechanism", "limitation"],
     )
     literature = provider.explain(
         "注意力机制", [paper], [evidence], "beginner", "zh-CN"
@@ -320,15 +334,16 @@ def test_compatible_model_distinguishes_quick_and_abstract_modes(monkeypatch) ->
     assert literature.claims[0].paper_ids == [paper.id]
     assert literature.research_limitations[0].limitation_kind == "method_limitation"
     assert literature.scope_warnings == ["当前仅核对摘要。"]
-    assert "快速解释" in prompts[0]
-    assert "文献解释" in prompts[1]
-    assert "原子主张" in prompts[1]
-    assert "research_limitations" in prompts[1]
-    assert paper.abstract in prompts[1]
+    assert len(prompts) == 4
+    assert any("快速解释模式" in prompt for prompt in prompts)
+    assert any("核心说明" in prompt for prompt in prompts)
+    assert any("时间线与原子主张" in prompt for prompt in prompts)
+    assert any("研究局限审核" in prompt for prompt in prompts)
+    assert all(paper.abstract in prompt for prompt in prompts if "快速解释模式" not in prompt)
 
 
 def test_compatible_model_repairs_optional_items_without_losing_valid_explanation(monkeypatch) -> None:
-    captured: dict[str, object] = {}
+    prompts: list[str] = []
     payload = {
         "one_sentence": "KV cache 压缩用于降低长上下文推理的缓存占用。",
         "intuitive": "像保留笔记中的关键信息。",
@@ -376,8 +391,34 @@ def test_compatible_model_repairs_optional_items_without_losing_valid_explanatio
     }
 
     def fake_post(url: str, **kwargs: object) -> httpx.Response:
-        captured.update(kwargs)
-        return _model_response(payload)
+        prompt = kwargs["json"]["messages"][1]["content"]
+        prompts.append(prompt)
+        if "核心说明" in prompt:
+            return _model_response(
+                {
+                    key: payload[key]
+                    for key in ("one_sentence", "intuitive", "technical", "related_concepts", "scope_warnings")
+                }
+            )
+        if "时间线与原子主张" in prompt:
+            return _model_response(
+                {
+                    "evolution": payload["evolution"],
+                    "evolution_items": [],
+                    "claims": payload["claims"],
+                    "evidence_ids": payload["evidence_ids"],
+                    "unexpected_debug_field": "ignore me",
+                }
+            )
+        if "研究局限审核" in prompt:
+            return _model_response(
+                {
+                    "research_limitations": payload["research_limitations"],
+                    "research_gap_candidates": payload["research_gap_candidates"],
+                    "reproducibility_checks": payload["reproducibility_checks"],
+                }
+            )
+        raise AssertionError("unexpected model prompt")
 
     monkeypatch.setattr(research_providers.httpx, "post", fake_post)
     provider = OpenAICompatibleExplanationProvider(
@@ -413,9 +454,156 @@ def test_compatible_model_repairs_optional_items_without_losing_valid_explanatio
     assert any("复现检查中有 2 条类型已自动纠正" in item for item in explanation.model_output_warnings)
     assert any("复现检查中有 1 条无法安全校验" in item for item in explanation.model_output_warnings)
     assert any("1 个未约定字段" in item for item in explanation.model_output_warnings)
-    prompt = captured["json"]["messages"][1]["content"]
+    prompt = next(item for item in prompts if "研究局限审核" in item)
     assert "check_type 只能是以下五个英文值之一" in prompt
     assert "arXiv ID 只能放入 paper_ids" in prompt
+
+
+def test_split_literature_call_keeps_core_when_limitation_part_fails(monkeypatch) -> None:
+    def fake_post(url: str, **kwargs: object) -> httpx.Response:
+        prompt = kwargs["json"]["messages"][1]["content"]
+        if "核心说明" in prompt:
+            return _model_response(
+                {
+                    "one_sentence": "KV cache 压缩用于降低推理缓存占用。",
+                    "intuitive": "像压缩工作记忆。",
+                    "technical": "方法选择、量化或合并历史键值表示。",
+                    "related_concepts": ["KV cache eviction"],
+                    "scope_warnings": ["当前仅核对摘要。"],
+                }
+            )
+        if "时间线与原子主张" in prompt:
+            return _model_response(
+                {
+                    "evolution": [],
+                    "evolution_items": [],
+                    "claims": [
+                        {
+                            "claim_type": "mechanism",
+                            "text": "该方法压缩历史键值表示。",
+                            "paper_ids": ["paper-1"],
+                            "evidence_ids": ["evidence-1"],
+                            "evidence_quotes": ["The method compresses cached key-value representations."],
+                            "scope": "摘要级线索",
+                        }
+                    ],
+                    "evidence_ids": ["evidence-1"],
+                }
+            )
+        if "研究局限审核" in prompt:
+            return httpx.Response(
+                503,
+                request=httpx.Request("POST", url),
+            )
+        raise AssertionError("unexpected model prompt")
+
+    monkeypatch.setattr(research_providers.httpx, "post", fake_post)
+    provider = OpenAICompatibleExplanationProvider(
+        api_key="model-key",
+        base_url="https://model.example/v1",
+        model="test-model",
+    )
+    paper = PaperRecord(
+        id="paper-1",
+        title="Cache Compression",
+        abstract="The method compresses cached key-value representations.",
+        source="arxiv",
+        source_kind="academic",
+        access_type="abstract_only",
+    )
+    evidence = EvidenceCard(
+        id="evidence-1",
+        paper_id=paper.id,
+        claim="摘要中的机制线索。",
+        excerpt=paper.abstract,
+        evidence_type="mechanism",
+        evidence_types=["mechanism"],
+    )
+
+    explanation = provider.explain(
+        "KV cache 压缩", [paper], [evidence], "researcher", "zh-CN"
+    )
+
+    assert explanation.one_sentence == "KV cache 压缩用于降低推理缓存占用。"
+    assert explanation.claims[0].evidence_ids == ["evidence-1"]
+    assert explanation.research_limitations == []
+    assert any("研究局限审核调用失败" in item for item in explanation.model_output_warnings)
+
+
+def test_limitation_part_receives_late_multilabel_evidence(monkeypatch) -> None:
+    prompts: list[str] = []
+
+    def fake_post(url: str, **kwargs: object) -> httpx.Response:
+        prompt = kwargs["json"]["messages"][1]["content"]
+        prompts.append(prompt)
+        if "核心说明" in prompt:
+            return _model_response(
+                {
+                    "one_sentence": "A concise explanation.",
+                    "intuitive": "An analogy.",
+                    "technical": "A technical explanation.",
+                    "related_concepts": [],
+                    "scope_warnings": [],
+                }
+            )
+        if "时间线与原子主张" in prompt:
+            return _model_response(
+                {"evolution": [], "evolution_items": [], "claims": [], "evidence_ids": []}
+            )
+        if "研究局限审核" in prompt:
+            return _model_response(
+                {
+                    "research_limitations": [],
+                    "research_gap_candidates": [],
+                    "reproducibility_checks": [],
+                }
+            )
+        raise AssertionError("unexpected model prompt")
+
+    monkeypatch.setattr(research_providers.httpx, "post", fake_post)
+    provider = OpenAICompatibleExplanationProvider(
+        api_key="model-key",
+        base_url="https://model.example/v1",
+        model="test-model",
+    )
+    paper = PaperRecord(
+        id="paper-1",
+        title="Late Limitation Evidence",
+        abstract="Existing methods fail under long contexts.",
+        source="arxiv",
+        source_kind="academic",
+        access_type="abstract_only",
+    )
+    evidence = [
+        EvidenceCard(
+            id=f"evidence-{index}",
+            paper_id=paper.id,
+            claim="普通证据卡。",
+            excerpt=f"Background sentence {index}.",
+            evidence_type="context",
+        )
+        for index in range(14)
+    ]
+    evidence.append(
+        EvidenceCard(
+            id="evidence-late-limitation",
+            paper_id=paper.id,
+            claim="摘要中的明确失败模式。",
+            excerpt="Existing methods fail under long contexts.",
+            evidence_type="mechanism",
+            evidence_types=["limitation", "mechanism"],
+        )
+    )
+
+    explanation = provider.explain(
+        "KV cache compression", [paper], evidence, "researcher", "zh-CN"
+    )
+
+    limitation_prompt = next(item for item in prompts if "研究局限审核" in item)
+    assert "evidence-late-limitation" in limitation_prompt
+    assert "类型：limitation+mechanism" in limitation_prompt
+    assert "evidence-0" not in limitation_prompt
+    assert any("未提取到满足条件" in item for item in explanation.model_output_warnings)
 
 
 def test_compatible_model_still_rejects_missing_core_explanation(monkeypatch) -> None:
