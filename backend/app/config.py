@@ -1,7 +1,11 @@
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic import PrivateAttr, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 class Settings(BaseSettings):
@@ -38,7 +42,10 @@ class Settings(BaseSettings):
     _runtime_api_key_slots: set[str] = PrivateAttr(default_factory=set)
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        # Resolve from the repository root instead of the process working
+        # directory, so starting Uvicorn from ``backend`` still loads the
+        # same local configuration file.
+        env_file=PROJECT_ROOT / ".env",
         env_prefix="WISHFORGE_",
         env_ignore_empty=True,
         extra="ignore",
