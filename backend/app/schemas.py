@@ -18,6 +18,7 @@ class ApiKeySlot(BaseModel):
     label: str
     provider: str
     configured: bool
+    credential_required: bool = True
     masked: str | None = None
     environment_variable: str
 

@@ -1,11 +1,195 @@
 import httpx
+import json
 import pytest
 from fastapi.testclient import TestClient
 
 from app.config import Settings, get_settings
 from app.main import app
+from app.research_schemas import EvidenceCard, PaperRecord
 from app.services import research_providers
-from app.services.research_providers import ProviderRateLimited, SemanticScholarProvider
+from app.services.research_providers import (
+    ArxivSearchProvider,
+    OpenAICompatibleExplanationProvider,
+    ProviderRateLimited,
+    ProviderUnavailable,
+    SemanticScholarProvider,
+)
+
+
+ARXIV_FEED = b"""<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom"
+      xmlns:arxiv="http://arxiv.org/schemas/atom">
+  <title>ArXiv Query</title>
+  <entry>
+    <id>http://arxiv.org/abs/1706.03762v7</id>
+    <updated>2023-08-02T00:41:18Z</updated>
+    <published>2017-06-12T17:57:34Z</published>
+    <title> Attention Is All You Need </title>
+    <summary>
+      The dominant sequence transduction models are based on recurrent networks.
+      We propose a new architecture based solely on attention mechanisms.
+    </summary>
+    <author><name>Ashish Vaswani</name></author>
+    <author><name>Noam Shazeer</name></author>
+    <link href="http://arxiv.org/abs/1706.03762v7" rel="alternate" type="text/html" />
+    <link title="pdf" href="http://arxiv.org/pdf/1706.03762v7" rel="related" type="application/pdf" />
+    <arxiv:primary_category term="cs.CL" />
+    <arxiv:doi>10.5555/3295222.3295349</arxiv:doi>
+  </entry>
+</feed>
+"""
+
+
+def test_arxiv_search_parses_atom_and_records_exact_scope(monkeypatch) -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_get(url: str, **kwargs: object) -> httpx.Response:
+        calls.append({"url": url, **kwargs})
+        return httpx.Response(
+            200,
+            content=ARXIV_FEED,
+            request=httpx.Request("GET", url),
+        )
+
+    monkeypatch.setattr(research_providers.httpx, "get", fake_get)
+
+    papers = ArxivSearchProvider().search("attention mechanism", 6)
+
+    assert len(calls) == 1
+    assert calls[0]["url"] == "https://export.arxiv.org/api/query"
+    assert calls[0]["params"] == {
+        "search_query": 'all:"attention mechanism"',
+        "start": 0,
+        "max_results": 6,
+        "sortBy": "relevance",
+        "sortOrder": "descending",
+    }
+    assert calls[0]["follow_redirects"] is True
+    assert len(papers) == 1
+    paper = papers[0]
+    assert paper.id == "arxiv:1706.03762v7"
+    assert paper.canonical_id == "arxiv:1706.03762"
+    assert paper.arxiv_id == "1706.03762"
+    assert paper.version == "v7"
+    assert paper.title == "Attention Is All You Need"
+    assert paper.authors == ["Ashish Vaswani", "Noam Shazeer"]
+    assert paper.year == 2017
+    assert paper.venue == "arXiv:cs.CL"
+    assert paper.doi == "10.5555/3295222.3295349"
+    assert paper.url == "https://arxiv.org/abs/1706.03762v7"
+    assert paper.access_type == "open_access"
+    assert "solely on attention mechanisms" in paper.abstract
+
+
+def test_arxiv_search_rejects_malformed_atom(monkeypatch) -> None:
+    def fake_get(url: str, **kwargs: object) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=b"not xml",
+            request=httpx.Request("GET", url),
+        )
+
+    monkeypatch.setattr(research_providers.httpx, "get", fake_get)
+
+    with pytest.raises(ProviderUnavailable, match="Atom"):
+        ArxivSearchProvider().search("attention", 3)
+
+
+def _model_response(payload: dict) -> httpx.Response:
+    return httpx.Response(
+        200,
+        json={"choices": [{"message": {"content": json.dumps(payload, ensure_ascii=False)}}]},
+        request=httpx.Request("POST", "https://model.example/v1/chat/completions"),
+    )
+
+
+def test_compatible_model_plans_an_english_arxiv_query(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_post(url: str, **kwargs: object) -> httpx.Response:
+        captured.update({"url": url, **kwargs})
+        return _model_response({"query": "attention mechanism"})
+
+    monkeypatch.setattr(research_providers.httpx, "post", fake_post)
+    provider = OpenAICompatibleExplanationProvider(
+        api_key="model-key",
+        base_url="https://model.example/v1",
+        model="test-model",
+    )
+
+    query = provider.plan_search_query("注意力机制", "zh-CN")
+
+    assert query == "attention mechanism"
+    assert captured["url"] == "https://model.example/v1/chat/completions"
+    request_json = captured["json"]
+    assert request_json["model"] == "test-model"
+    assert "注意力机制" in request_json["messages"][1]["content"]
+
+
+def test_compatible_model_distinguishes_quick_and_abstract_modes(monkeypatch) -> None:
+    prompts: list[str] = []
+    responses = iter(
+        [
+            {
+                "one_sentence": "注意力机制让模型按相关性聚合信息。",
+                "intuitive": "像阅读时把注意力放在关键句上。",
+                "technical": "通过查询、键和值计算加权表示。",
+                "evolution": ["从对齐机制发展到自注意力"],
+                "related_concepts": ["Self-Attention", "Transformer"],
+                "limitations": ["本次没有检索论文，需要后续文献核验。"],
+                "evidence_ids": [],
+            },
+            {
+                "one_sentence": "注意力机制根据相关性汇聚上下文。",
+                "intuitive": "像带着问题查阅资料。",
+                "technical": "摘要资料显示自注意力支持并行序列建模。",
+                "evolution": ["2017：Transformer 将自注意力作为核心结构"],
+                "related_concepts": ["Self-Attention", "Transformer"],
+                "limitations": ["当前仅核对摘要。"],
+                "evidence_ids": ["evidence-1"],
+            },
+        ]
+    )
+
+    def fake_post(url: str, **kwargs: object) -> httpx.Response:
+        prompts.append(kwargs["json"]["messages"][1]["content"])
+        return _model_response(next(responses))
+
+    monkeypatch.setattr(research_providers.httpx, "post", fake_post)
+    provider = OpenAICompatibleExplanationProvider(
+        api_key="model-key",
+        base_url="https://model.example/v1",
+        model="test-model",
+    )
+
+    quick = provider.explain("注意力机制", [], [], "beginner", "zh-CN")
+    paper = PaperRecord(
+        id="arxiv:1706.03762",
+        arxiv_id="1706.03762",
+        title="Attention Is All You Need",
+        authors=["Ashish Vaswani"],
+        year=2017,
+        abstract="The Transformer is based solely on attention mechanisms.",
+        url="https://arxiv.org/abs/1706.03762",
+        source="arxiv",
+        source_kind="academic",
+        access_type="open_access",
+    )
+    evidence = EvidenceCard(
+        id="evidence-1",
+        paper_id=paper.id,
+        claim="摘要介绍了基于注意力的 Transformer。",
+        excerpt=paper.abstract,
+    )
+    literature = provider.explain(
+        "注意力机制", [paper], [evidence], "beginner", "zh-CN"
+    )
+
+    assert quick.evidence_ids == []
+    assert literature.evidence_ids == ["evidence-1"]
+    assert "快速解释" in prompts[0]
+    assert "文献解释" in prompts[1]
+    assert paper.abstract in prompts[1]
 
 
 def _response(

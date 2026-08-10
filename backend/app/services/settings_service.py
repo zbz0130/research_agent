@@ -54,6 +54,7 @@ def api_key_slots(settings: Settings) -> Iterable[ApiKeySlot]:
             label=label,
             provider=provider,
             configured=bool(raw_secret),
+            credential_required=not (slot_id == "paper_search" and provider == "arxiv"),
             masked=mask_secret(raw_secret),
             environment_variable=environment_variable,
         )

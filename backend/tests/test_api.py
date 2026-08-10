@@ -4,8 +4,18 @@ from pydantic import SecretStr
 
 from app.config import Settings, get_settings
 from app.main import app
-from app.research_schemas import ConceptGraph, ConceptNode, GraphPatchCreate, PaperRecord
+from app.research_schemas import (
+    ConceptGraph,
+    ConceptNode,
+    ExplanationResult,
+    GraphPatchCreate,
+    PaperRecord,
+)
 from app.services.graph_service import GraphConflict, graph_service
+from app.services.research_providers import (
+    ArxivSearchProvider,
+    OpenAICompatibleExplanationProvider,
+)
 from app.services.research_service import research_service
 from app.services.settings_service import api_key_slots
 from app.storage import Storage, storage
@@ -70,6 +80,7 @@ def test_api_key_status_is_separated_and_masked() -> None:
         experiment_provider="remote_runner",
         paper_api_key=SecretStr("paper-secret-1234"),
         community_api_key=SecretStr("community-secret-4321"),
+        explanation_api_key=None,
         experiment_api_key=SecretStr("run-secret-5678"),
     )
 
@@ -98,7 +109,10 @@ def test_settings_load_separate_environment_keys(monkeypatch) -> None:
     monkeypatch.setenv("WISHFORGE_COMMUNITY_API_KEY", "community-env-7777")
     monkeypatch.setenv("WISHFORGE_EXPERIMENT_API_KEY", "runner-env-8888")
 
-    slots = {slot.id: slot for slot in api_key_slots(Settings())}
+    # Read the environment variables set by this test, but do not let a
+    # developer's repository-local .env leak a real explanation key into the
+    # expected unconfigured slot.
+    slots = {slot.id: slot for slot in api_key_slots(Settings(_env_file=None))}
 
     assert slots["paper_search"].configured is True
     assert slots["paper_search"].masked == "••••••••9999"
@@ -143,6 +157,92 @@ def test_concept_analysis_creates_evidence_and_graph() -> None:
         assert result["evidence"][0]["locator"]["kind"] == "abstract"
         assert len(result["graph"]["nodes"]) >= 5
         assert result["explanation"]["one_sentence"]
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_literature_analysis_uses_model_query_planner_and_arxiv(monkeypatch) -> None:
+    searched: list[str] = []
+
+    def fake_plan(
+        self: OpenAICompatibleExplanationProvider, concept: str, language: str
+    ) -> str:
+        assert concept == "注意力机制"
+        assert language == "zh-CN"
+        return "attention mechanism"
+
+    def fake_search(
+        self: ArxivSearchProvider, concept: str, limit: int
+    ) -> list[PaperRecord]:
+        searched.append(concept)
+        return [
+            PaperRecord(
+                id="arxiv:1706.03762",
+                arxiv_id="1706.03762",
+                title="Attention Is All You Need",
+                authors=["Ashish Vaswani"],
+                year=2017,
+                abstract="The Transformer is based solely on attention mechanisms.",
+                url="https://arxiv.org/abs/1706.03762",
+                source="arxiv",
+                source_kind="academic",
+                access_type="open_access",
+            )
+        ]
+
+    def fake_explain(
+        self: OpenAICompatibleExplanationProvider,
+        concept: str,
+        papers: list[PaperRecord],
+        evidence: list,
+        audience: str,
+        language: str,
+    ) -> ExplanationResult:
+        assert papers[0].source == "arxiv"
+        return ExplanationResult(
+            one_sentence="注意力机制让模型按相关性聚合信息。",
+            intuitive="像阅读时关注关键句。",
+            technical="通过查询、键和值计算权重。",
+            evolution=["2017：Transformer 将自注意力作为核心结构。"],
+            related_concepts=["Self-Attention", "Transformer"],
+            limitations=["当前只核对摘要。"],
+            evidence_ids=[item.id for item in evidence],
+        )
+
+    monkeypatch.setattr(OpenAICompatibleExplanationProvider, "plan_search_query", fake_plan)
+    monkeypatch.setattr(OpenAICompatibleExplanationProvider, "explain", fake_explain)
+    monkeypatch.setattr(ArxivSearchProvider, "search", fake_search)
+    app.dependency_overrides[get_settings] = lambda: Settings(
+        paper_provider="arxiv",
+        explanation_provider="openai",
+        explanation_api_key=SecretStr("model-key"),
+        demo_mode=False,
+        _env_file=None,
+    )
+    try:
+        created = client.post(
+            "/api/v1/analyses",
+            json={
+                "concept": "注意力机制",
+                "level": "literature",
+                "audience": "beginner",
+                "max_papers": 3,
+            },
+        )
+        assert created.status_code == 202
+        job_id = created.json()["id"]
+        for _ in range(50):
+            job = client.get(f"/api/v1/analyses/{job_id}").json()
+            if job["status"] in {"completed", "failed"}:
+                break
+
+        assert job["status"] == "completed"
+        assert searched == ["attention mechanism"]
+        assert job["result"]["search_terms"] == ["attention mechanism"]
+        assert job["result"]["provider"] == "search=arxiv; explanation=openai_compatible"
+        assert job["result"]["papers"][0]["arxiv_id"] == "1706.03762"
+        assert job["result"]["explanation"]["evolution"]
+        assert job["result"]["explanation"]["related_concepts"]
     finally:
         app.dependency_overrides.clear()
 

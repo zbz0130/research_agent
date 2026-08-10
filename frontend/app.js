@@ -355,8 +355,9 @@ function renderApiKeys(slots) {
         scope: "独立服务",
       };
       const inputId = `api-key-${slot.id}`;
+      const ready = slot.configured || slot.credential_required === false;
       return `
-        <article class="service-card api-key-row ${slot.configured ? "is-configured" : "is-unconfigured"}" data-api-key-slot="${escapeHtml(slot.id)}">
+        <article class="service-card api-key-row ${ready ? "is-configured" : "is-unconfigured"}" data-api-key-slot="${escapeHtml(slot.id)}">
           <div class="service-card-heading">
             <span class="service-card-icon" aria-hidden="true">${escapeHtml(detail.icon)}</span>
             <div class="service-card-title">
@@ -365,16 +366,19 @@ function renderApiKeys(slots) {
                   <p class="service-card-scope">${escapeHtml(detail.scope)}</p>
                   <h3>${escapeHtml(slot.label)}</h3>
                 </div>
-                <span class="service-status ${slot.configured ? "is-configured" : "is-unconfigured"}">
+                <span class="service-status ${ready ? "is-configured" : "is-unconfigured"}">
                   <span aria-hidden="true" class="service-status-dot"></span>
-                  ${slot.configured ? `已连接 ${escapeHtml(slot.masked || "")}` : "等待连接"}
+                  ${slot.credential_required === false ? "公共接口 · 无需密钥" : slot.configured ? `已连接 ${escapeHtml(slot.masked || "")}` : "等待连接"}
                 </span>
               </div>
               <p>${escapeHtml(detail.description)}</p>
               <p class="service-provider"><span class="provider-name">${escapeHtml(slot.provider)}</span><code>${escapeHtml(slot.environment_variable)}</code></p>
             </div>
           </div>
+          ${slot.credential_required === false ? `
           <div class="service-card-control">
+            <p class="settings-note">当前 Provider 可直接使用；无需填写 <code>${escapeHtml(slot.environment_variable)}</code>。</p>
+          </div>` : `<div class="service-card-control">
             <label for="${escapeHtml(inputId)}">${slot.configured ? "更新服务密钥" : "连接服务密钥"}</label>
             <div class="service-key-row">
               <input
@@ -389,7 +393,7 @@ function renderApiKeys(slots) {
               />
               <button type="button" class="secondary api-key-clear" data-api-key-clear="${escapeHtml(slot.id)}">断开</button>
             </div>
-          </div>
+          </div>`}
         </article>
       `;
     })()}

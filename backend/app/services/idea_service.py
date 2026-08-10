@@ -26,6 +26,7 @@ from app.research_schemas import (
     RelatedWorkSummary,
 )
 from app.services.research_providers import (
+    ArxivSearchProvider,
     DemoSearchProvider,
     ProviderUnavailable,
     SearchProvider,
@@ -72,8 +73,15 @@ class IdeaCheckService:
         warnings: list[str] = [
             "本检查仅覆盖当前 Provider 的标题、摘要和公开元数据，不构成穷尽式 prior-art、专利新颖性或法律结论。",
             "相似性由透明的词项重叠启发式辅助排序，仍需人工核对全文、方法细节和实验条件。",
-            "本次没有单独调用 arXiv 检索接口；如果要声称‘未发现 arXiv 同类工作’，还需要额外的 arXiv 查询和引用网络核验。",
         ]
+        if settings.paper_provider == "arxiv":
+            warnings.append(
+                "本次直接查询 arXiv，但仍受检索词、返回数量和标题/摘要范围限制，不能证明不存在同类工作。"
+            )
+        else:
+            warnings.append(
+                "本次没有单独调用 arXiv 检索接口；如果要声称‘未发现 arXiv 同类工作’，还需要额外的 arXiv 查询和引用网络核验。"
+            )
 
         provider = self._provider(settings)
         papers: list[PaperRecord] = []
@@ -118,7 +126,13 @@ class IdeaCheckService:
             idea=payload.idea,
             project_id=payload.project_id,
             search_terms=query_terms,
-            arxiv_status=("indirect_metadata" if any(paper.arxiv_id for paper in papers) else "not_checked"),
+            arxiv_status=(
+                "checked"
+                if settings.paper_provider == "arxiv" and not fallback_used
+                else "indirect_metadata"
+                if any(paper.arxiv_id for paper in papers)
+                else "not_checked"
+            ),
             papers=papers,
             evidence=evidence,
             related_work_summaries=related_work_summaries,
@@ -161,6 +175,8 @@ class IdeaCheckService:
     def _provider(settings: Settings) -> SearchProvider:
         if settings.paper_provider == "demo":
             return DemoSearchProvider()
+        if settings.paper_provider == "arxiv":
+            return ArxivSearchProvider()
         if settings.paper_provider == "semantic_scholar":
             api_key = settings.paper_api_key.get_secret_value() if settings.paper_api_key else None
             return SemanticScholarProvider(api_key=api_key)

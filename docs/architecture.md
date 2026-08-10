@@ -10,7 +10,7 @@
       ▼
 异步 AnalysisJob
       │
-      ├── 论文检索 Provider（Semantic Scholar / Demo）
+      ├── 论文检索 Provider（arXiv / Semantic Scholar / Demo）
       ├── 摘要级 EvidenceCard
       ├── 解释 Provider（OpenAI-compatible / 规则回退）
       ├── ConceptGraph 构建
@@ -62,7 +62,7 @@ FastAPI API (/api/v1)
 - 网页 `PATCH /api/v1/settings/api-keys` 写入的四个槽位只覆盖当前进程内的 `Settings`，重启后回到 `.env`；本地第一版不把明文密钥写进 SQLite；
 - 当前没有登录、租户隔离或权限系统，密钥配置接口只适合本机/受保护内网；公网部署前必须加认证、审计和 Secret Manager；
 - 外部论文或网页内容是“不可信输入”，不能改变系统提示词、工具权限或 API Key；
-- 论文全文只应来自开放来源或用户合法提供的文件。本阶段默认只处理 Semantic Scholar 元数据和摘要。
+- 论文全文只应来自开放来源或用户合法提供的文件。本阶段默认通过 arXiv 处理元数据和摘要，不声称已阅读 PDF 全文。
 - IdeaCheck 的 L0–L4 是检索范围内的分诊信号，不是专利或论文法律意义上的新颖性结论。
 
 ## 3. API 契约

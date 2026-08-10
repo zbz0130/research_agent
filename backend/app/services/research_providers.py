@@ -3,6 +3,7 @@ import re
 import hashlib
 import math
 import time
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from collections.abc import Callable, Sequence
 from email.utils import parsedate_to_datetime
@@ -191,6 +192,123 @@ class SynthesisProvider(Protocol):
         future_work_signals: Sequence[FutureWorkSignal],
     ) -> tuple[str, list[InnovationCandidate]]:
         ...
+
+
+class ArxivSearchProvider:
+    """Search arXiv's public Atom API and normalize entries into papers.
+
+    The provider intentionally requests only one small relevance-sorted page
+    per analysis.  This keeps the interactive workflow within arXiv's API
+    guidance and makes the recorded query scope easy to explain to users.
+    """
+
+    name = "arxiv"
+    endpoint = "https://export.arxiv.org/api/query"
+    _ATOM = "{http://www.w3.org/2005/Atom}"
+    _ARXIV = "{http://arxiv.org/schemas/atom}"
+
+    def __init__(self, timeout: float = 30.0) -> None:
+        self.timeout = timeout
+
+    def search(self, concept: str, limit: int) -> list[PaperRecord]:
+        query_text = " ".join(concept.replace('"', " ").split())
+        if not query_text:
+            return []
+        params = {
+            "search_query": f'all:"{query_text}"',
+            "start": 0,
+            "max_results": max(1, min(limit, 12)),
+            "sortBy": "relevance",
+            "sortOrder": "descending",
+        }
+        try:
+            response = httpx.get(
+                self.endpoint,
+                params=params,
+                headers={"User-Agent": "WishForge/0.1 (research concept explorer)"},
+                timeout=self.timeout,
+                follow_redirects=True,
+            )
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise ProviderUnavailable(
+                f"arXiv 暂时不可用：{exc}", provider=self.name
+            ) from exc
+
+        try:
+            root = ET.fromstring(response.content)
+        except ET.ParseError as exc:
+            raise ProviderUnavailable(
+                "arXiv 返回了无法解析的 Atom 响应。", provider=self.name
+            ) from exc
+
+        records: list[PaperRecord] = []
+        for entry in root.findall(f"{self._ATOM}entry"):
+            record = self._parse_entry(entry)
+            if record is not None:
+                records.append(record)
+        return records[:limit]
+
+    def _parse_entry(self, entry: ET.Element) -> PaperRecord | None:
+        entry_url = self._text(entry, "id")
+        title = self._clean_text(self._text(entry, "title"))
+        if not entry_url or "/abs/" not in entry_url or not title:
+            # arXiv represents some API errors as an Atom entry.  Do not turn
+            # that entry into a fake academic paper.
+            return None
+
+        raw_id = entry_url.rstrip("/").rsplit("/abs/", 1)[-1]
+        version_match = re.search(r"(v\d+)$", raw_id)
+        version = version_match.group(1) if version_match else None
+        canonical_arxiv_id = raw_id[: -len(version)] if version else raw_id
+        published = self._text(entry, "published")
+        year: int | None = None
+        if published and re.match(r"^\d{4}", published):
+            year = int(published[:4])
+
+        authors = [
+            self._clean_text(self._text(author, "name"))
+            for author in entry.findall(f"{self._ATOM}author")
+        ]
+        authors = [author for author in authors if author]
+        alternate_url = entry_url.replace("http://", "https://", 1)
+        for link in entry.findall(f"{self._ATOM}link"):
+            if link.attrib.get("rel") == "alternate" and link.attrib.get("href"):
+                alternate_url = link.attrib["href"].replace("http://", "https://", 1)
+                break
+
+        primary_category = entry.find(f"{self._ARXIV}primary_category")
+        category = primary_category.attrib.get("term") if primary_category is not None else None
+        journal_ref = self._clean_text(entry.findtext(f"{self._ARXIV}journal_ref") or "")
+        doi = self._clean_text(entry.findtext(f"{self._ARXIV}doi") or "") or None
+        abstract = self._clean_text(self._text(entry, "summary"))
+
+        return PaperRecord(
+            id=f"arxiv:{raw_id}",
+            canonical_id=f"arxiv:{canonical_arxiv_id}",
+            provider_id=raw_id,
+            arxiv_id=canonical_arxiv_id,
+            version=version,
+            title=title,
+            authors=authors,
+            year=year,
+            venue=journal_ref or (f"arXiv:{category}" if category else "arXiv"),
+            abstract=abstract,
+            url=alternate_url,
+            doi=doi,
+            citation_count=None,
+            source=self.name,
+            source_kind="academic",
+            access_type="open_access",
+            retrieved_at=datetime.now(timezone.utc),
+        )
+
+    def _text(self, element: ET.Element, name: str) -> str:
+        return element.findtext(f"{self._ATOM}{name}") or ""
+
+    @staticmethod
+    def _clean_text(value: str) -> str:
+        return " ".join(value.split())
 
 
 class SemanticScholarProvider:
@@ -467,6 +585,11 @@ class DemoSearchProvider:
 class RuleBasedExplanationProvider:
     name = "rule_based_fallback"
 
+    def plan_search_query(self, concept: str, language: str) -> str:
+        """Return the original term when no model is available to translate it."""
+
+        return " ".join(concept.split())
+
     def explain(
         self,
         concept: str,
@@ -506,6 +629,48 @@ class OpenAICompatibleExplanationProvider:
         self.model = model
         self.timeout = timeout
 
+    def plan_search_query(self, concept: str, language: str) -> str:
+        """Turn a user concept into one compact English arXiv search phrase."""
+
+        prompt = f"""
+请把用户输入的科研概念转换成一个适合 arXiv 标题/摘要检索的英文短语。
+用户输入：{concept}
+用户语言：{language}
+只返回 JSON 对象：{{"query": "2 到 10 个英文单词组成的学术检索短语"}}。
+不要加入 all:、布尔运算符、引号、解释、论文标题或年份。
+如果输入本身已经是合适的英文术语，保留其标准学术写法。
+""".strip()
+        try:
+            response = httpx.post(
+                f"{self.base_url}/chat/completions",
+                headers={"Authorization": f"Bearer {self.api_key}"},
+                json={
+                    "model": self.model,
+                    "temperature": 0,
+                    "response_format": {"type": "json_object"},
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": "你负责生成保守、精确的英文学术检索词。",
+                        },
+                        {"role": "user", "content": prompt},
+                    ],
+                },
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+            content = response.json()["choices"][0]["message"]["content"]
+            payload = json.loads(_strip_code_fence(content))
+            query = payload.get("query") if isinstance(payload, dict) else None
+            if not isinstance(query, str):
+                raise ValueError("缺少 query 字段")
+            query = " ".join(query.replace('"', " ").split())
+            if not 2 <= len(query) <= 160:
+                raise ValueError("query 长度无效")
+            return query
+        except (httpx.HTTPError, KeyError, TypeError, ValueError, AttributeError) as exc:
+            raise ProviderUnavailable(f"检索词生成模型暂时不可用：{exc}") from exc
+
     def explain(
         self,
         concept: str,
@@ -517,19 +682,37 @@ class OpenAICompatibleExplanationProvider:
         evidence_payload = "\n\n".join(
             f"[{item.id}] {item.claim}\n关系：{item.relation}\n原文：{item.excerpt}" for item in evidence[:12]
         )
-        paper_payload = "\n".join(f"- {paper.title} ({paper.year or 'n.d.'})" for paper in papers[:12])
-        prompt = f"""
-你是 WishForge 的科研概念解释器。请使用下方资料解释“{concept}”。
-目标读者：{audience}；语言：{language}。
-只能把资料支持的内容写成事实；证据不足时明确说证据不足。
-必须返回 JSON，字段为：one_sentence、intuitive、technical、evolution（字符串数组）、
-related_concepts（字符串数组）、limitations（字符串数组）、evidence_ids（证据卡 ID 数组）。
+        paper_payload = "\n\n".join(
+            f"- {paper.title} ({paper.year or 'n.d.'}) [{paper.id}]\n摘要：{paper.abstract[:2400]}"
+            for paper in papers[:10]
+        )
+        if papers:
+            mode_instructions = f"""
+这是“文献解释”模式。请阅读给出的论文摘要，围绕资料解释概念，不能声称读过论文全文。
+演变过程必须按年份组织，并说明每项工作带来的概念或方法变化；不得编造资料中没有的年份。
+相关概念应说明与主概念紧密相关的标准术语。只能把资料支持的内容写成事实；
+证据不足时明确说证据不足。evidence_ids 只能使用下方出现的证据卡 ID。
 
-论文：
+论文及摘要：
 {paper_payload}
 
 证据卡：
 {evidence_payload}
+""".strip()
+        else:
+            mode_instructions = """
+这是“快速解释”模式，没有执行论文检索。请直接基于通用学术知识给出易懂、准确的说明，
+不要伪造论文、证据 ID 或具体引用。evolution 可以概括方法思路的演进，但不确定的年份不要写；
+limitations 中必须说明本次没有检索论文，回答需要后续文献核验。evidence_ids 必须为空数组。
+""".strip()
+        prompt = f"""
+你是 WishForge 的科研概念解释器。请解释“{concept}”。
+目标读者：{audience}；语言：{language}。
+输出要先直觉、后技术，避免不解释的术语堆砌。
+{mode_instructions}
+
+必须返回 JSON，字段为：one_sentence、intuitive、technical、evolution（字符串数组）、
+related_concepts（字符串数组）、limitations（字符串数组）、evidence_ids（证据卡 ID 数组）。
 """.strip()
         try:
             response = httpx.post(

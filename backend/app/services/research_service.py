@@ -33,6 +33,7 @@ from app.research_schemas import (
 from app.storage import storage
 from app.services.graph_service import graph_service
 from app.services.research_providers import (
+    ArxivSearchProvider,
     DemoSearchProvider,
     ExplanationProvider,
     OpenAICompatibleExplanationProvider,
@@ -218,11 +219,25 @@ class ResearchService:
             warnings: list[str] = []
             search_terms: list[str] = []
             search_provider = _search_provider(settings)
+            explanation_provider = _explanation_provider(settings)
+            if (
+                settings.explanation_provider in {"openai", "openai_compatible"}
+                and not settings.explanation_api_key
+            ):
+                warnings.append("未配置解释模型 API Key，本次使用规则回退解释。")
             if payload.level == "quick":
                 papers = []
                 warnings.append("快速解释模式未检索论文，结论需要自行核验。")
             else:
-                query_plan = [payload.concept]
+                planned_query = payload.concept
+                planner = getattr(explanation_provider, "plan_search_query", None)
+                if callable(planner):
+                    try:
+                        planned_query = planner(payload.concept, payload.language)
+                    except ProviderUnavailable as exc:
+                        warnings.append(str(exc))
+                        warnings.append("已使用用户原始输入继续检索，中文概念可能需要改用英文术语重试。")
+                query_plan = [planned_query]
                 if payload.level == "research":
                     # A small, bounded prior-art expansion. It is intentionally
                     # transparent and is not a claim of exhaustive novelty.
@@ -268,12 +283,6 @@ class ResearchService:
             self._update(job_id, generation=generation, progress=52, message="正在生成段落级证据卡")
             evidence = _build_evidence(payload.concept, papers)
             self._update(job_id, generation=generation, progress=70, message="正在生成分层解释和概念关系")
-            explanation_provider = _explanation_provider(settings)
-            if (
-                settings.explanation_provider in {"openai", "openai_compatible"}
-                and not settings.explanation_api_key
-            ):
-                warnings.append("未配置解释模型 API Key，本次使用规则回退解释。")
             try:
                 explanation = explanation_provider.explain(
                     payload.concept,
@@ -419,6 +428,8 @@ class ResearchService:
 def _search_provider(settings: Settings) -> SearchProvider:
     if settings.paper_provider == "demo":
         return DemoSearchProvider()
+    if settings.paper_provider == "arxiv":
+        return ArxivSearchProvider()
     if settings.paper_provider == "semantic_scholar":
         api_key = settings.paper_api_key.get_secret_value() if settings.paper_api_key else None
         return SemanticScholarProvider(api_key=api_key)
@@ -435,6 +446,7 @@ def _explanation_provider(settings: Settings) -> ExplanationProvider:
             api_key=settings.explanation_api_key.get_secret_value(),
             base_url=settings.explanation_base_url,
             model=settings.explanation_model,
+            timeout=settings.explanation_timeout_seconds,
         )
     raise ProviderUnavailable(f"未支持的解释 Provider：{settings.explanation_provider}")
 
