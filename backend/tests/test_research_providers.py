@@ -327,6 +327,119 @@ def test_compatible_model_distinguishes_quick_and_abstract_modes(monkeypatch) ->
     assert paper.abstract in prompts[1]
 
 
+def test_compatible_model_repairs_optional_items_without_losing_valid_explanation(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    payload = {
+        "one_sentence": "KV cache 压缩用于降低长上下文推理的缓存占用。",
+        "intuitive": "像保留笔记中的关键信息。",
+        "technical": "方法会选择或压缩历史键值表示。",
+        "evolution": [],
+        "claims": [
+            {
+                "claim_type": "mechanism",
+                "text": "该方法压缩历史键值表示。",
+                "paper_ids": ["arxiv:2506.00001"],
+                "evidence_ids": ["evidence-1"],
+                "scope": "摘要级线索",
+            },
+            {
+                "claim_type": "result",
+                "paper_ids": ["arxiv:2506.00001"],
+                "evidence_ids": [],
+                "scope": "缺少 text，应被逐条忽略",
+            },
+        ],
+        "research_limitations": [],
+        "research_gap_candidates": [],
+        "reproducibility_checks": [
+            {
+                "text": "论文代码是否公开尚未验证。",
+                "check_type": "not verified",
+                "paper_ids": ["arxiv:2506.00001"],
+            },
+            {
+                "text": "需要确认实现采用的许可证。",
+                "check_type": "arxiv:2506.00001",
+                "paper_ids": [],
+            },
+            {
+                "text": "这条内容无法判断属于哪种复现检查。",
+                "check_type": "unknown",
+                "paper_ids": [],
+            },
+        ],
+        "scope_warnings": ["当前仅核对摘要。"],
+        "related_concepts": ["KV cache eviction"],
+        "limitations": [],
+        "evidence_ids": ["evidence-1"],
+        "unexpected_debug_field": "ignore me",
+    }
+
+    def fake_post(url: str, **kwargs: object) -> httpx.Response:
+        captured.update(kwargs)
+        return _model_response(payload)
+
+    monkeypatch.setattr(research_providers.httpx, "post", fake_post)
+    provider = OpenAICompatibleExplanationProvider(
+        api_key="model-key",
+        base_url="https://model.example/v1",
+        model="test-model",
+    )
+    paper = PaperRecord(
+        id="arxiv:2506.00001",
+        arxiv_id="2506.00001",
+        title="A KV Cache Compression Paper",
+        abstract="The method compresses cached key-value representations.",
+        source="arxiv",
+        source_kind="academic",
+        access_type="abstract_only",
+    )
+    evidence = EvidenceCard(
+        id="evidence-1",
+        paper_id=paper.id,
+        claim="摘要介绍了一种 KV cache 压缩方法。",
+        excerpt=paper.abstract,
+    )
+
+    explanation = provider.explain(
+        "KV cache 压缩", [paper], [evidence], "researcher", "zh-CN"
+    )
+
+    assert explanation.one_sentence == payload["one_sentence"]
+    assert len(explanation.claims) == 1
+    assert [item.check_type for item in explanation.reproducibility_checks] == ["code", "license"]
+    assert explanation.reproducibility_checks[1].paper_ids == ["arxiv:2506.00001"]
+    assert any("原子主张中有 1 条" in item for item in explanation.model_output_warnings)
+    assert any("复现检查中有 2 条类型已自动纠正" in item for item in explanation.model_output_warnings)
+    assert any("复现检查中有 1 条无法安全校验" in item for item in explanation.model_output_warnings)
+    assert any("1 个未约定字段" in item for item in explanation.model_output_warnings)
+    prompt = captured["json"]["messages"][1]["content"]
+    assert "check_type 只能是以下五个英文值之一" in prompt
+    assert "arXiv ID 只能放入 paper_ids" in prompt
+
+
+def test_compatible_model_still_rejects_missing_core_explanation(monkeypatch) -> None:
+    monkeypatch.setattr(
+        research_providers.httpx,
+        "post",
+        lambda url, **kwargs: _model_response(
+            {
+                "intuitive": "缺少一句话定义。",
+                "technical": "核心字段不完整。",
+                "claims": [],
+            }
+        ),
+    )
+    provider = OpenAICompatibleExplanationProvider(
+        api_key="model-key",
+        base_url="https://model.example/v1",
+        model="test-model",
+    )
+
+    with pytest.raises(ProviderUnavailable, match="缺少必要字段"):
+        provider.explain("KV cache 压缩", [], [], "researcher", "zh-CN")
+
+
 def _response(
     status_code: int,
     *,

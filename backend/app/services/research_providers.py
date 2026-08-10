@@ -1,4 +1,5 @@
 import json
+import logging
 import re
 import hashlib
 import math
@@ -20,8 +21,14 @@ from app.research_schemas import (
     FutureWorkSignal,
     InnovationCandidate,
     PaperRecord,
+    ReproducibilityCheck,
+    ResearchGapCandidate,
+    ResearchLimitation,
     SearchQueryPlan,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 class ProviderUnavailable(RuntimeError):
@@ -950,6 +957,16 @@ limitation_kind 只能是 method_limitation、failure_mode、tradeoff、applicab
 “仅阅读摘要、检索数量有限”等放入 scope_warnings；代码和数据未核验放入 reproducibility_checks；
 “当前范围可能缺少统一标准”等放入 research_gap_candidates，并明确限定为当前检索范围，不得声称整个领域不存在。
 
+reproducibility_checks 中的 check_type 只能是以下五个英文值之一：
+- code：代码、实现或源码是否公开；
+- data：数据集、数据处理或数据可得性；
+- environment：依赖、硬件、运行环境或随机种子；
+- license：代码或数据许可证；
+- benchmark：基准、指标或评测协议。
+“not verified”“unknown”“unverified”是状态，不是 check_type；arXiv ID 只能放入 paper_ids。
+无法判断类型时不要生成该条。合法示例：
+{{"text": "需要确认论文是否公开训练代码。", "check_type": "code", "paper_ids": ["arxiv:xxxx.xxxxx"]}}
+
 论文及摘要：
 {paper_payload}
 
@@ -978,6 +995,7 @@ research_gap_candidates（对象数组，每项含 text、scope、paper_ids、ev
 reproducibility_checks（对象数组，每项含 text、check_type、paper_ids）、
 scope_warnings（字符串数组）、related_concepts（字符串数组）、
 limitations（兼容字段，字符串数组，仅复制 research_limitations 的 text）、evidence_ids（证据卡 ID 数组）。
+不要返回 model_output_warnings；该字段由系统根据解析过程生成。
 """.strip()
         try:
             response = httpx.post(
@@ -998,9 +1016,13 @@ limitations（兼容字段，字符串数组，仅复制 research_limitations �
             content = response.json()["choices"][0]["message"]["content"]
             if not isinstance(content, str):
                 raise ProviderUnavailable("解释模型返回的 content 不是字符串。")
-            return ExplanationResult.model_validate_json(_strip_code_fence(content))
-        except (httpx.HTTPError, KeyError, TypeError, ValueError, AttributeError) as exc:
-            raise ProviderUnavailable(f"解释模型暂时不可用：{exc}") from exc
+            return _parse_explanation_result(content)
+        except httpx.HTTPError as exc:
+            logger.warning("Explanation model request failed", exc_info=True)
+            raise ProviderUnavailable("解释模型请求失败，未能获得可用解释。") from exc
+        except (KeyError, TypeError, ValueError, AttributeError) as exc:
+            logger.warning("Explanation model response failed core validation", exc_info=True)
+            raise ProviderUnavailable("解释模型返回内容缺少必要字段或无法解析。") from exc
 
     def brainstorm(
         self,
@@ -1166,6 +1188,199 @@ feasibility、rationale、validation_steps（字符串数组）、warning。
             raise
         except (httpx.HTTPError, KeyError, TypeError, ValueError, AttributeError) as exc:
             raise ProviderUnavailable(f"研究综合模型暂时不可用：{exc}") from exc
+
+
+_EXPLANATION_CORE_FIELDS = ("one_sentence", "intuitive", "technical")
+_EXPLANATION_STRING_LIST_FIELDS: dict[str, int] = {
+    "evolution": 30,
+    "scope_warnings": 12,
+    "related_concepts": 30,
+    "limitations": 20,
+    "evidence_ids": 40,
+}
+_EXPLANATION_ITEM_FIELDS = {
+    "evolution_items": (EvolutionItem, 12),
+    "claims": (AtomicClaimDraft, 40),
+    "research_limitations": (ResearchLimitation, 20),
+    "research_gap_candidates": (ResearchGapCandidate, 20),
+    "reproducibility_checks": (ReproducibilityCheck, 20),
+}
+_REPRODUCIBILITY_CHECK_TYPES = {"code", "data", "environment", "license", "benchmark"}
+_EXPLANATION_FIELD_LABELS = {
+    "evolution_items": "演变条目",
+    "claims": "原子主张",
+    "research_limitations": "研究局限",
+    "research_gap_candidates": "研究空白候选",
+    "reproducibility_checks": "复现检查",
+    "evolution": "演变过程",
+    "scope_warnings": "调研范围提醒",
+    "related_concepts": "相关概念",
+    "limitations": "兼容局限字段",
+    "evidence_ids": "证据关联",
+}
+
+
+def _parse_explanation_result(content: str) -> ExplanationResult:
+    """Parse model JSON without letting one malformed optional item erase the answer.
+
+    Core prose remains strict: malformed or missing one-sentence, intuitive, or
+    technical explanations still fail the response. Optional structured arrays
+    are validated item by item. Unsafe entries are removed and surfaced as
+    user-readable repair notes while valid claims and limitations survive.
+    """
+
+    payload = json.loads(_strip_code_fence(content))
+    if not isinstance(payload, dict):
+        raise ValueError("解释模型必须返回 JSON 对象")
+
+    repaired: dict[str, object] = {
+        field: payload.get(field) for field in _EXPLANATION_CORE_FIELDS
+    }
+    repair_warnings: list[str] = []
+
+    for field, limit in _EXPLANATION_STRING_LIST_FIELDS.items():
+        repaired[field] = _clean_model_string_list(
+            payload.get(field, []),
+            field=field,
+            limit=limit,
+            warnings=repair_warnings,
+        )
+
+    for field, (model_type, limit) in _EXPLANATION_ITEM_FIELDS.items():
+        repaired[field] = _clean_model_item_list(
+            payload.get(field, []),
+            field=field,
+            model_type=model_type,
+            limit=limit,
+            warnings=repair_warnings,
+        )
+
+    expected_fields = {
+        *_EXPLANATION_CORE_FIELDS,
+        *_EXPLANATION_STRING_LIST_FIELDS,
+        *_EXPLANATION_ITEM_FIELDS,
+        "model_output_warnings",
+    }
+    unknown_count = len(set(payload) - expected_fields)
+    if unknown_count:
+        repair_warnings.append(
+            f"模型返回了 {unknown_count} 个未约定字段，系统已忽略；其他有效内容不受影响。"
+        )
+    repaired["model_output_warnings"] = repair_warnings[:20]
+    return ExplanationResult.model_validate(repaired)
+
+
+def _clean_model_string_list(
+    value: object,
+    *,
+    field: str,
+    limit: int,
+    warnings: list[str],
+) -> list[str]:
+    label = _EXPLANATION_FIELD_LABELS[field]
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        warnings.append(f"模型返回的{label}不是数组，系统已忽略该部分。")
+        return []
+    cleaned = [item.strip() for item in value if isinstance(item, str) and item.strip()]
+    dropped = len(value) - len(cleaned)
+    if len(cleaned) > limit:
+        dropped += len(cleaned) - limit
+        cleaned = cleaned[:limit]
+    if dropped:
+        warnings.append(f"模型返回的{label}中有 {dropped} 条格式不合格，系统已忽略。")
+    return cleaned
+
+
+def _clean_model_item_list(
+    value: object,
+    *,
+    field: str,
+    model_type: type,
+    limit: int,
+    warnings: list[str],
+) -> list[dict[str, object]]:
+    label = _EXPLANATION_FIELD_LABELS[field]
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        warnings.append(f"模型返回的{label}不是数组，系统已忽略该部分。")
+        return []
+
+    cleaned: list[dict[str, object]] = []
+    dropped = max(0, len(value) - limit)
+    normalized = 0
+    model_fields = set(model_type.model_fields)
+    for raw_item in value[:limit]:
+        if not isinstance(raw_item, dict):
+            dropped += 1
+            continue
+        candidate = {key: raw_item[key] for key in model_fields if key in raw_item}
+        if field == "reproducibility_checks":
+            candidate, changed = _normalize_reproducibility_check(candidate)
+            if candidate is None:
+                dropped += 1
+                continue
+            normalized += int(changed)
+        try:
+            cleaned.append(model_type.model_validate(candidate).model_dump())
+        except (TypeError, ValueError, AttributeError):
+            dropped += 1
+
+    if normalized:
+        warnings.append(f"模型返回的{label}中有 {normalized} 条类型已自动纠正。")
+    if dropped:
+        warnings.append(
+            f"模型返回的{label}中有 {dropped} 条无法安全校验，已忽略；其他解释和主张仍然保留。"
+        )
+    return cleaned
+
+
+def _normalize_reproducibility_check(
+    item: dict[str, object],
+) -> tuple[dict[str, object] | None, bool]:
+    raw_type = item.get("check_type")
+    normalized_type = raw_type.strip().casefold() if isinstance(raw_type, str) else ""
+    changed = normalized_type not in _REPRODUCIBILITY_CHECK_TYPES
+
+    paper_ids = item.get("paper_ids", [])
+    if not isinstance(paper_ids, list):
+        paper_ids = []
+        changed = True
+    clean_paper_ids = [value for value in paper_ids if isinstance(value, str) and value.strip()]
+    if normalized_type.startswith("arxiv:"):
+        clean_paper_ids.append(normalized_type)
+
+    if normalized_type not in _REPRODUCIBILITY_CHECK_TYPES:
+        text = item.get("text") if isinstance(item.get("text"), str) else ""
+        normalized_type = _infer_reproducibility_check_type(f"{raw_type or ''} {text}") or ""
+    if normalized_type not in _REPRODUCIBILITY_CHECK_TYPES:
+        return None, changed
+
+    return {
+        "text": item.get("text"),
+        "check_type": normalized_type,
+        "paper_ids": list(dict.fromkeys(clean_paper_ids))[:3],
+    }, changed
+
+
+def _infer_reproducibility_check_type(text: str) -> str | None:
+    normalized = text.casefold()
+    keyword_groups = (
+        ("license", ("license", "licence", "许可证", "授权协议")),
+        ("benchmark", ("benchmark", "metric", "evaluation", "基准", "指标", "评测")),
+        (
+            "environment",
+            ("environment", "dependency", "hardware", "random seed", "环境", "依赖", "硬件", "随机种子"),
+        ),
+        ("data", ("dataset", "training data", "test data", "数据集", "训练数据", "测试数据")),
+        ("code", ("source code", "implementation", "repository", "代码", "源码", "实现")),
+    )
+    for check_type, keywords in keyword_groups:
+        if any(keyword in normalized for keyword in keywords):
+            return check_type
+    return None
 
 
 def _strip_code_fence(content: str) -> str:

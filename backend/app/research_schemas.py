@@ -318,6 +318,7 @@ class ExplanationResult(BaseModel):
     research_limitations: list[ResearchLimitation] = Field(default_factory=list, max_length=20)
     research_gap_candidates: list[ResearchGapCandidate] = Field(default_factory=list, max_length=20)
     reproducibility_checks: list[ReproducibilityCheck] = Field(default_factory=list, max_length=20)
+    model_output_warnings: list[str] = Field(default_factory=list, max_length=20)
     scope_warnings: list[str] = Field(default_factory=list, max_length=12)
     related_concepts: list[str] = Field(default_factory=list)
     limitations: list[str] = Field(default_factory=list)

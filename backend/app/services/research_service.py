@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+import logging
 import math
 import re
 from threading import RLock
@@ -38,6 +39,7 @@ from app.research_schemas import (
 )
 from app.storage import storage
 from app.services.graph_service import graph_service
+from app.services.research_orchestration import research_orchestrator
 from app.services.research_providers import (
     ArxivSearchProvider,
     DemoSearchProvider,
@@ -48,7 +50,9 @@ from app.services.research_providers import (
     SearchProvider,
     SemanticScholarProvider,
 )
-from app.services.research_orchestration import research_orchestrator
+
+
+logger = logging.getLogger(__name__)
 
 
 class AnalysisNotFound(KeyError):
@@ -170,7 +174,8 @@ class ResearchService:
         except ProviderUnavailable as exc:
             if not settings.demo_mode:
                 raise
-            warnings.append(str(exc))
+            logger.warning("Node explanation provider failed; using rule fallback: %s", exc)
+            warnings.append("解释模型没有返回可用的核心内容，本次节点解释已使用规则回退。")
             provider = RuleBasedExplanationProvider()
             explanation = provider.explain(
                 node.label,
@@ -179,6 +184,7 @@ class ResearchService:
                 audience,
                 language,
             )
+        warnings.extend(explanation.model_output_warnings)
         summary = explanation.one_sentence
         if explanation.intuitive:
             summary = f"{summary} {explanation.intuitive}"
@@ -424,8 +430,8 @@ class ResearchService:
             except ProviderUnavailable as exc:
                 if not settings.demo_mode:
                     raise
-                warnings.append(str(exc))
-                warnings.append("已使用规则回退解释；配置解释模型后可获得更完整的分层回答。")
+                logger.warning("Explanation provider failed; using rule fallback: %s", exc)
+                warnings.append("解释模型没有返回可用的核心内容，本次已使用规则回退解释。")
                 explanation_provider = RuleBasedExplanationProvider()
                 explanation = explanation_provider.explain(
                     payload.concept,

@@ -560,7 +560,8 @@ function resetAnalysisView() {
 
 function renderExplanation(result) {
   const explanation = result.explanation;
-  const warnings = result.warnings || [];
+  const warnings = (result.warnings || []).map((item) => friendlyAnalysisWarning(item));
+  const modelOutputWarnings = explanation.model_output_warnings || [];
   const paperById = new Map((result.papers || []).map((paper) => [paper.id, paper]));
   const evolutionItems = explanation.evolution_items || [];
   const researchLimitations = explanation.research_limitations || [];
@@ -599,6 +600,7 @@ function renderExplanation(result) {
     : `<ol>${(explanation.evolution || []).map((item) => `<li>${escapeHtml(item)}</li>`).join("") || "<li>暂无足够资料</li>"}</ol>`;
   explanationEl.innerHTML = `
     ${warnings.length ? `<div class="warning-box"><strong>需要注意</strong><ul>${warnings.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul></div>` : ""}
+    ${modelOutputWarnings.length ? `<div class="model-output-note"><strong>模型输出修复记录</strong><ul>${modelOutputWarnings.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul></div>` : ""}
     <section class="explanation-section featured-explanation">
       <p class="section-label">一句话理解</p>
       <p class="one-sentence">${escapeHtml(explanation.one_sentence)}</p>
@@ -642,6 +644,18 @@ function renderExplanation(result) {
       </section>` : ""}
     <p class="evidence-link-note">本次解释关联 ${escapeHtml((explanation.evidence_ids || []).length)} 张证据卡；摘要级证据仍需人工核对全文。</p>
   `;
+}
+
+function friendlyAnalysisWarning(value) {
+  const warning = String(value || "");
+  if (
+    warning.includes("validation errors for ExplanationResult")
+    || warning.includes("reproducibility_checks.")
+    || warning.includes("pydantic.dev")
+  ) {
+    return "解释模型返回的结构化字段格式不符合约定，该次旧结果已使用规则回退；重新分析后系统会逐条修复可选字段并保留其他有效内容。";
+  }
+  return warning;
 }
 
 function renderPapers(result) {
