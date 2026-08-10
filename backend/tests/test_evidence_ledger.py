@@ -15,6 +15,7 @@ from app.services.research_service import (
     _classify_abstract_sentence_types,
     _is_atomic_claim,
     _match_claim_evidence,
+    _normalize_evolution_provenance,
 )
 
 
@@ -224,6 +225,53 @@ def test_abstract_evidence_keeps_mechanism_and_limitation_labels() -> None:
     assert "limitation" in labels
 
 
+def test_abstract_evidence_recognizes_explicit_gaps_and_failure_language() -> None:
+    gap_labels = _classify_abstract_sentence_types(
+        "KV cache quantization below two bits has not been investigated."
+    )
+    failure_labels = _classify_abstract_sentence_types(
+        "Prior methods neglect the distinct roles of keys and values, leading to significant performance drops."
+    )
+
+    assert "future_work" in gap_labels
+    assert "limitation" in failure_labels
+
+
+def test_gap_decision_recovers_a_scoped_candidate_when_model_item_is_invalid() -> None:
+    paper = PaperRecord(
+        id="paper-gap",
+        title="Lower-bit Cache Quantization",
+        abstract="KV cache quantization below two bits has not been investigated.",
+        source="fixture",
+        source_kind="academic",
+        access_type="abstract_only",
+    )
+    evidence = _build_evidence("KV cache quantization", [paper])
+    gap_card = next(item for item in evidence if "future_work" in item.evidence_types)
+    explanation = ExplanationResult(
+        one_sentence="A definition.",
+        intuitive="An analogy.",
+        technical="A technical note.",
+        limitation_decisions=[
+            {
+                "evidence_id": gap_card.id,
+                "decision": "research_gap",
+                "reason": "更低比特 KV cache 量化仍需扩大检索验证。",
+                "limitation_kind": None,
+            }
+        ],
+    )
+
+    normalized = _normalize_evolution_provenance(explanation, [paper], evidence)
+
+    assert len(normalized.research_gap_candidates) == 1
+    gap = normalized.research_gap_candidates[0]
+    assert gap.evidence_ids == [gap_card.id]
+    assert gap.paper_ids == [paper.id]
+    assert "扩大检索" in gap.scope
+    assert any("研究空白由已验证的候选裁决补全" in item for item in normalized.scope_warnings)
+
+
 def test_mechanism_atomicity_rejects_multiple_operations() -> None:
     atomic = AtomicClaimDraft(
         claim_type="mechanism",
@@ -233,9 +281,14 @@ def test_mechanism_atomicity_rejects_multiple_operations() -> None:
         claim_type="mechanism",
         text="The method quantizes keys and prunes value tokens.",
     )
+    bundled_architecture = AtomicClaimDraft(
+        claim_type="mechanism",
+        text="CLLA integrates dimension reduction, layer sharing, and quantization.",
+    )
 
     assert _is_atomic_claim(atomic) is True
     assert _is_atomic_claim(bundled) is False
+    assert _is_atomic_claim(bundled_architecture) is False
 
 
 def test_wrong_model_evidence_id_cannot_override_claim_alignment() -> None:
@@ -302,6 +355,34 @@ def test_result_claim_requires_matching_numbers() -> None:
     assert wrong == []
     assert correct
     assert correct[0].relation == "supports"
+
+
+def test_exact_same_paper_quote_survives_evidence_type_mismatch() -> None:
+    paper = PaperRecord(
+        id="paper-cross-language",
+        title="A Cache Study",
+        abstract="The practical algorithm reports promising performance on LongBench.",
+        source="fixture",
+        source_kind="academic",
+        access_type="abstract_only",
+    )
+    evidence = _build_evidence("KV cache compression", [paper])
+    card = evidence[0]
+    assert "result" not in card.evidence_types
+
+    matches = _match_claim_evidence(
+        "该算法在 LongBench 上报告了有前景的性能。",
+        "result",
+        evidence,
+        {paper.id: paper},
+        [card.id],
+        [paper.id],
+        [card.excerpt],
+    )
+
+    assert matches
+    assert matches[0].card.id == card.id
+    assert matches[0].relation == "supports"
 
 
 def test_related_concepts_stay_out_of_claim_ledger() -> None:

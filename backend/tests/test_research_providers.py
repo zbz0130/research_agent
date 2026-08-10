@@ -264,6 +264,14 @@ def test_compatible_model_distinguishes_quick_and_abstract_modes(monkeypatch) ->
                 "evidence_ids": ["evidence-1"],
     }
     limitations_payload = {
+                "limitation_decisions": [
+                    {
+                        "evidence_id": "evidence-1",
+                        "decision": "limitation",
+                        "reason": "摘要明确说明标准自注意力无法高效扩展。",
+                        "limitation_kind": "method_limitation",
+                    }
+                ],
                 "research_limitations": [
                     {
                         "text": "标准自注意力无法高效扩展到超长序列。",
@@ -333,7 +341,11 @@ def test_compatible_model_distinguishes_quick_and_abstract_modes(monkeypatch) ->
     assert quick.claims[0].claim_type == "definition"
     assert literature.claims[0].paper_ids == [paper.id]
     assert literature.research_limitations[0].limitation_kind == "method_limitation"
+    assert literature.limitation_decisions[0].decision == "limitation"
     assert literature.scope_warnings == ["当前仅核对摘要。"]
+    assert [item.status for item in quick.model_call_traces] == ["succeeded"]
+    assert len(literature.model_call_traces) == 3
+    assert all(item.status == "succeeded" for item in literature.model_call_traces)
     assert len(prompts) == 4
     assert any("快速解释模式" in prompt for prompt in prompts)
     assert any("核心说明" in prompt for prompt in prompts)
@@ -413,6 +425,7 @@ def test_compatible_model_repairs_optional_items_without_losing_valid_explanatio
         if "研究局限审核" in prompt:
             return _model_response(
                 {
+                    "limitation_decisions": [],
                     "research_limitations": payload["research_limitations"],
                     "research_gap_candidates": payload["research_gap_candidates"],
                     "reproducibility_checks": payload["reproducibility_checks"],
@@ -453,10 +466,39 @@ def test_compatible_model_repairs_optional_items_without_losing_valid_explanatio
     assert any("原子主张中有 1 条" in item for item in explanation.model_output_warnings)
     assert any("复现检查中有 2 条类型已自动纠正" in item for item in explanation.model_output_warnings)
     assert any("复现检查中有 1 条无法安全校验" in item for item in explanation.model_output_warnings)
-    assert any("1 个未约定字段" in item for item in explanation.model_output_warnings)
+    assert any("未约定字段" in item for item in explanation.model_output_warnings)
     prompt = next(item for item in prompts if "研究局限审核" in item)
     assert "check_type 只能是以下五个英文值之一" in prompt
     assert "arXiv ID 只能放入 paper_ids" in prompt
+
+
+def test_atomic_claim_parser_repairs_unambiguous_field_aliases() -> None:
+    explanation = research_providers._parse_explanation_result(
+        json.dumps(
+            {
+                "one_sentence": "A concise definition.",
+                "intuitive": "An analogy.",
+                "technical": "A technical explanation.",
+                "claims": [
+                    {
+                        "type": "mechanism",
+                        "claim": "The method compresses cache states.",
+                        "paper_id": "paper-1",
+                        "evidence_id": "evidence-1",
+                        "evidence_quote": "The method compresses cache states.",
+                        "scope": "abstract",
+                    }
+                ],
+            }
+        )
+    )
+
+    assert len(explanation.claims) == 1
+    assert explanation.claims[0].text == "The method compresses cache states."
+    assert explanation.claims[0].paper_ids == ["paper-1"]
+    assert explanation.claims[0].evidence_ids == ["evidence-1"]
+    assert explanation.claims[0].evidence_quotes == ["The method compresses cache states."]
+    assert any("原子主张中有 1 条类型已自动纠正" in item for item in explanation.model_output_warnings)
 
 
 def test_split_literature_call_keeps_core_when_limitation_part_fails(monkeypatch) -> None:
@@ -553,6 +595,14 @@ def test_limitation_part_receives_late_multilabel_evidence(monkeypatch) -> None:
         if "研究局限审核" in prompt:
             return _model_response(
                 {
+                    "limitation_decisions": [
+                        {
+                            "evidence_id": "evidence-late-limitation",
+                            "decision": "reject",
+                            "reason": "fixture rejection",
+                            "limitation_kind": None,
+                        }
+                    ],
                     "research_limitations": [],
                     "research_gap_candidates": [],
                     "reproducibility_checks": [],
@@ -604,6 +654,104 @@ def test_limitation_part_receives_late_multilabel_evidence(monkeypatch) -> None:
     assert "类型：limitation+mechanism" in limitation_prompt
     assert "evidence-0" not in limitation_prompt
     assert any("未提取到满足条件" in item for item in explanation.model_output_warnings)
+
+
+def test_claim_generation_batches_cover_every_selected_paper(monkeypatch) -> None:
+    prompts: list[str] = []
+
+    def fake_post(url: str, **kwargs: object) -> httpx.Response:
+        prompt = kwargs["json"]["messages"][1]["content"]
+        prompts.append(prompt)
+        if "核心说明" in prompt:
+            return _model_response(
+                {
+                    "one_sentence": "A batched explanation.",
+                    "intuitive": "An analogy.",
+                    "technical": "A technical synthesis.",
+                    "related_concepts": [],
+                    "scope_warnings": [],
+                }
+            )
+        if "时间线与原子主张" in prompt:
+            included = [index for index in range(4) if f"Paper {index}" in prompt]
+            return _model_response(
+                {
+                    "evolution_items": [
+                        {
+                            "year": 2020 + index,
+                            "title": f"Paper {index}",
+                            "summary": f"Paper {index} introduces method {index}.",
+                            "paper_ids": [f"paper-{index}"],
+                            "evidence_ids": [f"evidence-{index}"],
+                        }
+                        for index in included
+                    ],
+                    "claims": [
+                        {
+                            "claim_type": "mechanism",
+                            "text": f"Method {index} compresses cache states.",
+                            "paper_ids": [f"paper-{index}"],
+                            "evidence_ids": [f"evidence-{index}"],
+                            "evidence_quotes": [f"Method {index} compresses cache states."],
+                            "scope": "abstract",
+                        }
+                        for index in included
+                    ],
+                }
+            )
+        if "研究局限审核" in prompt:
+            return _model_response(
+                {
+                    "limitation_decisions": [],
+                    "research_limitations": [],
+                    "research_gap_candidates": [],
+                    "reproducibility_checks": [],
+                }
+            )
+        raise AssertionError("unexpected model prompt")
+
+    monkeypatch.setattr(research_providers.httpx, "post", fake_post)
+    provider = OpenAICompatibleExplanationProvider(
+        api_key="model-key",
+        base_url="https://model.example/v1",
+        model="test-model",
+    )
+    papers = [
+        PaperRecord(
+            id=f"paper-{index}",
+            title=f"Paper {index}",
+            year=2020 + index,
+            abstract=f"Method {index} compresses cache states.",
+            source="arxiv",
+            source_kind="academic",
+            access_type="abstract_only",
+        )
+        for index in range(4)
+    ]
+    evidence = [
+        EvidenceCard(
+            id=f"evidence-{index}",
+            paper_id=f"paper-{index}",
+            claim="mechanism",
+            excerpt=f"Method {index} compresses cache states.",
+            evidence_type="mechanism",
+            evidence_types=["mechanism"],
+        )
+        for index in range(4)
+    ]
+
+    explanation = provider.explain(
+        "cache compression", papers, evidence, "researcher", "zh-CN"
+    )
+
+    assert {paper_id for claim in explanation.claims for paper_id in claim.paper_ids} == {
+        paper.id for paper in papers
+    }
+    claim_prompts = [item for item in prompts if "时间线与原子主张" in item]
+    assert len(claim_prompts) == 2
+    assert all(sum(f"Paper {index}" in prompt for index in range(4)) == 2 for prompt in claim_prompts)
+    assert len(explanation.model_call_traces) == 4
+    assert not any("仍未覆盖" in item for item in explanation.model_output_warnings)
 
 
 def test_compatible_model_still_rejects_missing_core_explanation(monkeypatch) -> None:

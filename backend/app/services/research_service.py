@@ -34,6 +34,7 @@ from app.research_schemas import (
     InnovationCandidate,
     PaperRecord,
     ResearchBrief,
+    ResearchGapCandidate,
     SearchQueryPlan,
     GraphOperation,
     GraphPatch,
@@ -1073,7 +1074,9 @@ def _has_explicit_negative_outcome(text: str) -> bool:
     signals = (
         "fails to", "failure", "degrad", "impossible", "cannot", "unable to",
         "information loss", "at the cost of", "incurs overhead", "suffers from",
-        "remains a limitation", "is a limitation", "drawback", "bottleneck",
+        "struggle to", "struggles to", "performance drop", "performance loss",
+        "undesired output", "neglect the", "remains a limitation", "is a limitation",
+        "drawback", "bottleneck",
         "not been investigated", "little systematic guidance", "限制", "失败", "退化",
         "无法", "不可能", "丢失", "代价", "尚未研究", "缺乏系统",
     )
@@ -1264,6 +1267,13 @@ def _is_atomic_claim(draft: object) -> bool:
         ("merge", "合并"),
         ("project", "投影"),
         ("discard", "丢弃"),
+        ("reduc", "缩减", "降维"),
+        ("shar", "共享"),
+        ("reorder", "重排"),
+        ("calibrat", "校准"),
+        ("factor", "分解", "svd"),
+        ("threshold", "阈值"),
+        ("protect", "保护"),
     )
     operation_count = sum(
         any(signal in normalized for signal in family)
@@ -1423,7 +1433,38 @@ def _normalize_evolution_provenance(
         )
         for item in explanation.reproducibility_checks[:20]
     ]
+    limitation_candidate_ids = {
+        card.id
+        for card in evidence
+        if set(card.evidence_types or [card.evidence_type])
+        & {"limitation", "future_work"}
+    }
+    normalized_decisions = [
+        item
+        for item in explanation.limitation_decisions[:30]
+        if item.evidence_id in limitation_candidate_ids
+    ]
     scope_warnings = list(explanation.scope_warnings)
+    materialized_gap_ids = {
+        evidence_id
+        for item in normalized_gaps
+        for evidence_id in item.evidence_ids
+    }
+    recovered_gap_count = 0
+    for decision in normalized_decisions:
+        if decision.decision != "research_gap" or decision.evidence_id in materialized_gap_ids:
+            continue
+        card = evidence_by_id[decision.evidence_id]
+        normalized_gaps.append(
+            ResearchGapCandidate(
+                text=decision.reason,
+                scope="仅基于本次检索到的论文摘要，需扩大检索范围进一步验证。",
+                paper_ids=[card.paper_id],
+                evidence_ids=[card.id],
+            )
+        )
+        materialized_gap_ids.add(card.id)
+        recovered_gap_count += 1
     dropped_limitations = len(explanation.research_limitations) - len(normalized_limitations)
     if dropped_limitations:
         scope_warnings.append(
@@ -1433,6 +1474,31 @@ def _normalize_evolution_provenance(
         scope_warnings.append(
             f"有 {rejected_non_atomic_claims} 条主张同时包含多个句子或机制操作，已拒绝进入主张账本。"
         )
+    decided_ids = {item.evidence_id for item in normalized_decisions}
+    missing_decisions = limitation_candidate_ids - decided_ids
+    if missing_decisions:
+        scope_warnings.append(
+            f"有 {len(missing_decisions)} 张限制候选证据卡没有获得模型接受/拒绝裁决。"
+        )
+    accepted_limitation_ids = {
+        item.evidence_id
+        for item in normalized_decisions
+        if item.decision == "limitation"
+    }
+    materialized_limitation_ids = {
+        evidence_id
+        for item in normalized_limitations
+        for evidence_id in item.evidence_ids
+    }
+    missing_accepted_limitations = accepted_limitation_ids - materialized_limitation_ids
+    if missing_accepted_limitations:
+        scope_warnings.append(
+            f"有 {len(missing_accepted_limitations)} 张已接受的局限证据未形成合格的结构化局限。"
+        )
+    if recovered_gap_count:
+        scope_warnings.append(
+            f"有 {recovered_gap_count} 条研究空白由已验证的候选裁决补全结构字段。"
+        )
     return explanation.model_copy(
         update={
             "evolution_items": normalized,
@@ -1440,6 +1506,7 @@ def _normalize_evolution_provenance(
             "research_limitations": normalized_limitations,
             "research_gap_candidates": normalized_gaps,
             "reproducibility_checks": normalized_checks,
+            "limitation_decisions": normalized_decisions,
             "scope_warnings": scope_warnings[:12],
         }
     )
@@ -1456,13 +1523,17 @@ def _split_abstract_sentences(abstract: str) -> list[str]:
 _ABSTRACT_TYPE_PATTERNS: dict[str, tuple[str, ...]] = {
     "future_work": (
         "future work", "future research", "further work", "remains open",
-        "open problem", "next step", "未来工作", "后续工作", "有待研究", "仍待解决",
+        "open problem", "next step", "not been investigated", "has not been investigated",
+        "remains unexplored", "underexplored", "little systematic guidance",
+        "未来工作", "后续工作", "有待研究", "仍待解决", "尚未研究", "缺乏系统指导",
     ),
     "limitation": (
         "limitation", "limited by", "trade-off", "tradeoff", "drawback",
         "fails to", "failure", "degrad", "completely ignored", "impossible",
         "cannot", "unable to", "discard", "information loss", "at the cost of",
-        "incurs overhead", "suffers from", "限制", "失败", "退化", "无法", "丢失", "代价", "权衡",
+        "incurs overhead", "suffers from", "struggle to", "struggles to",
+        "performance drop", "performance loss", "undesired output", "neglect the",
+        "限制", "失败", "退化", "无法", "丢失", "代价", "权衡", "性能下降",
     ),
     "result": (
         "we show", "we find", "we demonstrate", "results show", "outperform",
@@ -1635,12 +1706,16 @@ def _passes_claim_evidence_gate(
     evidence_numbers = _extract_numbers(card.excerpt)
     numbers_match = not claim_numbers or claim_numbers <= evidence_numbers
     if claim_type == "result":
+        if quote_match:
+            return numbers_match
         if "result" not in card_types:
             return False
         return numbers_match if claim_numbers else quote_match
     if claim_type == "mechanism":
         if claim_numbers and not numbers_match:
             return False
+        if quote_match:
+            return True
         return (
             "mechanism" in card_types
             and (quote_match or (preferred and overlap_count >= 2) or overlap_count >= 4)
@@ -1660,7 +1735,9 @@ def _passes_claim_evidence_gate(
     if claim_type == "research_gap":
         return (quote_match or preferred) and bool(card_types & {"future_work", "limitation"})
     if claim_type == "definition":
-        return (quote_match or overlap_count >= 2) and bool(card_types & {"definition", "context"})
+        if quote_match:
+            return True
+        return overlap_count >= 2 and bool(card_types & {"definition", "context"})
     return False
 
 

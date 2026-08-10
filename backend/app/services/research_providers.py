@@ -21,6 +21,8 @@ from app.research_schemas import (
     ExplanationResult,
     FutureWorkSignal,
     InnovationCandidate,
+    LimitationDecision,
+    ModelCallTrace,
     PaperRecord,
     ReproducibilityCheck,
     ResearchGapCandidate,
@@ -1029,6 +1031,7 @@ class OpenAICompatibleExplanationProvider:
 evolution_items、research_limitations、research_gap_candidates、reproducibility_checks、
 limitations、evidence_ids 必须返回空数组。不要返回 model_output_warnings。
 """.strip()
+        started_at = time.perf_counter()
         payload = self._request_explanation_part(
             prompt,
             system="你是一名善于建立直觉、同时明确知识边界的科研教师。",
@@ -1036,9 +1039,26 @@ limitations、evidence_ids 必须返回空数组。不要返回 model_output_war
             part_label="快速解释",
         )
         try:
-            return _parse_explanation_result(json.dumps(payload, ensure_ascii=False))
+            explanation = _parse_explanation_result(json.dumps(payload, ensure_ascii=False))
         except (TypeError, ValueError, AttributeError) as exc:
             raise ProviderUnavailable("快速解释模型返回内容缺少必要字段或无法解析。") from exc
+        return explanation.model_copy(
+            update={
+                "model_call_traces": [
+                    ModelCallTrace(
+                        part="快速解释",
+                        status="succeeded",
+                        duration_ms=round((time.perf_counter() - started_at) * 1000),
+                        returned_fields=sorted(payload),
+                        item_counts={
+                            key: len(value)
+                            for key, value in payload.items()
+                            if isinstance(value, list)
+                        },
+                    )
+                ]
+            }
+        )
 
     def _explain_literature(
         self,
@@ -1048,15 +1068,11 @@ limitations、evidence_ids 必须返回空数组。不要返回 model_output_war
         audience: str,
         language: str,
     ) -> ExplanationResult:
-        paper_payload = _format_paper_payload(papers, abstract_limit=2200)
-        claim_evidence = _select_balanced_evidence(
-            evidence,
-            limit=24,
-            preferred_types={"definition", "mechanism", "result"},
-        )
+        selected_papers = list(papers[:10])
+        paper_payload = _format_paper_payload(selected_papers, abstract_limit=2200)
         limitation_evidence = _select_balanced_evidence(
             evidence,
-            limit=20,
+            limit=30,
             preferred_types={"limitation", "future_work"},
             preferred_only=True,
         )
@@ -1079,33 +1095,24 @@ limitations、evidence_ids 必须返回空数组。不要返回 model_output_war
 {paper_payload}
 """.strip()
 
-        claims_prompt = f"""
-你负责 WishForge 文献解释的“时间线与原子主张”部分。研究概念：“{concept}”；语言：{language}。
-仅依据下方论文摘要和证据卡，不得声称阅读过全文。
-
-只返回 JSON 对象，且只包含 evolution、evolution_items、claims、evidence_ids。
-要求：
-1. evolution 按年份概括方法演进；evolution_items 每项包含 year、title、summary、paper_ids、evidence_ids；
-2. claims 每条只能表达一个可独立核验的事实，claim_type 只能是 definition、mechanism、result、evolution；
-3. 论文特定的 mechanism、result、evolution 每条只能使用一个 paper_id；
-4. mechanism 每条只描述一个主要操作；量化、剪枝、淘汰、token 保留等不同操作必须拆开；
-5. 数字、压缩率、速度和准确率单独写成 result，不能混入 mechanism；
-6. 论文特定主张必须提供 evidence_quotes，逐字复制 1 至 3 条摘要原句，禁止翻译、改写或拼接；
-7. paper_ids 和 evidence_ids 只能使用下方出现的 ID；没有证据的通用定义允许 ID 为空，但 scope 必须说明；
-8. “首次、首个、最优、保证、无损”等强表述只有在逐字证据中明确出现对应含义时才能使用。
-
-论文及摘要：
-{paper_payload}
-
-证据卡：
-{_format_evidence_payload(claim_evidence)}
-""".strip()
-
         limitations_prompt = f"""
 你负责 WishForge 文献解释的“研究局限审核”部分。研究概念：“{concept}”；语言：{language}。
-这不是通用解释任务。请逐张审核限制候选证据卡，只提取当前研究方法、理论或实验本身的明确局限。
+这不是通用解释任务。请逐张审核限制候选证据卡，不得跳过任何候选。
 
-只返回 JSON 对象，且必须包含：research_limitations、research_gap_candidates、reproducibility_checks。
+只返回 JSON 对象，且必须包含：limitation_decisions、research_limitations、research_gap_candidates、reproducibility_checks。
+
+limitation_decisions 必须对下方每张候选卡各返回一项，包含：
+- evidence_id：候选卡 ID；
+- decision：只能是 limitation、research_gap、reject；
+- reason：说明为什么接受为局限、接受为空白，或拒绝；
+- limitation_kind：decision=limitation 时填写合法局限类型，否则为 null。
+
+判定口径：
+1. 当前论文指出“既有方法在某条件下失败、退化、产生额外代价或无法适用”，属于 method_limitation/failure_mode/applicability_boundary；
+2. 理论上明确存在不可能性或适用边界，属于 theoretical_limit；
+3. 明确写出尚未研究、缺乏系统指导或仍未解决，但没有具体方法负面后果，属于 research_gap；
+4. 仅仅介绍方法、说存在 trade-off 却没有负面后果，或描述 KV cache 本身的常规内存代价，必须 reject；
+5. 局限可以是论文作者对既有研究路线的明确批评，不要求必须是作者自己方法的缺陷。
 
 research_limitations 要求：
 1. 每项必须包含 text、limitation_kind、target、condition、consequence、paper_ids、evidence_ids、explicitness；
@@ -1113,34 +1120,28 @@ research_limitations 要求：
 3. paper_ids 和 evidence_ids 必须来自下方资料，且证据卡必须属于同一篇论文；
 4. 只有摘要原句明确描述负面后果时才能标记 explicit；只有“trade-off/challenge”而没有负面后果时不要生成；
 5. “仅阅读摘要、检索数量有限、需要人工核验”不是研究局限，不得写入；
-6. 找不到合格局限时返回空数组，不得猜测。
+6. 只为 decision=limitation 的候选生成，找不到合格局限时返回空数组，不得猜测。
 
 合法示例：
 {{"research_limitations":[{{"text":"短上下文校准会造成长上下文通道分布估计不足。","limitation_kind":"applicability_boundary","target":"KV cache 量化校准","condition":"使用短上下文校准数据时","consequence":"长上下文中的低频通道分布未被覆盖并造成性能损失","paper_ids":["paper-id"],"evidence_ids":["evidence-id"],"explicitness":"explicit"}}],"research_gap_candidates":[],"reproducibility_checks":[]}}
 
-research_gap_candidates 只能写当前检索范围内需要扩大检索验证的候选，不得声称整个领域不存在相关工作。
+research_gap_candidates 只为 decision=research_gap 的候选生成，只能写当前检索范围内需要扩大检索验证的候选，不得声称整个领域不存在相关工作。
 reproducibility_checks 中的 check_type 只能是以下五个英文值之一：code、data、environment、license、benchmark；
 “not verified”“unknown”“unverified”不是 check_type，arXiv ID 只能放入 paper_ids；无法判断时不生成。
 
 论文及摘要：
-{_format_paper_payload(papers, abstract_limit=1600)}
+{_format_paper_payload(selected_papers, abstract_limit=1600)}
 
 限制候选证据卡（已优先完整提供）：
 {_format_evidence_payload(limitation_evidence) or '没有通过初步类型筛选的限制候选证据卡'}
 """.strip()
 
-        requests = {
+        requests: dict[str, tuple[str, str, float, str]] = {
             "core": (
                 core_prompt,
                 "你负责清晰、准确的科研核心解释，不处理其他结构化任务。",
                 0.2,
                 "核心解释",
-            ),
-            "claims": (
-                claims_prompt,
-                "你负责可逐条核验的时间线和原子主张，不处理研究局限。",
-                0.1,
-                "时间线与原子主张",
             ),
             "limitations": (
                 limitations_prompt,
@@ -1149,40 +1150,113 @@ reproducibility_checks 中的 check_type 只能是以下五个英文值之一：
                 "研究局限审核",
             ),
         }
+
+        paper_batches = [
+            selected_papers[index : index + 2]
+            for index in range(0, len(selected_papers), 2)
+        ]
+        for batch_index, batch in enumerate(paper_batches, 1):
+            batch_paper_ids = {paper.id for paper in batch}
+            batch_evidence = _select_balanced_evidence(
+                [card for card in evidence if card.paper_id in batch_paper_ids],
+                limit=16,
+                preferred_types={"definition", "mechanism", "result"},
+            )
+            batch_prompt = f"""
+你负责 WishForge 文献解释的“时间线与原子主张（批次 {batch_index}/{len(paper_batches)}）”部分。
+研究概念：“{concept}”；语言：{language}。本批只有 {len(batch)} 篇论文。
+仅依据下方论文摘要和证据卡，不得声称阅读过全文，也不得引用其他论文。
+
+只返回 JSON 对象，且只包含 evolution_items、claims。
+要求：
+1. 每篇论文恰好生成一个 evolution_item，包含 year、title、summary、paper_ids、evidence_ids；summary 要说明它解决的痛点、主要方法和相对前序路线的变化，不能只是复述标题；
+2. 对每篇摘要至少生成 2 条、至多 3 条原子 claims；优先保留一个核心机制和一个最重要结果。如果摘要确实只有一个可核验事实，允许只生成 1 条，但不得完全遗漏该论文；
+3. claims 每项必须且只能使用这些字段：claim_type、text、paper_ids、evidence_ids、evidence_quotes、scope。不得把 text 写成 claim/content，不得把数组字段写成单个字符串；
+4. claim_type 只能是 definition、mechanism、result；时间演变只写入 evolution_items，不要生成 evolution 类型主张。每条只能表达一个可独立核验事实；
+5. 每条论文特定主张只能使用一个 paper_id；mechanism 每条只描述一个主要操作，不同操作必须拆开；
+6. 数字、压缩率、速度和准确率必须各自写成独立 result，不能混入 mechanism；数值和单位必须保持摘要原句的表达，禁止自行换算倒数、百分比或新范围；
+7. 每条主张必须提供 evidence_quotes，逐字复制 1 至 2 条摘要完整原句，禁止翻译、改写或拼接；
+8. paper_ids 和 evidence_ids 只能使用下方出现的 ID；
+9. “首次、首个、最优、保证、无损”等强表述只有在逐字证据中明确出现对应含义时才能使用；只有“存在固有局限/存在挑战”但没有具体对象和后果的模糊句子不要生成主张。
+
+claims 合法示例：
+{{"claim_type":"mechanism","text":"SQuat 约束量化误差与查询子空间正交。","paper_ids":["paper-id"],"evidence_ids":["evidence-id"],"evidence_quotes":["逐字复制的英文摘要完整原句。"],"scope":"论文摘要中的机制描述"}}
+
+论文及摘要：
+{_format_paper_payload(batch, abstract_limit=2400)}
+
+证据卡：
+{_format_evidence_payload(batch_evidence)}
+""".strip()
+            name = f"claims_{batch_index}"
+            requests[name] = (
+                batch_prompt,
+                "你负责逐篇生成可核验的时间线条目和原子主张，不处理研究局限。",
+                0.1,
+                f"时间线与原子主张（批次 {batch_index}/{len(paper_batches)}）",
+            )
+
         parts: dict[str, dict[str, object]] = {}
         failures: dict[str, ProviderUnavailable] = {}
-        with ThreadPoolExecutor(max_workers=3, thread_name_prefix="wishforge-explanation") as executor:
-            future_names = {
-                executor.submit(
+        traces: dict[str, ModelCallTrace] = {}
+        with ThreadPoolExecutor(
+            max_workers=min(8, len(requests)),
+            thread_name_prefix="wishforge-explanation",
+        ) as executor:
+            future_names: dict[object, tuple[str, float]] = {}
+            for name, (prompt, system, temperature, part_label) in requests.items():
+                started_at = time.perf_counter()
+                future = executor.submit(
                     self._request_explanation_part,
                     prompt,
                     system=system,
                     temperature=temperature,
                     part_label=part_label,
-                ): name
-                for name, (prompt, system, temperature, part_label) in requests.items()
-            }
+                )
+                future_names[future] = (name, started_at)
             for future in as_completed(future_names):
-                name = future_names[future]
+                name, started_at = future_names[future]
+                duration_ms = round((time.perf_counter() - started_at) * 1000)
                 try:
-                    parts[name] = future.result()
+                    part = future.result()
+                    parts[name] = part
+                    traces[name] = ModelCallTrace(
+                        part=requests[name][3],
+                        status="succeeded",
+                        duration_ms=duration_ms,
+                        returned_fields=sorted(part),
+                        item_counts={
+                            key: len(value)
+                            for key, value in part.items()
+                            if isinstance(value, list)
+                        },
+                    )
                 except ProviderUnavailable as exc:
                     failures[name] = exc
+                    traces[name] = ModelCallTrace(
+                        part=requests[name][3],
+                        status="failed",
+                        duration_ms=duration_ms,
+                        message=str(exc),
+                    )
 
         if "core" in failures or "core" not in parts:
             raise failures.get("core") or ProviderUnavailable("核心解释调用没有返回结果。")
 
         warnings: list[str] = []
-        expected_fields = {
+        expected_fields: dict[str, tuple[str, ...]] = {
             "core": ("one_sentence", "intuitive", "technical", "related_concepts", "scope_warnings"),
-            "claims": ("evolution", "evolution_items", "claims", "evidence_ids"),
             "limitations": (
+                "limitation_decisions",
                 "research_limitations",
                 "research_gap_candidates",
                 "reproducibility_checks",
             ),
+            **{
+                f"claims_{index}": ("evolution_items", "claims")
+                for index in range(1, len(paper_batches) + 1)
+            },
         }
-        merged: dict[str, object] = {}
         for name, fields in expected_fields.items():
             part = parts.get(name, {})
             if name in failures:
@@ -1192,23 +1266,61 @@ reproducibility_checks 中的 check_type 只能是以下五个英文值之一：
                 warnings.append(
                     f"{requests[name][3]}调用返回了 {len(unknown_fields)} 个未约定字段，系统已忽略。"
                 )
-            for field in fields:
-                if field not in part:
-                    if name in parts:
+            if name in parts:
+                for field in fields:
+                    if field not in part:
                         warnings.append(f"{requests[name][3]}调用未返回 {field} 字段，系统已按空值处理。")
-                    merged[field] = [] if field not in _EXPLANATION_CORE_FIELDS else None
-                else:
-                    merged[field] = part[field]
+
+        core_part = parts["core"]
+        merged: dict[str, object] = {
+            field: core_part.get(field)
+            for field in expected_fields["core"]
+        }
+        evolution_items: list[object] = []
+        claims: list[object] = []
+        for index in range(1, len(paper_batches) + 1):
+            part = parts.get(f"claims_{index}", {})
+            if isinstance(part.get("evolution_items"), list):
+                evolution_items.extend(part["evolution_items"])
+            if isinstance(part.get("claims"), list):
+                claims.extend(part["claims"])
+        merged["evolution_items"] = evolution_items
+        merged["claims"] = claims
+        merged["evolution"] = [
+            f"{item.get('year') or 'n.d.'}：{item.get('title', '')} — {item.get('summary', '')}"
+            for item in evolution_items
+            if isinstance(item, dict)
+        ]
+        linked_ids: list[str] = []
+        for item in [*evolution_items, *claims]:
+            if isinstance(item, dict) and isinstance(item.get("evidence_ids"), list):
+                linked_ids.extend(
+                    value for value in item["evidence_ids"] if isinstance(value, str)
+                )
+        merged["evidence_ids"] = list(dict.fromkeys(linked_ids))[:40]
+        limitation_part = parts.get("limitations", {})
+        for field in expected_fields["limitations"]:
+            merged[field] = limitation_part.get(field, [])
 
         if "limitations" in parts and not parts["limitations"].get("research_limitations"):
             warnings.append("研究局限审核调用未提取到满足条件的结构化局限。")
+        decision_ids = {
+            item.get("evidence_id")
+            for item in limitation_part.get("limitation_decisions", [])
+            if isinstance(item, dict)
+        } if isinstance(limitation_part.get("limitation_decisions"), list) else set()
+        missing_decisions = [card.id for card in limitation_evidence if card.id not in decision_ids]
+        if missing_decisions:
+            warnings.append(
+                f"研究局限审核遗漏了 {len(missing_decisions)} 张候选证据卡的接受/拒绝裁决。"
+            )
         merged["limitations"] = []
         try:
             explanation = _parse_explanation_result(json.dumps(merged, ensure_ascii=False))
         except (TypeError, ValueError, AttributeError) as exc:
             raise ProviderUnavailable("拆分后的解释模型结果缺少必要字段或无法合并。") from exc
 
-        if "claims" in failures or not explanation.claims:
+        if not explanation.claims:
             fallback_claim = AtomicClaimDraft(
                 claim_type="definition",
                 text=explanation.one_sentence,
@@ -1218,11 +1330,25 @@ reproducibility_checks 中的 check_type 只能是以下五个英文值之一：
                 scope="核心解释生成的通用定义；原子主张调用不可用或未返回主张",
             )
             explanation = explanation.model_copy(update={"claims": [fallback_claim]})
+        covered_paper_ids = {
+            paper_id
+            for claim in explanation.claims
+            for paper_id in claim.paper_ids
+        }
+        missing_claim_papers = [
+            paper.title for paper in selected_papers if paper.id not in covered_paper_ids
+        ]
+        if missing_claim_papers:
+            warnings.append(
+                f"原子主张仍未覆盖 {len(missing_claim_papers)} 篇入选论文："
+                + "；".join(missing_claim_papers[:4])
+            )
         all_warnings = list(dict.fromkeys([*explanation.model_output_warnings, *warnings]))[:20]
         return explanation.model_copy(
             update={
                 "limitations": [item.text for item in explanation.research_limitations],
                 "model_output_warnings": all_warnings,
+                "model_call_traces": [traces[name] for name in requests if name in traces],
             }
         )
 
@@ -1444,6 +1570,7 @@ _EXPLANATION_ITEM_FIELDS = {
     "research_limitations": (ResearchLimitation, 20),
     "research_gap_candidates": (ResearchGapCandidate, 20),
     "reproducibility_checks": (ReproducibilityCheck, 20),
+    "limitation_decisions": (LimitationDecision, 30),
 }
 _REPRODUCIBILITY_CHECK_TYPES = {"code", "data", "environment", "license", "benchmark"}
 _EXPLANATION_FIELD_LABELS = {
@@ -1452,6 +1579,7 @@ _EXPLANATION_FIELD_LABELS = {
     "research_limitations": "研究局限",
     "research_gap_candidates": "研究空白候选",
     "reproducibility_checks": "复现检查",
+    "limitation_decisions": "局限候选裁决",
     "evolution": "演变过程",
     "scope_warnings": "调研范围提醒",
     "related_concepts": "相关概念",
@@ -1557,6 +1685,9 @@ def _clean_model_item_list(
             dropped += 1
             continue
         candidate = {key: raw_item[key] for key in model_fields if key in raw_item}
+        if field == "claims":
+            candidate, changed = _normalize_atomic_claim_item(raw_item, candidate)
+            normalized += int(changed)
         if field == "reproducibility_checks":
             candidate, changed = _normalize_reproducibility_check(candidate)
             if candidate is None:
@@ -1575,6 +1706,46 @@ def _clean_model_item_list(
             f"模型返回的{label}中有 {dropped} 条无法安全校验，已忽略；其他解释和主张仍然保留。"
         )
     return cleaned
+
+
+def _normalize_atomic_claim_item(
+    raw_item: dict[str, object],
+    candidate: dict[str, object],
+) -> tuple[dict[str, object], bool]:
+    """Repair common, unambiguous JSON-shape drift without inventing content."""
+
+    repaired = dict(candidate)
+    changed = False
+    if "text" not in repaired:
+        for alias in ("claim", "content", "statement"):
+            value = raw_item.get(alias)
+            if isinstance(value, str) and value.strip():
+                repaired["text"] = value
+                changed = True
+                break
+    if "claim_type" not in repaired:
+        value = raw_item.get("type")
+        if isinstance(value, str) and value.strip():
+            repaired["claim_type"] = value
+            changed = True
+
+    singular_aliases = {
+        "paper_ids": "paper_id",
+        "evidence_ids": "evidence_id",
+        "evidence_quotes": "evidence_quote",
+    }
+    for plural, singular in singular_aliases.items():
+        value = repaired.get(plural)
+        if isinstance(value, str):
+            repaired[plural] = [value]
+            changed = True
+            continue
+        if plural not in repaired:
+            alias_value = raw_item.get(singular)
+            if isinstance(alias_value, str) and alias_value.strip():
+                repaired[plural] = [alias_value]
+                changed = True
+    return repaired, changed
 
 
 def _normalize_reproducibility_check(

@@ -231,6 +231,30 @@ class ReproducibilityCheck(BaseModel):
     paper_ids: list[str] = Field(default_factory=list, max_length=3)
 
 
+class LimitationDecision(BaseModel):
+    """Model adjudication for one limitation/future-work evidence candidate."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    evidence_id: str = Field(min_length=1, max_length=200)
+    decision: Literal["limitation", "research_gap", "reject"]
+    reason: str = Field(min_length=1, max_length=1000)
+    limitation_kind: ResearchLimitationKind | None = None
+
+
+class ModelCallTrace(BaseModel):
+    """Persisted, secret-free diagnostics for one compatible-model subcall."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    part: str = Field(min_length=1, max_length=120)
+    status: Literal["succeeded", "failed"]
+    duration_ms: int = Field(ge=0)
+    returned_fields: list[str] = Field(default_factory=list, max_length=30)
+    item_counts: dict[str, int] = Field(default_factory=dict)
+    message: str = Field(default="", max_length=1000)
+
+
 class ConceptNode(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
@@ -323,6 +347,8 @@ class ExplanationResult(BaseModel):
     research_limitations: list[ResearchLimitation] = Field(default_factory=list, max_length=20)
     research_gap_candidates: list[ResearchGapCandidate] = Field(default_factory=list, max_length=20)
     reproducibility_checks: list[ReproducibilityCheck] = Field(default_factory=list, max_length=20)
+    limitation_decisions: list[LimitationDecision] = Field(default_factory=list, max_length=30)
+    model_call_traces: list[ModelCallTrace] = Field(default_factory=list, max_length=12)
     model_output_warnings: list[str] = Field(default_factory=list, max_length=20)
     scope_warnings: list[str] = Field(default_factory=list, max_length=12)
     related_concepts: list[str] = Field(default_factory=list)
