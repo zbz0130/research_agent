@@ -76,6 +76,13 @@ select { width: 100%; margin-top: 7px; border: 1px solid #34465b; border-radius:
 .evolution-timeline small { display: flex; flex-wrap: wrap; gap: 7px; color: #8295aa; line-height: 1.45; }
 .evolution-timeline a { color: #8fbee7; text-decoration: none; }
 .evolution-timeline a:hover { text-decoration: underline; }
+.structured-note-list { display: grid; gap: 9px; margin-top: 9px; }
+.structured-note { border: 1px solid #3d5067; border-left: 3px solid #7d9fc1; border-radius: 10px; padding: 11px 12px; background: rgba(37, 55, 75, 0.25); }
+.structured-note strong { display: block; color: #dceafa; line-height: 1.5; }
+.structured-note p { margin: 6px 0 !important; color: #aebfd1; font-size: 0.82rem; }
+.structured-note small { color: #8295aa; line-height: 1.5; }
+.limitation-note { border-left-color: #d2a56f; }
+.scope-warning-section { border: 1px dashed rgba(223, 193, 126, 0.45); border-radius: 10px; padding: 11px 13px; background: rgba(223, 193, 126, 0.06); }
 .evidence-link-note { margin: 8px 0 0; color: #8295aa; font-size: 0.78rem; line-height: 1.5; }
 .warning-box { margin-bottom: 18px; border: 1px solid rgba(223, 193, 126, 0.4); border-radius: 12px; padding: 12px 14px; color: #e0c889; background: rgba(223, 193, 126, 0.1); }
 .warning-box ul { margin: 6px 0 0; padding-left: 20px; }

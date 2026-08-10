@@ -5,13 +5,14 @@ from fastapi.testclient import TestClient
 
 from app.config import Settings, get_settings
 from app.main import app
-from app.research_schemas import EvidenceCard, PaperRecord
+from app.research_schemas import EvidenceCard, PaperRecord, SearchQueryPlan
 from app.services import research_providers
 from app.services.research_providers import (
     ArxivSearchProvider,
     OpenAICompatibleExplanationProvider,
     ProviderRateLimited,
     ProviderUnavailable,
+    RuleBasedExplanationProvider,
     SemanticScholarProvider,
 )
 
@@ -139,6 +140,61 @@ def test_compatible_model_plans_an_english_arxiv_query(monkeypatch) -> None:
     assert "注意力机制" in request_json["messages"][1]["content"]
 
 
+def test_compatible_model_uses_first_round_papers_for_feedback_queries(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_post(url: str, **kwargs: object) -> httpx.Response:
+        captured.update({"url": url, **kwargs})
+        return _model_response(
+            {
+                "queries": [
+                    {
+                        "query": "KV cache token pruning",
+                        "purpose": "method_family",
+                        "derived_from_paper_ids": ["paper-1"],
+                    },
+                    {
+                        "query": "agentic coding KV cache",
+                        "purpose": "application",
+                        "derived_from_paper_ids": ["paper-1"],
+                    },
+                ]
+            }
+        )
+
+    monkeypatch.setattr(research_providers.httpx, "post", fake_post)
+    provider = OpenAICompatibleExplanationProvider(
+        api_key="model-key",
+        base_url="https://model.example/v1",
+        model="test-model",
+    )
+    paper = PaperRecord(
+        id="paper-1",
+        title="Structural KV Cache Compression",
+        abstract="The method retains critical code tokens for agentic coding.",
+        source="arxiv",
+        source_kind="academic",
+        access_type="abstract_only",
+    )
+
+    queries = provider.plan_followup_queries(
+        "KV cache compression",
+        [paper],
+        [SearchQueryPlan(query="KV cache compression", purpose="core")],
+        "zh-CN",
+    )
+
+    assert [item.query for item in queries] == [
+        "KV cache token pruning",
+        "agentic coding KV cache",
+    ]
+    assert all(item.phase == "feedback" for item in queries)
+    assert all(item.derived_from_paper_ids == ["paper-1"] for item in queries)
+    request_prompt = captured["json"]["messages"][1]["content"]
+    assert paper.title in request_prompt
+    assert paper.abstract in request_prompt
+
+
 def test_arxiv_provider_spaces_multiple_calls_without_real_wait(monkeypatch) -> None:
     clock_values = iter([10.0, 10.5, 13.0])
     waits: list[float] = []
@@ -168,6 +224,19 @@ def test_compatible_model_distinguishes_quick_and_abstract_modes(monkeypatch) ->
                 "intuitive": "像阅读时把注意力放在关键句上。",
                 "technical": "通过查询、键和值计算加权表示。",
                 "evolution": ["从对齐机制发展到自注意力"],
+                "claims": [
+                    {
+                        "claim_type": "definition",
+                        "text": "注意力机制按相关性聚合信息。",
+                        "paper_ids": [],
+                        "evidence_ids": [],
+                        "scope": "通用知识，待检索核验",
+                    }
+                ],
+                "research_limitations": [],
+                "research_gap_candidates": [],
+                "reproducibility_checks": [],
+                "scope_warnings": ["本次没有检索论文。"],
                 "related_concepts": ["Self-Attention", "Transformer"],
                 "limitations": ["本次没有检索论文，需要后续文献核验。"],
                 "evidence_ids": [],
@@ -177,6 +246,30 @@ def test_compatible_model_distinguishes_quick_and_abstract_modes(monkeypatch) ->
                 "intuitive": "像带着问题查阅资料。",
                 "technical": "摘要资料显示自注意力支持并行序列建模。",
                 "evolution": ["2017：Transformer 将自注意力作为核心结构"],
+                "claims": [
+                    {
+                        "claim_type": "mechanism",
+                        "text": "Transformer 使用自注意力进行序列建模。",
+                        "paper_ids": ["arxiv:1706.03762"],
+                        "evidence_ids": ["evidence-1"],
+                        "scope": "摘要级线索",
+                    }
+                ],
+                "research_limitations": [
+                    {
+                        "text": "标准自注意力无法高效扩展到超长序列。",
+                        "limitation_kind": "method_limitation",
+                        "target": "标准自注意力",
+                        "condition": "超长序列",
+                        "consequence": "计算成本过高",
+                        "paper_ids": ["arxiv:1706.03762"],
+                        "evidence_ids": ["evidence-1"],
+                        "explicitness": "explicit",
+                    }
+                ],
+                "research_gap_candidates": [],
+                "reproducibility_checks": [],
+                "scope_warnings": ["当前仅核对摘要。"],
                 "related_concepts": ["Self-Attention", "Transformer"],
                 "limitations": ["当前仅核对摘要。"],
                 "evidence_ids": ["evidence-1"],
@@ -202,7 +295,10 @@ def test_compatible_model_distinguishes_quick_and_abstract_modes(monkeypatch) ->
         title="Attention Is All You Need",
         authors=["Ashish Vaswani"],
         year=2017,
-        abstract="The Transformer is based solely on attention mechanisms.",
+        abstract=(
+            "The Transformer is based solely on attention mechanisms. "
+            "However, standard self-attention cannot scale efficiently to very long sequences."
+        ),
         url="https://arxiv.org/abs/1706.03762",
         source="arxiv",
         source_kind="academic",
@@ -220,8 +316,14 @@ def test_compatible_model_distinguishes_quick_and_abstract_modes(monkeypatch) ->
 
     assert quick.evidence_ids == []
     assert literature.evidence_ids == ["evidence-1"]
+    assert quick.claims[0].claim_type == "definition"
+    assert literature.claims[0].paper_ids == [paper.id]
+    assert literature.research_limitations[0].limitation_kind == "method_limitation"
+    assert literature.scope_warnings == ["当前仅核对摘要。"]
     assert "快速解释" in prompts[0]
     assert "文献解释" in prompts[1]
+    assert "原子主张" in prompts[1]
+    assert "research_limitations" in prompts[1]
     assert paper.abstract in prompts[1]
 
 
@@ -405,6 +507,14 @@ def test_research_analysis_never_labels_an_interrupted_empty_search_as_no_result
         )
 
     monkeypatch.setattr(SemanticScholarProvider, "search", empty_once_then_raise)
+    monkeypatch.setattr(
+        RuleBasedExplanationProvider,
+        "plan_search_queries",
+        lambda self, concept, language: [
+            SearchQueryPlan(query="agent systems", purpose="core"),
+            SearchQueryPlan(query="autonomous agents", purpose="recent"),
+        ],
+    )
     app.dependency_overrides[get_settings] = lambda: Settings(
         paper_provider="semantic_scholar",
         explanation_provider="rule_based",

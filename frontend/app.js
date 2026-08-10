@@ -240,6 +240,8 @@ const displayLabels = {
   cross_domain_candidate: "跨领域候选",
   shared_problem: "共同问题",
   method_transfer: "方法迁移候选",
+  initial: "首轮",
+  feedback: "摘要反馈",
   not_checked: "未单独检查",
   indirect_metadata: "由论文元数据间接发现",
   checked: "已检查",
@@ -262,6 +264,12 @@ const displayLabels = {
   mechanism: "机制",
   evolution: "演变",
   limitation: "限制",
+  method_limitation: "方法局限",
+  failure_mode: "失败模式",
+  tradeoff: "性能权衡",
+  applicability_boundary: "适用边界",
+  evaluation_limitation: "评估局限",
+  theoretical_limit: "理论极限",
   result: "结果",
   context: "背景",
   future_work: "未来工作",
@@ -270,6 +278,8 @@ const displayLabels = {
   core: "核心术语",
   foundational: "基础术语",
   recent: "近期术语",
+  method_family: "方法族",
+  application: "应用场景",
   limitations: "限制与未来工作",
   comparison: "方法对比",
 };
@@ -553,6 +563,22 @@ function renderExplanation(result) {
   const warnings = result.warnings || [];
   const paperById = new Map((result.papers || []).map((paper) => [paper.id, paper]));
   const evolutionItems = explanation.evolution_items || [];
+  const researchLimitations = explanation.research_limitations || [];
+  const usesStructuredClaims = Boolean(
+    (explanation.claims || []).length
+    || (explanation.scope_warnings || []).length
+    || (explanation.research_gap_candidates || []).length
+    || (explanation.reproducibility_checks || []).length
+  );
+  const limitationHtml = researchLimitations.length
+    ? `<div class="structured-note-list">${researchLimitations.map((item) => `
+        <article class="structured-note limitation-note">
+          <strong>${escapeHtml(item.text)}</strong>
+          <p>${escapeHtml(item.target)}${item.condition ? ` · 条件：${escapeHtml(item.condition)}` : ""}</p>
+          <small>${escapeHtml(displayLabel(item.limitation_kind))} · 后果：${escapeHtml(item.consequence)} · ${escapeHtml((item.evidence_ids || []).length)} 条摘要证据</small>
+        </article>
+      `).join("")}</div>`
+    : `<ul>${(!usesStructuredClaims ? (explanation.limitations || []) : []).map((item) => `<li>${escapeHtml(item)}</li>`).join("") || "<li>当前摘要没有提供满足条件的明确研究局限。</li>"}</ul>`;
   const evolutionHtml = evolutionItems.length
     ? `<ol class="evolution-timeline">${evolutionItems.map((item) => {
         const sources = (item.paper_ids || []).map((paperId) => {
@@ -596,9 +622,24 @@ function renderExplanation(result) {
       </div>
     </section>
     <section class="explanation-section">
-      <p class="section-label">限制与边界</p>
-      <ul>${(explanation.limitations || []).map((item) => `<li>${escapeHtml(item)}</li>`).join("") || "<li>暂无</li>"}</ul>
+      <p class="section-label">当前研究的局限性</p>
+      ${limitationHtml}
     </section>
+    ${(explanation.research_gap_candidates || []).length ? `
+      <section class="explanation-section">
+        <p class="section-label">研究空白候选（待扩大检索）</p>
+        <ul>${explanation.research_gap_candidates.map((item) => `<li>${escapeHtml(item.text)}<small class="ledger-scope">${escapeHtml(item.scope)}</small></li>`).join("")}</ul>
+      </section>` : ""}
+    ${(explanation.reproducibility_checks || []).length ? `
+      <section class="explanation-section">
+        <p class="section-label">复现检查</p>
+        <ul>${explanation.reproducibility_checks.map((item) => `<li>${escapeHtml(item.text)} <span class="tag">${escapeHtml(item.check_type)}</span></li>`).join("")}</ul>
+      </section>` : ""}
+    ${(explanation.scope_warnings || []).length ? `
+      <section class="explanation-section scope-warning-section">
+        <p class="section-label">本次调研范围提醒</p>
+        <ul>${explanation.scope_warnings.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>
+      </section>` : ""}
     <p class="evidence-link-note">本次解释关联 ${escapeHtml((explanation.evidence_ids || []).length)} 张证据卡；摘要级证据仍需人工核对全文。</p>
   `;
 }
@@ -616,7 +657,7 @@ function renderPapers(result) {
     evidenceByPaper.set(item.paper_id, items);
   });
   const queryItems = result.retrieval_queries?.length
-    ? result.retrieval_queries.map((item) => `<span class="query-angle"><b>${escapeHtml(displayLabel(item.purpose))}</b>${escapeHtml(item.query)}</span>`).join("")
+    ? result.retrieval_queries.map((item) => `<span class="query-angle"><b>${escapeHtml(displayLabel(item.phase || "initial"))} · ${escapeHtml(displayLabel(item.purpose))}</b>${escapeHtml(item.query)}</span>`).join("")
     : (result.search_terms || []).map((item) => `<span class="query-angle">${escapeHtml(item)}</span>`).join("");
   const timingItems = (result.stage_timings || []).map((item) =>
     `<span>${escapeHtml(item.label)} ${(Number(item.duration_ms || 0) / 1000).toFixed(1)}s</span>`

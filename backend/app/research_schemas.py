@@ -26,7 +26,25 @@ ArxivNoveltyStatus = Literal[
     "not_checked", "no_direct_match_in_scope", "matched", "unavailable", "checked"
 ]
 EvidenceLocationKind = Literal["abstract", "page", "section", "figure", "table", "url", "unknown"]
-SearchQueryPurpose = Literal["core", "foundational", "recent", "limitations", "comparison"]
+SearchQueryPurpose = Literal[
+    "core",
+    "foundational",
+    "recent",
+    "method_family",
+    "application",
+    "limitations",
+    "comparison",
+]
+SearchQueryPhase = Literal["initial", "feedback"]
+AtomicClaimType = Literal["definition", "mechanism", "result", "evolution"]
+ResearchLimitationKind = Literal[
+    "method_limitation",
+    "failure_mode",
+    "tradeoff",
+    "applicability_boundary",
+    "evaluation_limitation",
+    "theoretical_limit",
+]
 GraphNodeType = Literal["concept", "method", "problem", "paper", "idea", "note"]
 GraphRelation = Literal[
     "is_a",
@@ -144,6 +162,8 @@ class SearchQueryPlan(BaseModel):
 
     query: str = Field(min_length=2, max_length=160)
     purpose: SearchQueryPurpose = "core"
+    phase: SearchQueryPhase = "initial"
+    derived_from_paper_ids: list[str] = Field(default_factory=list, max_length=6)
 
 
 class EvolutionItem(BaseModel):
@@ -156,6 +176,54 @@ class EvolutionItem(BaseModel):
     summary: str = Field(min_length=1, max_length=3000)
     paper_ids: list[str] = Field(default_factory=list, max_length=6)
     evidence_ids: list[str] = Field(default_factory=list, max_length=6)
+
+
+class AtomicClaimDraft(BaseModel):
+    """One independently verifiable statement proposed by the explainer."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    claim_type: AtomicClaimType
+    text: str = Field(min_length=1, max_length=1200)
+    paper_ids: list[str] = Field(default_factory=list, max_length=3)
+    evidence_ids: list[str] = Field(default_factory=list, max_length=3)
+    scope: str = Field(default="", max_length=1000)
+
+
+class ResearchLimitation(BaseModel):
+    """An evidence-backed limitation of a method, theory, or evaluation."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    text: str = Field(min_length=1, max_length=1200)
+    limitation_kind: ResearchLimitationKind
+    target: str = Field(min_length=1, max_length=500)
+    condition: str = Field(default="", max_length=1000)
+    consequence: str = Field(min_length=1, max_length=1000)
+    paper_ids: list[str] = Field(min_length=1, max_length=3)
+    evidence_ids: list[str] = Field(min_length=1, max_length=3)
+    explicitness: Literal["explicit", "inferred"] = "explicit"
+
+
+class ResearchGapCandidate(BaseModel):
+    """A scoped, unverified gap candidate rather than a proven absence."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    text: str = Field(min_length=1, max_length=1200)
+    scope: str = Field(min_length=1, max_length=1000)
+    paper_ids: list[str] = Field(default_factory=list, max_length=3)
+    evidence_ids: list[str] = Field(default_factory=list, max_length=3)
+
+
+class ReproducibilityCheck(BaseModel):
+    """A verification task that must not be confused with a research limitation."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    text: str = Field(min_length=1, max_length=1000)
+    check_type: Literal["code", "data", "environment", "license", "benchmark"]
+    paper_ids: list[str] = Field(default_factory=list, max_length=3)
 
 
 class ConceptNode(BaseModel):
@@ -246,6 +314,11 @@ class ExplanationResult(BaseModel):
     technical: str
     evolution: list[str] = Field(default_factory=list)
     evolution_items: list[EvolutionItem] = Field(default_factory=list, max_length=12)
+    claims: list[AtomicClaimDraft] = Field(default_factory=list, max_length=40)
+    research_limitations: list[ResearchLimitation] = Field(default_factory=list, max_length=20)
+    research_gap_candidates: list[ResearchGapCandidate] = Field(default_factory=list, max_length=20)
+    reproducibility_checks: list[ReproducibilityCheck] = Field(default_factory=list, max_length=20)
+    scope_warnings: list[str] = Field(default_factory=list, max_length=12)
     related_concepts: list[str] = Field(default_factory=list)
     limitations: list[str] = Field(default_factory=list)
     evidence_ids: list[str] = Field(default_factory=list)

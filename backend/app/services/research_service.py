@@ -293,27 +293,12 @@ class ResearchService:
                     except ProviderUnavailable as exc:
                         warnings.append(str(exc))
                         warnings.append("已使用用户原始输入继续检索，中文概念可能需要改用英文术语重试。")
-                if payload.level == "research":
-                    # A small, bounded prior-art expansion. It is intentionally
-                    # transparent and is not a claim of exhaustive novelty.
-                    retrieval_queries.extend(
-                        [
-                            SearchQueryPlan(
-                                query=f"{payload.concept} limitations future work",
-                                purpose="limitations",
-                            ),
-                            SearchQueryPlan(
-                                query=f"{payload.concept} efficient method comparison",
-                                purpose="comparison",
-                            ),
-                        ]
-                    )
-                retrieval_queries = _dedupe_query_plan(retrieval_queries)[:5]
+                retrieval_queries = _dedupe_query_plan(retrieval_queries)[:3]
                 transition(
-                    "paper_search",
-                    "arXiv 论文检索",
+                    "initial_paper_search",
+                    "首轮 arXiv 检索",
                     22,
-                    f"已规划 {len(retrieval_queries)} 个检索角度，准备查询 {search_provider.name}",
+                    f"已规划 {len(retrieval_queries)} 个首轮检索角度，准备查询 {search_provider.name}",
                 )
                 paper_groups: list[list[PaperRecord]] = []
                 retrieval_interrupted = False
@@ -330,10 +315,10 @@ class ResearchService:
                         generation=generation,
                         progress=progress,
                         message=(
-                            f"正在通过 {search_provider.name} 检索 {index + 1}/{len(retrieval_queries)}："
+                            f"首轮检索 {index + 1}/{len(retrieval_queries)}："
                             f"{query}"
                         ),
-                        current_stage="paper_search",
+                        current_stage="initial_paper_search",
                         stage_timings=list(stage_timings),
                     )
                     try:
@@ -347,6 +332,64 @@ class ResearchService:
                             warnings.append("已切换到演示资料；演示资料不应当作为正式科学证据引用。")
                             search_provider = DemoSearchProvider()
                             paper_groups.append(search_provider.search(query, per_query_limit))
+                initial_papers = _merge_paper_groups(paper_groups, payload.max_papers)
+
+                feedback_planner = getattr(explanation_provider, "plan_followup_queries", None)
+                if initial_papers and callable(feedback_planner):
+                    transition(
+                        "feedback_query_planning",
+                        "基于首轮摘要扩展检索词",
+                        38,
+                        f"正在从 {len(initial_papers)} 篇首轮论文中识别方法族和应用场景",
+                    )
+                    feedback_queries: list[SearchQueryPlan] = []
+                    try:
+                        feedback_queries = feedback_planner(
+                            payload.concept,
+                            initial_papers,
+                            retrieval_queries,
+                            payload.language,
+                        )
+                    except ProviderUnavailable as exc:
+                        warnings.append(str(exc))
+                        warnings.append("补充检索词规划失败；本次结果仅覆盖首轮查询。")
+                    feedback_queries = [
+                        item.model_copy(update={"phase": "feedback"})
+                        for item in _dedupe_query_plan(feedback_queries)
+                        if item.query.casefold()
+                        not in {query.query.casefold() for query in retrieval_queries}
+                    ][:3]
+                    if feedback_queries:
+                        transition(
+                            "feedback_paper_search",
+                            "第二轮 arXiv 补充检索",
+                            42,
+                            f"已发现 {len(feedback_queries)} 个补充术语，开始第二轮检索",
+                        )
+                        feedback_limit = min(
+                            12,
+                            max(2, math.ceil(payload.max_papers / len(feedback_queries)) * 2),
+                        )
+                        for index, query_item in enumerate(feedback_queries):
+                            search_terms.append(query_item.query)
+                            self._update(
+                                job_id,
+                                generation=generation,
+                                progress=42 + round((index / max(1, len(feedback_queries))) * 8),
+                                message=(
+                                    f"补充检索 {index + 1}/{len(feedback_queries)}：{query_item.query}"
+                                ),
+                                current_stage="feedback_paper_search",
+                                stage_timings=list(stage_timings),
+                            )
+                            try:
+                                paper_groups.append(
+                                    search_provider.search(query_item.query, feedback_limit)
+                                )
+                            except ProviderUnavailable as exc:
+                                retrieval_interrupted = True
+                                warnings.append(str(exc))
+                        retrieval_queries.extend(feedback_queries)
                 papers = _merge_paper_groups(paper_groups, payload.max_papers)
                 if not papers:
                     if retrieval_interrupted:
@@ -467,9 +510,9 @@ class ResearchService:
                 search_terms=search_terms,
                 retrieval_queries=retrieval_queries,
                 retrieval_scope=(
-                    "摘要和论文元数据；研究模式额外检索限制、未来工作和方法对比词。"
-                    if payload.level == "research"
-                    else "摘要和论文元数据"
+                    "摘要和论文元数据；先执行核心检索，再根据首轮摘要补充方法族、同义词和应用场景查询。"
+                    if payload.level != "quick"
+                    else "未检索论文"
                 ),
                 papers=papers,
                 evidence=evidence,
@@ -566,13 +609,23 @@ def _build_evidence(concept: str, papers: list[PaperRecord]) -> list[EvidenceCar
         if not paper.abstract:
             continue
         sentences = _split_abstract_sentences(paper.abstract)
-        typed_excerpts: dict[str, str] = {}
+        candidates: dict[str, str] = {}
         for sentence in sentences:
             evidence_type = _classify_abstract_sentence(sentence)
-            if evidence_type and evidence_type not in typed_excerpts:
-                typed_excerpts[evidence_type] = sentence
-            if len(typed_excerpts) >= 3:
-                break
+            if evidence_type and evidence_type not in candidates:
+                candidates[evidence_type] = sentence
+        typed_excerpts = {
+            evidence_type: candidates[evidence_type]
+            for evidence_type in (
+                "limitation",
+                "future_work",
+                "result",
+                "mechanism",
+                "definition",
+            )
+            if evidence_type in candidates
+        }
+        typed_excerpts = dict(list(typed_excerpts.items())[:3])
         if not typed_excerpts:
             typed_excerpts["context"] = " ".join(sentences[:2]) or paper.abstract.strip()
 
@@ -642,6 +695,8 @@ def _build_evidence_ledger(
         claim_type: str,
         *,
         preferred_evidence_ids: list[str] | None = None,
+        preferred_paper_ids: list[str] | None = None,
+        allowed_evidence_types: set[str] | None = None,
         scope: str = "",
         hypothesis: bool = False,
         next_action: str = "人工核对原文和适用边界",
@@ -655,13 +710,14 @@ def _build_evidence_ledger(
             evidence,
             paper_by_id,
             preferred_evidence_ids or [],
+            preferred_paper_ids or [],
+            allowed_evidence_types,
         )
         linked_ids = [card.id for card, _, _ in matches]
-        hypothesis = hypothesis and not linked_ids
         status, confidence = claim_status(linked_ids, hypothesis=hypothesis)
         links: list[ClaimEvidenceLink] = []
         for card, score, overlap_count in matches:
-            relation = {
+            relation = "background" if hypothesis else {
                 "supports": "supports",
                 "contradicts": "contradicts",
                 "qualified_support": "qualifies",
@@ -690,32 +746,89 @@ def _build_evidence_ledger(
             )
         )
 
-    add_claim(
-        explanation.one_sentence,
-        "definition",
-        preferred_evidence_ids=explanation.evidence_ids,
-        next_action="核对定义是否适用于当前任务和读者场景",
-    )
-    add_claim(
-        explanation.technical,
-        "mechanism",
-        preferred_evidence_ids=explanation.evidence_ids,
-        next_action="回到论文方法部分，确认机制、假设和计算条件",
-    )
-    if explanation.evolution_items:
-        for item in explanation.evolution_items[:12]:
-            year_prefix = f"{item.year}：" if item.year else ""
+    if explanation.claims:
+        for draft in explanation.claims:
             add_claim(
-                f"{year_prefix}{item.title}——{item.summary}",
-                "evolution",
-                preferred_evidence_ids=item.evidence_ids,
-                next_action="核对时间线、论文版本和摘要中的实际贡献",
+                draft.text,
+                draft.claim_type,
+                preferred_evidence_ids=draft.evidence_ids,
+                preferred_paper_ids=draft.paper_ids,
+                scope=draft.scope,
+                next_action=(
+                    "核对论文原文中的指标、基准和实验条件"
+                    if draft.claim_type == "result"
+                    else "核对论文原文中的方法定义、假设和适用条件"
+                ),
             )
     else:
-        for item in explanation.evolution[:12]:
-            add_claim(item, "evolution", next_action="核对时间线和论文版本关系")
-    for item in explanation.limitations[:12]:
-        add_claim(item, "limitation", next_action="确认限制出现的实验条件和适用边界")
+        # Compatibility path for stored results and older compatible models.
+        add_claim(
+            explanation.one_sentence,
+            "definition",
+            preferred_evidence_ids=explanation.evidence_ids,
+            next_action="核对定义是否适用于当前任务和读者场景",
+        )
+        add_claim(
+            explanation.technical,
+            "mechanism",
+            preferred_evidence_ids=explanation.evidence_ids,
+            next_action="回到论文方法部分，确认机制、假设和计算条件",
+        )
+        if explanation.evolution_items:
+            for item in explanation.evolution_items[:12]:
+                year_prefix = f"{item.year}：" if item.year else ""
+                add_claim(
+                    f"{year_prefix}{item.title}——{item.summary}",
+                    "evolution",
+                    preferred_evidence_ids=item.evidence_ids,
+                    preferred_paper_ids=item.paper_ids,
+                    next_action="核对时间线、论文版本和摘要中的实际贡献",
+                )
+        else:
+            for item in explanation.evolution[:12]:
+                add_claim(item, "evolution", next_action="核对时间线和论文版本关系")
+
+    rejected_limitations = 0
+    for item in explanation.research_limitations[:12]:
+        source_papers = set(item.paper_ids)
+        valid_limitation_ids = [
+            evidence_id
+            for evidence_id in item.evidence_ids
+            if evidence_id in evidence_by_id
+            and evidence_by_id[evidence_id].paper_id in source_papers
+            and evidence_by_id[evidence_id].evidence_type in {"limitation", "future_work"}
+        ]
+        if item.explicitness != "explicit" or not valid_limitation_ids:
+            rejected_limitations += 1
+            continue
+        limitation_scope = f"对象：{item.target}"
+        if item.condition:
+            limitation_scope += f"；条件：{item.condition}"
+        limitation_scope += f"；后果：{item.consequence}"
+        add_claim(
+            item.text,
+            "limitation",
+            preferred_evidence_ids=valid_limitation_ids,
+            preferred_paper_ids=item.paper_ids,
+            allowed_evidence_types={"limitation", "future_work"},
+            scope=limitation_scope,
+            next_action="阅读全文确认限制的条件、实验设置和作者原始表述",
+        )
+
+    if not explanation.claims and not explanation.research_limitations:
+        for item in explanation.limitations[:12]:
+            add_claim(item, "limitation", next_action="确认限制出现的实验条件和适用边界")
+
+    for item in explanation.research_gap_candidates[:12]:
+        add_claim(
+            item.text,
+            "research_gap",
+            preferred_evidence_ids=item.evidence_ids,
+            preferred_paper_ids=item.paper_ids,
+            scope=item.scope,
+            hypothesis=True,
+            next_action="扩大检索范围，尝试证伪该研究空白候选",
+        )
     for item in explanation.related_concepts[:12]:
         add_claim(
             f"“{item}”与当前概念存在值得继续核验的关联。",
@@ -741,6 +854,10 @@ def _build_evidence_ledger(
         warnings.append("当前所有证据卡尚未完成人工全文核验，主张状态保持为未验证。")
     if any(paper.source_kind == "demo" for paper in papers):
         warnings.append("账本中包含演示资料；演示资料不能作为正式论文证据引用。")
+    if rejected_limitations:
+        warnings.append(
+            f"有 {rejected_limitations} 条限制候选缺少同论文的明确限制证据，未进入研究局限账本。"
+        )
     unlinked_count = sum(1 for claim in claims if not claim.evidence_links)
     if unlinked_count:
         warnings.append(f"有 {unlinked_count} 条主张没有达到自动匹配阈值，已明确保留为缺少证据。")
@@ -866,7 +983,102 @@ def _normalize_evolution_provenance(
                 )
             )
     normalized.sort(key=lambda item: (item.year is None, item.year or 9999, item.title.casefold()))
-    return explanation.model_copy(update={"evolution_items": normalized})
+
+    normalized_claims = []
+    for draft in explanation.claims[:40]:
+        valid_paper_ids = [paper_id for paper_id in draft.paper_ids if paper_id in paper_by_id]
+        if draft.claim_type in {"mechanism", "result", "evolution"}:
+            valid_paper_ids = valid_paper_ids[:1]
+        valid_evidence_ids = [
+            evidence_id
+            for evidence_id in draft.evidence_ids
+            if evidence_id in evidence_by_id
+            and (
+                not valid_paper_ids
+                or evidence_by_id[evidence_id].paper_id in set(valid_paper_ids)
+            )
+        ]
+        if not valid_paper_ids and valid_evidence_ids:
+            valid_paper_ids = list(
+                dict.fromkeys(evidence_by_id[evidence_id].paper_id for evidence_id in valid_evidence_ids)
+            )[:3]
+        normalized_claims.append(
+            draft.model_copy(
+                update={
+                    "paper_ids": valid_paper_ids,
+                    "evidence_ids": valid_evidence_ids[:3],
+                }
+            )
+        )
+
+    normalized_limitations = []
+    for item in explanation.research_limitations[:20]:
+        valid_paper_ids = [paper_id for paper_id in item.paper_ids if paper_id in paper_by_id]
+        valid_evidence_ids = [
+            evidence_id
+            for evidence_id in item.evidence_ids
+            if evidence_id in evidence_by_id
+            and evidence_by_id[evidence_id].paper_id in set(valid_paper_ids)
+            and evidence_by_id[evidence_id].evidence_type in {"limitation", "future_work"}
+        ]
+        if not valid_paper_ids or not valid_evidence_ids:
+            continue
+        normalized_limitations.append(
+            item.model_copy(
+                update={
+                    "paper_ids": valid_paper_ids[:3],
+                    "evidence_ids": valid_evidence_ids[:3],
+                }
+            )
+        )
+
+    normalized_gaps = []
+    for item in explanation.research_gap_candidates[:20]:
+        valid_paper_ids = [paper_id for paper_id in item.paper_ids if paper_id in paper_by_id]
+        valid_evidence_ids = [
+            evidence_id
+            for evidence_id in item.evidence_ids
+            if evidence_id in evidence_by_id
+            and (
+                not valid_paper_ids
+                or evidence_by_id[evidence_id].paper_id in set(valid_paper_ids)
+            )
+        ]
+        normalized_gaps.append(
+            item.model_copy(
+                update={
+                    "paper_ids": valid_paper_ids[:3],
+                    "evidence_ids": valid_evidence_ids[:3],
+                }
+            )
+        )
+
+    normalized_checks = [
+        item.model_copy(
+            update={
+                "paper_ids": [
+                    paper_id for paper_id in item.paper_ids if paper_id in paper_by_id
+                ][:3]
+            }
+        )
+        for item in explanation.reproducibility_checks[:20]
+    ]
+    scope_warnings = list(explanation.scope_warnings)
+    dropped_limitations = len(explanation.research_limitations) - len(normalized_limitations)
+    if dropped_limitations:
+        scope_warnings.append(
+            f"有 {dropped_limitations} 条限制候选缺少同论文的明确限制证据，未纳入研究局限。"
+        )
+    return explanation.model_copy(
+        update={
+            "evolution_items": normalized,
+            "claims": normalized_claims,
+            "research_limitations": normalized_limitations,
+            "research_gap_candidates": normalized_gaps,
+            "reproducibility_checks": normalized_checks,
+            "scope_warnings": scope_warnings[:12],
+        }
+    )
 
 
 def _split_abstract_sentences(abstract: str) -> list[str]:
@@ -883,8 +1095,10 @@ _ABSTRACT_TYPE_PATTERNS: dict[str, tuple[str, ...]] = {
         "open problem", "next step", "未来工作", "后续工作", "有待研究", "仍待解决",
     ),
     "limitation": (
-        "limitation", "limited by", "trade-off", "tradeoff", "bottleneck",
-        "overhead", "cost", "challenge", "drawback", "限制", "瓶颈", "开销", "代价", "挑战",
+        "limitation", "limited by", "trade-off", "tradeoff", "drawback",
+        "fails to", "failure", "degrad", "completely ignored", "impossible",
+        "cannot", "unable to", "discard", "information loss", "at the cost of",
+        "incurs overhead", "suffers from", "限制", "失败", "退化", "无法", "丢失", "代价", "权衡",
     ),
     "result": (
         "we show", "we find", "we demonstrate", "results show", "outperform",
@@ -954,14 +1168,21 @@ def _match_claim_evidence(
     evidence: list[EvidenceCard],
     paper_by_id: dict[str, PaperRecord],
     preferred_evidence_ids: list[str],
+    preferred_paper_ids: list[str] | None = None,
+    allowed_evidence_types: set[str] | None = None,
 ) -> list[tuple[EvidenceCard, float, int]]:
     """Rank at most three evidence cards and refuse low-relevance links."""
 
     claim_tokens = _match_tokens(claim_text)
     preferred = set(preferred_evidence_ids)
+    preferred_papers = set(preferred_paper_ids or [])
     compatibility = _TYPE_COMPATIBILITY.get(claim_type, {})
     ranked: list[tuple[EvidenceCard, float, int]] = []
     for card in evidence:
+        if preferred_papers and card.paper_id not in preferred_papers:
+            continue
+        if allowed_evidence_types and card.evidence_type not in allowed_evidence_types:
+            continue
         paper = paper_by_id.get(card.paper_id)
         source_text = f"{paper.title if paper else ''} {card.excerpt}"
         overlap_count = len(claim_tokens & _match_tokens(source_text))

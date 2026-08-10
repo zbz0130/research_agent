@@ -2,7 +2,13 @@ from fastapi.testclient import TestClient
 
 from app.config import Settings, get_settings
 from app.main import app
-from app.research_schemas import ExplanationResult, PaperRecord
+from app.research_schemas import (
+    AtomicClaimDraft,
+    ExplanationResult,
+    PaperRecord,
+    ResearchGapCandidate,
+    ResearchLimitation,
+)
 from app.services.research_service import _build_evidence, _build_evidence_ledger
 
 
@@ -112,3 +118,87 @@ def test_claim_matching_is_sparse_typed_and_keeps_irrelevant_claim_unlinked() ->
     assert all(link.relation in {"qualifies", "background"} for link in mechanism.evidence_links)
     assert any("自动匹配" in link.note for link in limitation.evidence_links)
     assert len(ledger.claims) == 3
+
+
+def test_explicit_atomic_claims_replace_long_explanation_and_separate_real_limitations() -> None:
+    paper = PaperRecord(
+        id="paper-codecomp",
+        title="Structural KV Cache Compression",
+        year=2026,
+        abstract=(
+            "Attention-only methods discard structurally critical code tokens, causing failures in agentic coding. "
+            "We propose CodeComp, which uses code property graphs to retain critical tokens. "
+            "CodeComp improves bug localization accuracy under equal memory budgets."
+        ),
+        source="test_fixture",
+        source_kind="academic",
+        access_type="abstract_only",
+    )
+    evidence = _build_evidence("KV cache compression", [paper])
+    limitation_card = next(item for item in evidence if item.evidence_type == "limitation")
+    mechanism_card = next(item for item in evidence if item.evidence_type == "mechanism")
+    result_card = next(item for item in evidence if item.evidence_type == "result")
+    explanation = ExplanationResult(
+        one_sentence="A display summary that must not become a ledger claim.",
+        intuitive="An analogy.",
+        technical="A long paragraph combining many methods and metrics that must be ignored by the ledger.",
+        claims=[
+            AtomicClaimDraft(
+                claim_type="mechanism",
+                text="CodeComp uses code property graphs to retain critical tokens.",
+                paper_ids=[paper.id],
+                evidence_ids=[mechanism_card.id],
+            ),
+            AtomicClaimDraft(
+                claim_type="result",
+                text="CodeComp improves bug localization accuracy under equal memory budgets.",
+                paper_ids=[paper.id],
+                evidence_ids=[result_card.id],
+            ),
+        ],
+        research_limitations=[
+            ResearchLimitation(
+                text="Attention-only compression can discard structurally critical code tokens.",
+                limitation_kind="failure_mode",
+                target="attention-only KV cache compression",
+                condition="agentic coding",
+                consequence="critical code structure can be lost",
+                paper_ids=[paper.id],
+                evidence_ids=[limitation_card.id],
+                explicitness="explicit",
+            ),
+            ResearchLimitation(
+                text="This invalid limitation points to a mechanism sentence.",
+                limitation_kind="method_limitation",
+                target="CodeComp",
+                consequence="unsupported consequence",
+                paper_ids=[paper.id],
+                evidence_ids=[mechanism_card.id],
+                explicitness="explicit",
+            ),
+        ],
+        research_gap_candidates=[
+            ResearchGapCandidate(
+                text="A unified evaluation protocol may be missing.",
+                scope="Only within the current retrieved abstracts.",
+            )
+        ],
+        limitations=["Only abstracts were read; this is a system warning, not a research limitation."],
+        scope_warnings=["Only abstracts were read."],
+    )
+
+    ledger = _build_evidence_ledger("analysis-atomic", explanation, evidence, [paper])
+
+    texts = [claim.text for claim in ledger.claims]
+    assert explanation.technical not in texts
+    assert explanation.limitations[0] not in texts
+    assert len(ledger.claims) == 4
+    limitation = next(claim for claim in ledger.claims if claim.claim_type == "limitation")
+    assert limitation.evidence_links
+    assert all(
+        next(item for item in evidence if item.id == link.evidence_id).paper_id == paper.id
+        for link in limitation.evidence_links
+    )
+    gap = next(claim for claim in ledger.claims if claim.claim_type == "research_gap")
+    assert gap.status == "hypothesis"
+    assert any("未进入研究局限账本" in warning for warning in ledger.warnings)

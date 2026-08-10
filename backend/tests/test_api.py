@@ -197,6 +197,24 @@ def test_literature_analysis_uses_model_query_planner_and_arxiv(monkeypatch) -> 
             )
         ]
 
+    def fake_followup(
+        self: OpenAICompatibleExplanationProvider,
+        concept: str,
+        papers: list[PaperRecord],
+        existing_queries: list[SearchQueryPlan],
+        language: str,
+    ) -> list[SearchQueryPlan]:
+        assert papers
+        assert len(existing_queries) == 3
+        return [
+            SearchQueryPlan(
+                query="attention token pruning",
+                purpose="method_family",
+                phase="feedback",
+                derived_from_paper_ids=[papers[0].id],
+            )
+        ]
+
     def fake_explain(
         self: OpenAICompatibleExplanationProvider,
         concept: str,
@@ -217,6 +235,7 @@ def test_literature_analysis_uses_model_query_planner_and_arxiv(monkeypatch) -> 
         )
 
     monkeypatch.setattr(OpenAICompatibleExplanationProvider, "plan_search_queries", fake_plan)
+    monkeypatch.setattr(OpenAICompatibleExplanationProvider, "plan_followup_queries", fake_followup)
     monkeypatch.setattr(OpenAICompatibleExplanationProvider, "explain", fake_explain)
     monkeypatch.setattr(ArxivSearchProvider, "search", fake_search)
     app.dependency_overrides[get_settings] = lambda: Settings(
@@ -248,6 +267,7 @@ def test_literature_analysis_uses_model_query_planner_and_arxiv(monkeypatch) -> 
             "attention mechanism",
             "neural sequence alignment",
             "efficient self attention",
+            "attention token pruning",
         ]
         assert job["result"]["search_terms"] == searched
         assert job["result"]["provider"] == "search=arxiv; explanation=openai_compatible"
@@ -255,9 +275,15 @@ def test_literature_analysis_uses_model_query_planner_and_arxiv(monkeypatch) -> 
         assert job["result"]["explanation"]["evolution"]
         assert job["result"]["explanation"]["evolution_items"]
         assert job["result"]["retrieval_queries"] == [
-            {"query": "attention mechanism", "purpose": "core"},
-            {"query": "neural sequence alignment", "purpose": "foundational"},
-            {"query": "efficient self attention", "purpose": "recent"},
+            {"query": "attention mechanism", "purpose": "core", "phase": "initial", "derived_from_paper_ids": []},
+            {"query": "neural sequence alignment", "purpose": "foundational", "phase": "initial", "derived_from_paper_ids": []},
+            {"query": "efficient self attention", "purpose": "recent", "phase": "initial", "derived_from_paper_ids": []},
+            {
+                "query": "attention token pruning",
+                "purpose": "method_family",
+                "phase": "feedback",
+                "derived_from_paper_ids": ["arxiv:1706.03762"],
+            },
         ]
         assert job["result"]["stage_timings"]
         assert job["result"]["total_duration_ms"] >= 0
@@ -507,7 +533,7 @@ def test_research_mode_exposes_cautious_innovation_candidate() -> None:
                 break
         assert job["status"] == "completed"
         result = job["result"]
-        assert len(result["search_terms"]) == 3
+        assert result["search_terms"]
         assert result["innovation_candidates"]
         candidate = result["innovation_candidates"][0]
         assert candidate["confidence"] == "low"

@@ -12,6 +12,7 @@ from typing import Protocol
 import httpx
 
 from app.research_schemas import (
+    AtomicClaimDraft,
     CommunitySignal,
     EvidenceCard,
     EvolutionItem,
@@ -614,6 +615,47 @@ class RuleBasedExplanationProvider:
 
         return [SearchQueryPlan(query=self.plan_search_query(concept, language), purpose="core")]
 
+    def plan_followup_queries(
+        self,
+        concept: str,
+        papers: Sequence[PaperRecord],
+        existing_queries: Sequence[SearchQueryPlan],
+        language: str,
+    ) -> list[SearchQueryPlan]:
+        """Extract a few visible method-family terms without inventing synonyms."""
+
+        corpus = " ".join(f"{paper.title} {paper.abstract}" for paper in papers).casefold()
+        existing = {item.query.casefold() for item in existing_queries}
+        candidates: list[tuple[str, str]] = []
+        if "evict" in corpus or "eviction" in corpus:
+            candidates.append(("KV cache eviction", "method_family"))
+        if "prun" in corpus or "critical token" in corpus:
+            candidates.append(("KV cache token pruning", "method_family"))
+        if "quantiz" in corpus:
+            candidates.append(("KV cache quantization", "method_family"))
+        if "low-rank" in corpus or "low rank" in corpus or "latent" in corpus:
+            candidates.append(("low rank KV cache", "method_family"))
+        if "reasoning" in corpus:
+            candidates.append(("KV cache reasoning models", "application"))
+        if "code" in corpus and "agent" in corpus:
+            candidates.append(("KV cache agentic coding", "application"))
+        source_ids = [paper.id for paper in papers[:6]]
+        planned: list[SearchQueryPlan] = []
+        for query, purpose in candidates:
+            if query.casefold() in existing:
+                continue
+            planned.append(
+                SearchQueryPlan(
+                    query=query,
+                    purpose=purpose,
+                    phase="feedback",
+                    derived_from_paper_ids=source_ids,
+                )
+            )
+            if len(planned) >= 3:
+                break
+        return planned
+
     def explain(
         self,
         concept: str,
@@ -637,6 +679,42 @@ class RuleBasedExplanationProvider:
             )
             for paper in sorted(papers[:5], key=lambda item: (item.year is None, item.year or 9999))
         ]
+        paper_by_id = {paper.id: paper for paper in papers}
+        claims: list[AtomicClaimDraft] = []
+        if evidence:
+            first = evidence[0]
+            claims.append(
+                AtomicClaimDraft(
+                    claim_type="definition",
+                    text=f"{concept} 是围绕当前论文摘要所描述问题的一类研究方法。",
+                    paper_ids=[first.paper_id],
+                    evidence_ids=[first.id],
+                    scope="规则回退，仅用于演示证据链",
+                )
+            )
+        else:
+            claims.append(
+                AtomicClaimDraft(
+                    claim_type="definition",
+                    text=f"{concept} 是一个需要通过后续文献检索核验的科研概念。",
+                    paper_ids=[],
+                    evidence_ids=[],
+                    scope="通用知识，待检索核验",
+                )
+            )
+        for card in evidence:
+            if card.evidence_type not in {"mechanism", "result"}:
+                continue
+            paper = paper_by_id.get(card.paper_id)
+            claims.append(
+                AtomicClaimDraft(
+                    claim_type=card.evidence_type,
+                    text=f"《{paper.title if paper else card.paper_id}》摘要指出：{card.excerpt}",
+                    paper_ids=[card.paper_id],
+                    evidence_ids=[card.id],
+                    scope="摘要级线索",
+                )
+            )
         return ExplanationResult(
             one_sentence=f"{concept} 是一个需要结合具体问题和证据来理解的科研概念。",
             intuitive=(
@@ -649,10 +727,15 @@ class RuleBasedExplanationProvider:
             ),
             evolution=[f"{paper.year or '未标年份'}：{paper.title}" for paper in papers[:5]],
             evolution_items=evolution_items,
+            claims=claims[:20],
             related_concepts=related,
             limitations=[
                 "当前第一版主要使用摘要和元数据，不能替代对论文全文和实验细节的人工核验。",
                 "规则回退解释不是模型生成结论，需等待解释模型配置后获得更丰富的分层说明。",
+            ],
+            scope_warnings=[
+                "当前仅使用摘要和元数据，不能替代论文全文核验。",
+                "当前为规则回退解释，原子主张仅用于演示证据链。",
             ],
             evidence_ids=[item.id for item in evidence],
         )
@@ -735,6 +818,100 @@ class OpenAICompatibleExplanationProvider:
         except (httpx.HTTPError, KeyError, TypeError, ValueError, AttributeError) as exc:
             raise ProviderUnavailable(f"检索词生成模型暂时不可用：{exc}") from exc
 
+    def plan_followup_queries(
+        self,
+        concept: str,
+        papers: Sequence[PaperRecord],
+        existing_queries: Sequence[SearchQueryPlan],
+        language: str,
+    ) -> list[SearchQueryPlan]:
+        """Use first-round abstracts to discover missing method-family terms."""
+
+        paper_payload = "\n\n".join(
+            f"[{paper.id}] {paper.title} ({paper.year or 'n.d.'})\n摘要：{paper.abstract}"
+            for paper in papers[:10]
+        )
+        existing_payload = ", ".join(item.query for item in existing_queries)
+        prompt = f"""
+用户研究概念：{concept}
+用户语言：{language}
+首轮已使用检索词：{existing_payload}
+
+首轮论文：
+{paper_payload}
+
+请从首轮论文标题和摘要中识别首轮关键词没有覆盖的方法族、同义术语或明确应用场景，
+生成最多 3 个新的英文 arXiv 检索短语，用于第二轮补充检索。
+
+要求：
+1. query 必须是论文中出现或可由论文直接确认的标准学术术语，2 到 10 个英文单词；
+2. 不得只是给原查询添加 survey、recent、review、future work 等修饰词；
+3. 不得重复首轮查询；没有可靠扩展词时返回空数组；
+4. purpose 只能是 method_family、application、foundational、recent；
+5. derived_from_paper_ids 只能使用上方论文 ID，指出该术语来自哪些首轮论文。
+
+只返回 JSON：
+{{"queries": [{{"query": "KV cache eviction", "purpose": "method_family", "derived_from_paper_ids": ["paper-id"]}}]}}
+""".strip()
+        try:
+            response = httpx.post(
+                f"{self.base_url}/chat/completions",
+                headers={"Authorization": f"Bearer {self.api_key}"},
+                json={
+                    "model": self.model,
+                    "temperature": 0,
+                    "response_format": {"type": "json_object"},
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": "你负责从已检索论文中发现可追溯的补充学术检索词。",
+                        },
+                        {"role": "user", "content": prompt},
+                    ],
+                },
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+            content = response.json()["choices"][0]["message"]["content"]
+            payload = json.loads(_strip_code_fence(content))
+            raw_queries = payload.get("queries") if isinstance(payload, dict) else None
+            if not isinstance(raw_queries, list):
+                raise ValueError("缺少 queries 字段")
+            known_paper_ids = {paper.id for paper in papers}
+            existing = {" ".join(item.query.casefold().split()) for item in existing_queries}
+            allowed_purposes = {"method_family", "application", "foundational", "recent"}
+            planned: list[SearchQueryPlan] = []
+            seen = set(existing)
+            for item in raw_queries[:3]:
+                if not isinstance(item, dict):
+                    continue
+                query = item.get("query")
+                purpose = item.get("purpose")
+                source_ids = item.get("derived_from_paper_ids", [])
+                if not isinstance(query, str) or purpose not in allowed_purposes:
+                    continue
+                query = " ".join(query.replace('"', " ").split())
+                normalized = query.casefold()
+                if not 2 <= len(query) <= 160 or normalized in seen:
+                    continue
+                valid_source_ids = [
+                    paper_id for paper_id in source_ids if isinstance(paper_id, str) and paper_id in known_paper_ids
+                ]
+                if not valid_source_ids:
+                    continue
+                seen.add(normalized)
+                planned.append(
+                    SearchQueryPlan(
+                        query=query,
+                        purpose=purpose,
+                        phase="feedback",
+                        derived_from_paper_ids=valid_source_ids[:6],
+                    )
+                )
+            return planned
+        except (httpx.HTTPError, KeyError, TypeError, ValueError, AttributeError) as exc:
+            raise ProviderUnavailable(f"补充检索词生成模型暂时不可用：{exc}") from exc
+
     def explain(
         self,
         concept: str,
@@ -758,6 +935,21 @@ evolution_items 中每项必须包含 year、title、summary、paper_ids、evide
 相关概念应说明与主概念紧密相关的标准术语。只能把资料支持的内容写成事实；
 证据不足时明确说证据不足。evidence_ids 只能使用下方出现的证据卡 ID。
 
+claims 必须是原子主张数组：
+- 每条只能表达一个可独立核验的事实，不能把多个论文、多个机制或机制与指标写在同一条；
+- claim_type 只能是 definition、mechanism、result、evolution；
+- 论文特定的 mechanism、result、evolution 每条只能使用一个 paper_id；
+- 数字、压缩率、速度和准确率必须单独写成 result，不能混入 mechanism；
+- paper_ids 和 evidence_ids 必须来自下方资料；没有证据的通用定义允许 ID 为空，但必须在 scope 中说明。
+
+research_limitations 只允许写“当前研究方法、理论或实验本身”的局限，不得写系统或调研过程警告。
+每项必须包含 text、limitation_kind、target、condition、consequence、paper_ids、evidence_ids、explicitness。
+limitation_kind 只能是 method_limitation、failure_mode、tradeoff、applicability_boundary、evaluation_limitation、theoretical_limit。
+只有摘要原文明确支持、能指出目标和负面后果的内容才可进入；没有明确研究局限时返回空数组。
+
+“仅阅读摘要、检索数量有限”等放入 scope_warnings；代码和数据未核验放入 reproducibility_checks；
+“当前范围可能缺少统一标准”等放入 research_gap_candidates，并明确限定为当前检索范围，不得声称整个领域不存在。
+
 论文及摘要：
 {paper_payload}
 
@@ -768,7 +960,9 @@ evolution_items 中每项必须包含 year、title、summary、paper_ids、evide
             mode_instructions = """
 这是“快速解释”模式，没有执行论文检索。请直接基于通用学术知识给出易懂、准确的说明，
 不要伪造论文、证据 ID 或具体引用。evolution 可以概括方法思路的演进，但 evolution_items 必须为空数组；
-limitations 中必须说明本次没有检索论文，回答需要后续文献核验。evidence_ids 必须为空数组。
+claims 可包含无来源的原子定义或机制主张，但 paper_ids 和 evidence_ids 必须为空，并在 scope 标记“通用知识，待检索核验”。
+research_limitations、research_gap_candidates、reproducibility_checks 必须为空；
+scope_warnings 必须说明本次没有检索论文。limitations 和 evidence_ids 必须为空数组。
 """.strip()
         prompt = f"""
 你是 WishForge 的科研概念解释器。请解释“{concept}”。
@@ -778,7 +972,12 @@ limitations 中必须说明本次没有检索论文，回答需要后续文献�
 
 必须返回 JSON，字段为：one_sentence、intuitive、technical、evolution（字符串数组）、
 evolution_items（对象数组，每项含 year、title、summary、paper_ids、evidence_ids）、
-related_concepts（字符串数组）、limitations（字符串数组）、evidence_ids（证据卡 ID 数组）。
+claims（原子主张对象数组，每项含 claim_type、text、paper_ids、evidence_ids、scope）、
+research_limitations（研究局限对象数组）、
+research_gap_candidates（对象数组，每项含 text、scope、paper_ids、evidence_ids）、
+reproducibility_checks（对象数组，每项含 text、check_type、paper_ids）、
+scope_warnings（字符串数组）、related_concepts（字符串数组）、
+limitations（兼容字段，字符串数组，仅复制 research_limitations 的 text）、evidence_ids（证据卡 ID 数组）。
 """.strip()
         try:
             response = httpx.post(
