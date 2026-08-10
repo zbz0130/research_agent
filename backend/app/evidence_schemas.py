@@ -58,7 +58,10 @@ class ClaimRecord(BaseModel):
     status: ClaimStatus = "unverified"
     confidence: Literal["high", "medium", "low"] = "low"
     scope: str = Field(default="", max_length=2000)
-    evidence_links: list[ClaimEvidenceLink] = Field(default_factory=list, max_length=50)
+    # A short, ranked list is easier to audit than an all-to-all citation
+    # cloud.  Claims with no sufficiently relevant card deliberately remain
+    # unlinked instead of borrowing unrelated evidence to inflate coverage.
+    evidence_links: list[ClaimEvidenceLink] = Field(default_factory=list, max_length=3)
     next_action: str = Field(default="人工核对原文和适用边界", max_length=1000)
     generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 

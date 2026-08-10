@@ -26,6 +26,7 @@ ArxivNoveltyStatus = Literal[
     "not_checked", "no_direct_match_in_scope", "matched", "unavailable", "checked"
 ]
 EvidenceLocationKind = Literal["abstract", "page", "section", "figure", "table", "url", "unknown"]
+SearchQueryPurpose = Literal["core", "foundational", "recent", "limitations", "comparison"]
 GraphNodeType = Literal["concept", "method", "problem", "paper", "idea", "note"]
 GraphRelation = Literal[
     "is_a",
@@ -136,6 +137,27 @@ class EvidenceCard(BaseModel):
         return _http_url_or_none(value)
 
 
+class SearchQueryPlan(BaseModel):
+    """One transparent retrieval angle generated before paper search."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    query: str = Field(min_length=2, max_length=160)
+    purpose: SearchQueryPurpose = "core"
+
+
+class EvolutionItem(BaseModel):
+    """A dated change with explicit paper and evidence provenance."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    year: int | None = Field(default=None, ge=1900, le=2100)
+    title: str = Field(min_length=1, max_length=500)
+    summary: str = Field(min_length=1, max_length=3000)
+    paper_ids: list[str] = Field(default_factory=list, max_length=6)
+    evidence_ids: list[str] = Field(default_factory=list, max_length=6)
+
+
 class ConceptNode(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
@@ -223,9 +245,20 @@ class ExplanationResult(BaseModel):
     intuitive: str
     technical: str
     evolution: list[str] = Field(default_factory=list)
+    evolution_items: list[EvolutionItem] = Field(default_factory=list, max_length=12)
     related_concepts: list[str] = Field(default_factory=list)
     limitations: list[str] = Field(default_factory=list)
     evidence_ids: list[str] = Field(default_factory=list)
+
+
+class AnalysisStageTiming(BaseModel):
+    """Completed pipeline stage timing exposed for progress diagnosis."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    stage: str = Field(min_length=1, max_length=80)
+    label: str = Field(min_length=1, max_length=120)
+    duration_ms: int = Field(ge=0)
 
 
 class InnovationCandidate(BaseModel):
@@ -370,6 +403,7 @@ class AnalysisResult(BaseModel):
     provider: str
     warnings: list[str] = Field(default_factory=list)
     search_terms: list[str] = Field(default_factory=list)
+    retrieval_queries: list[SearchQueryPlan] = Field(default_factory=list, max_length=8)
     retrieval_scope: str = "摘要和论文元数据"
     papers: list[PaperRecord] = Field(default_factory=list)
     evidence: list[EvidenceCard] = Field(default_factory=list)
@@ -382,6 +416,8 @@ class AnalysisResult(BaseModel):
     # the UI can show which generated statements are supported, contradicted,
     # or still unverified without changing the existing response contract.
     evidence_ledger: EvidenceLedger | None = None
+    stage_timings: list[AnalysisStageTiming] = Field(default_factory=list, max_length=12)
+    total_duration_ms: int | None = Field(default=None, ge=0)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -394,6 +430,8 @@ class AnalysisJob(BaseModel):
     status: AnalysisStatus = "queued"
     progress: int = Field(default=0, ge=0, le=100)
     message: str = "等待开始"
+    current_stage: str | None = Field(default=None, max_length=80)
+    stage_timings: list[AnalysisStageTiming] = Field(default_factory=list, max_length=12)
     result: AnalysisResult | None = None
     error: str | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

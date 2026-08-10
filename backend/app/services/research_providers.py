@@ -14,10 +14,12 @@ import httpx
 from app.research_schemas import (
     CommunitySignal,
     EvidenceCard,
+    EvolutionItem,
     ExplanationResult,
     FutureWorkSignal,
     InnovationCandidate,
     PaperRecord,
+    SearchQueryPlan,
 )
 
 
@@ -197,9 +199,9 @@ class SynthesisProvider(Protocol):
 class ArxivSearchProvider:
     """Search arXiv's public Atom API and normalize entries into papers.
 
-    The provider intentionally requests only one small relevance-sorted page
-    per analysis.  This keeps the interactive workflow within arXiv's API
-    guidance and makes the recorded query scope easy to explain to users.
+    Each call requests one small relevance-sorted page.  When an analysis uses
+    more than one retrieval angle, the instance spaces calls so the public
+    endpoint is not hit in a tight loop.
     """
 
     name = "arxiv"
@@ -207,8 +209,19 @@ class ArxivSearchProvider:
     _ATOM = "{http://www.w3.org/2005/Atom}"
     _ARXIV = "{http://arxiv.org/schemas/atom}"
 
-    def __init__(self, timeout: float = 30.0) -> None:
+    def __init__(
+        self,
+        timeout: float = 30.0,
+        minimum_interval_seconds: float = 3.0,
+        *,
+        sleep: Callable[[float], None] = time.sleep,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
         self.timeout = timeout
+        self.minimum_interval_seconds = max(0.0, minimum_interval_seconds)
+        self._sleep = sleep
+        self._clock = clock
+        self._last_request_started_at: float | None = None
 
     def search(self, concept: str, limit: int) -> list[PaperRecord]:
         query_text = " ".join(concept.replace('"', " ").split())
@@ -221,6 +234,12 @@ class ArxivSearchProvider:
             "sortBy": "relevance",
             "sortOrder": "descending",
         }
+        if self._last_request_started_at is not None:
+            elapsed = self._clock() - self._last_request_started_at
+            remaining = self.minimum_interval_seconds - elapsed
+            if remaining > 0:
+                self._sleep(remaining)
+        self._last_request_started_at = self._clock()
         try:
             response = httpx.get(
                 self.endpoint,
@@ -590,6 +609,11 @@ class RuleBasedExplanationProvider:
 
         return " ".join(concept.split())
 
+    def plan_search_queries(self, concept: str, language: str) -> list[SearchQueryPlan]:
+        """Keep one honest angle when no model can translate neighboring terms."""
+
+        return [SearchQueryPlan(query=self.plan_search_query(concept, language), purpose="core")]
+
     def explain(
         self,
         concept: str,
@@ -600,6 +624,19 @@ class RuleBasedExplanationProvider:
     ) -> ExplanationResult:
         evidence_text = evidence[0].excerpt if evidence else "当前还没有可用的文献证据。"
         related = _related_terms(concept, papers)
+        evidence_by_paper: dict[str, list[str]] = {}
+        for card in evidence:
+            evidence_by_paper.setdefault(card.paper_id, []).append(card.id)
+        evolution_items = [
+            EvolutionItem(
+                year=paper.year,
+                title=paper.title,
+                summary="该论文摘要构成当前检索范围内的一条演变线索，具体贡献仍需核对原文。",
+                paper_ids=[paper.id],
+                evidence_ids=evidence_by_paper.get(paper.id, [])[:3],
+            )
+            for paper in sorted(papers[:5], key=lambda item: (item.year is None, item.year or 9999))
+        ]
         return ExplanationResult(
             one_sentence=f"{concept} 是一个需要结合具体问题和证据来理解的科研概念。",
             intuitive=(
@@ -611,6 +648,7 @@ class RuleBasedExplanationProvider:
                 "详细机制会在接入解释模型后，根据证据卡进一步展开。"
             ),
             evolution=[f"{paper.year or '未标年份'}：{paper.title}" for paper in papers[:5]],
+            evolution_items=evolution_items,
             related_concepts=related,
             limitations=[
                 "当前第一版主要使用摘要和元数据，不能替代对论文全文和实验细节的人工核验。",
@@ -630,15 +668,26 @@ class OpenAICompatibleExplanationProvider:
         self.timeout = timeout
 
     def plan_search_query(self, concept: str, language: str) -> str:
-        """Turn a user concept into one compact English arXiv search phrase."""
+        """Backward-compatible first query for callers that expect one phrase."""
+
+        return self.plan_search_queries(concept, language)[0].query
+
+    def plan_search_queries(self, concept: str, language: str) -> list[SearchQueryPlan]:
+        """Generate two or three distinct, bounded arXiv retrieval angles."""
 
         prompt = f"""
-请把用户输入的科研概念转换成一个适合 arXiv 标题/摘要检索的英文短语。
+请把用户输入的科研概念转换成 2 到 3 个适合 arXiv 标题/摘要检索的英文短语。
 用户输入：{concept}
 用户语言：{language}
-只返回 JSON 对象：{{"query": "2 到 10 个英文单词组成的学术检索短语"}}。
+检索角度最多各一个：
+- core：该概念当前最标准的学术术语；
+- foundational：早期或基础工作常用的标准术语；
+- recent：近年相关工作常用的相邻标准术语。
+只返回 JSON 对象：
+{{"queries": [{{"query": "2 到 10 个英文单词", "purpose": "core"}}]}}。
 不要加入 all:、布尔运算符、引号、解释、论文标题或年份。
-如果输入本身已经是合适的英文术语，保留其标准学术写法。
+不要只是在同一术语后添加 survey、recent、review 等修饰词；不同 query 必须能表达真实的术语差异。
+如果没有可靠的相邻术语，只返回 core 一项，不要编造。
 """.strip()
         try:
             response = httpx.post(
@@ -661,13 +710,28 @@ class OpenAICompatibleExplanationProvider:
             response.raise_for_status()
             content = response.json()["choices"][0]["message"]["content"]
             payload = json.loads(_strip_code_fence(content))
-            query = payload.get("query") if isinstance(payload, dict) else None
-            if not isinstance(query, str):
-                raise ValueError("缺少 query 字段")
-            query = " ".join(query.replace('"', " ").split())
-            if not 2 <= len(query) <= 160:
-                raise ValueError("query 长度无效")
-            return query
+            raw_queries = payload.get("queries") if isinstance(payload, dict) else None
+            if not isinstance(raw_queries, list):
+                raise ValueError("缺少 queries 字段")
+            allowed_purposes = {"core", "foundational", "recent"}
+            planned: list[SearchQueryPlan] = []
+            seen: set[str] = set()
+            for item in raw_queries[:3]:
+                if not isinstance(item, dict):
+                    continue
+                query = item.get("query")
+                purpose = item.get("purpose")
+                if not isinstance(query, str) or purpose not in allowed_purposes:
+                    continue
+                query = " ".join(query.replace('"', " ").split())
+                normalized = query.casefold()
+                if not 2 <= len(query) <= 160 or normalized in seen:
+                    continue
+                seen.add(normalized)
+                planned.append(SearchQueryPlan(query=query, purpose=purpose))
+            if not planned:
+                raise ValueError("queries 中没有有效检索词")
+            return planned
         except (httpx.HTTPError, KeyError, TypeError, ValueError, AttributeError) as exc:
             raise ProviderUnavailable(f"检索词生成模型暂时不可用：{exc}") from exc
 
@@ -690,6 +754,7 @@ class OpenAICompatibleExplanationProvider:
             mode_instructions = f"""
 这是“文献解释”模式。请阅读给出的论文摘要，围绕资料解释概念，不能声称读过论文全文。
 演变过程必须按年份组织，并说明每项工作带来的概念或方法变化；不得编造资料中没有的年份。
+evolution_items 中每项必须包含 year、title、summary、paper_ids、evidence_ids，并且 ID 只能来自下方资料。
 相关概念应说明与主概念紧密相关的标准术语。只能把资料支持的内容写成事实；
 证据不足时明确说证据不足。evidence_ids 只能使用下方出现的证据卡 ID。
 
@@ -702,7 +767,7 @@ class OpenAICompatibleExplanationProvider:
         else:
             mode_instructions = """
 这是“快速解释”模式，没有执行论文检索。请直接基于通用学术知识给出易懂、准确的说明，
-不要伪造论文、证据 ID 或具体引用。evolution 可以概括方法思路的演进，但不确定的年份不要写；
+不要伪造论文、证据 ID 或具体引用。evolution 可以概括方法思路的演进，但 evolution_items 必须为空数组；
 limitations 中必须说明本次没有检索论文，回答需要后续文献核验。evidence_ids 必须为空数组。
 """.strip()
         prompt = f"""
@@ -712,6 +777,7 @@ limitations 中必须说明本次没有检索论文，回答需要后续文献�
 {mode_instructions}
 
 必须返回 JSON，字段为：one_sentence、intuitive、technical、evolution（字符串数组）、
+evolution_items（对象数组，每项含 year、title、summary、paper_ids、evidence_ids）、
 related_concepts（字符串数组）、limitations（字符串数组）、evidence_ids（证据卡 ID 数组）。
 """.strip()
         try:

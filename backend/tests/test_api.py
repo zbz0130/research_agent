@@ -10,6 +10,7 @@ from app.research_schemas import (
     ExplanationResult,
     GraphPatchCreate,
     PaperRecord,
+    SearchQueryPlan,
 )
 from app.services.graph_service import GraphConflict, graph_service
 from app.services.research_providers import (
@@ -150,7 +151,8 @@ def test_concept_analysis_creates_evidence_and_graph() -> None:
         assert job["status"] == "completed"
         result = job["result"]
         assert len(result["papers"]) == 2
-        assert len(result["evidence"]) == 2
+        assert len(result["evidence"]) >= len(result["papers"])
+        assert {item["evidence_type"] for item in result["evidence"]} & {"mechanism", "result", "limitation"}
         assert result["graph"]["root_id"] == "root"
         assert result["graph"]["name"] == "Attention Mechanism 概念图"
         assert result["graph"]["version"] == 1
@@ -166,20 +168,25 @@ def test_literature_analysis_uses_model_query_planner_and_arxiv(monkeypatch) -> 
 
     def fake_plan(
         self: OpenAICompatibleExplanationProvider, concept: str, language: str
-    ) -> str:
+    ) -> list[SearchQueryPlan]:
         assert concept == "注意力机制"
         assert language == "zh-CN"
-        return "attention mechanism"
+        return [
+            SearchQueryPlan(query="attention mechanism", purpose="core"),
+            SearchQueryPlan(query="neural sequence alignment", purpose="foundational"),
+            SearchQueryPlan(query="efficient self attention", purpose="recent"),
+        ]
 
     def fake_search(
         self: ArxivSearchProvider, concept: str, limit: int
     ) -> list[PaperRecord]:
         searched.append(concept)
+        index = len(searched)
         return [
             PaperRecord(
-                id="arxiv:1706.03762",
-                arxiv_id="1706.03762",
-                title="Attention Is All You Need",
+                id="arxiv:1706.03762" if index == 1 else f"arxiv:test-{index}",
+                arxiv_id="1706.03762" if index == 1 else f"test-{index}",
+                title="Attention Is All You Need" if index == 1 else f"Retrieval Angle {index}",
                 authors=["Ashish Vaswani"],
                 year=2017,
                 abstract="The Transformer is based solely on attention mechanisms.",
@@ -209,7 +216,7 @@ def test_literature_analysis_uses_model_query_planner_and_arxiv(monkeypatch) -> 
             evidence_ids=[item.id for item in evidence],
         )
 
-    monkeypatch.setattr(OpenAICompatibleExplanationProvider, "plan_search_query", fake_plan)
+    monkeypatch.setattr(OpenAICompatibleExplanationProvider, "plan_search_queries", fake_plan)
     monkeypatch.setattr(OpenAICompatibleExplanationProvider, "explain", fake_explain)
     monkeypatch.setattr(ArxivSearchProvider, "search", fake_search)
     app.dependency_overrides[get_settings] = lambda: Settings(
@@ -237,11 +244,23 @@ def test_literature_analysis_uses_model_query_planner_and_arxiv(monkeypatch) -> 
                 break
 
         assert job["status"] == "completed"
-        assert searched == ["attention mechanism"]
-        assert job["result"]["search_terms"] == ["attention mechanism"]
+        assert searched == [
+            "attention mechanism",
+            "neural sequence alignment",
+            "efficient self attention",
+        ]
+        assert job["result"]["search_terms"] == searched
         assert job["result"]["provider"] == "search=arxiv; explanation=openai_compatible"
         assert job["result"]["papers"][0]["arxiv_id"] == "1706.03762"
         assert job["result"]["explanation"]["evolution"]
+        assert job["result"]["explanation"]["evolution_items"]
+        assert job["result"]["retrieval_queries"] == [
+            {"query": "attention mechanism", "purpose": "core"},
+            {"query": "neural sequence alignment", "purpose": "foundational"},
+            {"query": "efficient self attention", "purpose": "recent"},
+        ]
+        assert job["result"]["stage_timings"]
+        assert job["result"]["total_duration_ms"] >= 0
         assert job["result"]["explanation"]["related_concepts"]
     finally:
         app.dependency_overrides.clear()

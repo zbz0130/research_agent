@@ -108,7 +108,15 @@ def test_compatible_model_plans_an_english_arxiv_query(monkeypatch) -> None:
 
     def fake_post(url: str, **kwargs: object) -> httpx.Response:
         captured.update({"url": url, **kwargs})
-        return _model_response({"query": "attention mechanism"})
+        return _model_response(
+            {
+                "queries": [
+                    {"query": "attention mechanism", "purpose": "core"},
+                    {"query": "neural sequence alignment", "purpose": "foundational"},
+                    {"query": "efficient self attention", "purpose": "recent"},
+                ]
+            }
+        )
 
     monkeypatch.setattr(research_providers.httpx, "post", fake_post)
     provider = OpenAICompatibleExplanationProvider(
@@ -117,13 +125,38 @@ def test_compatible_model_plans_an_english_arxiv_query(monkeypatch) -> None:
         model="test-model",
     )
 
-    query = provider.plan_search_query("注意力机制", "zh-CN")
+    queries = provider.plan_search_queries("注意力机制", "zh-CN")
 
-    assert query == "attention mechanism"
+    assert [item.query for item in queries] == [
+        "attention mechanism",
+        "neural sequence alignment",
+        "efficient self attention",
+    ]
+    assert [item.purpose for item in queries] == ["core", "foundational", "recent"]
     assert captured["url"] == "https://model.example/v1/chat/completions"
     request_json = captured["json"]
     assert request_json["model"] == "test-model"
     assert "注意力机制" in request_json["messages"][1]["content"]
+
+
+def test_arxiv_provider_spaces_multiple_calls_without_real_wait(monkeypatch) -> None:
+    clock_values = iter([10.0, 10.5, 13.0])
+    waits: list[float] = []
+
+    def fake_get(url: str, **kwargs: object) -> httpx.Response:
+        return httpx.Response(200, content=ARXIV_FEED, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(research_providers.httpx, "get", fake_get)
+    provider = ArxivSearchProvider(
+        minimum_interval_seconds=3.0,
+        sleep=waits.append,
+        clock=lambda: next(clock_values),
+    )
+
+    provider.search("attention mechanism", 2)
+    provider.search("efficient self attention", 2)
+
+    assert waits == [2.5]
 
 
 def test_compatible_model_distinguishes_quick_and_abstract_modes(monkeypatch) -> None:

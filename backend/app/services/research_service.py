@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+import math
+import re
 from threading import RLock
+from time import perf_counter
 from uuid import UUID
 
 from app.config import Settings
@@ -15,6 +18,7 @@ from app.research_schemas import (
     AnalysisCreate,
     AnalysisJob,
     AnalysisResult,
+    AnalysisStageTiming,
     AnalysisSummary,
     ConceptEdge,
     ConceptGraph,
@@ -22,10 +26,12 @@ from app.research_schemas import (
     ConceptNodeUpdate,
     EvidenceCard,
     EvidenceLocator,
+    EvolutionItem,
     ExplanationResult,
     InnovationCandidate,
     PaperRecord,
     ResearchBrief,
+    SearchQueryPlan,
     GraphOperation,
     GraphPatch,
     GraphPatchCreate,
@@ -203,21 +209,59 @@ class ResearchService:
         settings: Settings,
         generation: int | None = None,
     ) -> None:
+        pipeline_started = perf_counter()
+        stage_started = pipeline_started
+        current_stage: tuple[str, str] | None = None
+        stage_timings: list[AnalysisStageTiming] = []
+
+        def transition(stage: str, label: str, progress: int, message: str) -> None:
+            nonlocal current_stage, stage_started
+            now = perf_counter()
+            if current_stage is not None:
+                stage_timings.append(
+                    AnalysisStageTiming(
+                        stage=current_stage[0],
+                        label=current_stage[1],
+                        duration_ms=max(0, round((now - stage_started) * 1000)),
+                    )
+                )
+            current_stage = (stage, label)
+            stage_started = now
+            self._update(
+                job_id,
+                generation=generation,
+                status="running",
+                progress=progress,
+                message=message,
+                current_stage=stage,
+                stage_timings=list(stage_timings),
+            )
+
+        def finish_current_stage() -> None:
+            nonlocal current_stage, stage_started
+            if current_stage is None:
+                return
+            now = perf_counter()
+            stage_timings.append(
+                AnalysisStageTiming(
+                    stage=current_stage[0],
+                    label=current_stage[1],
+                    duration_ms=max(0, round((now - stage_started) * 1000)),
+                )
+            )
+            current_stage = None
+            stage_started = now
+
         try:
             if generation is None:
                 with self._lock:
                     generation = self._generation
             if not self._is_generation_current(generation):
                 return
-            self._update(
-                job_id,
-                generation=generation,
-                status="running",
-                progress=8,
-                message="正在理解概念并准备检索",
-            )
+            transition("query_planning", "检索词规划", 8, "正在理解概念并规划检索角度")
             warnings: list[str] = []
             search_terms: list[str] = []
+            retrieval_queries: list[SearchQueryPlan] = []
             search_provider = _search_provider(settings)
             explanation_provider = _explanation_provider(settings)
             if (
@@ -229,37 +273,71 @@ class ResearchService:
                 papers = []
                 warnings.append("快速解释模式未检索论文，结论需要自行核验。")
             else:
-                planned_query = payload.concept
-                planner = getattr(explanation_provider, "plan_search_query", None)
-                if callable(planner):
+                multi_planner = getattr(explanation_provider, "plan_search_queries", None)
+                single_planner = getattr(explanation_provider, "plan_search_query", None)
+                retrieval_queries = [SearchQueryPlan(query=payload.concept, purpose="core")]
+                if callable(multi_planner):
                     try:
-                        planned_query = planner(payload.concept, payload.language)
+                        retrieval_queries = multi_planner(payload.concept, payload.language)
                     except ProviderUnavailable as exc:
                         warnings.append(str(exc))
                         warnings.append("已使用用户原始输入继续检索，中文概念可能需要改用英文术语重试。")
-                query_plan = [planned_query]
+                elif callable(single_planner):
+                    try:
+                        retrieval_queries = [
+                            SearchQueryPlan(
+                                query=single_planner(payload.concept, payload.language),
+                                purpose="core",
+                            )
+                        ]
+                    except ProviderUnavailable as exc:
+                        warnings.append(str(exc))
+                        warnings.append("已使用用户原始输入继续检索，中文概念可能需要改用英文术语重试。")
                 if payload.level == "research":
                     # A small, bounded prior-art expansion. It is intentionally
                     # transparent and is not a claim of exhaustive novelty.
-                    query_plan.extend(
+                    retrieval_queries.extend(
                         [
-                            f"{payload.concept} limitations future work",
-                            f"{payload.concept} efficient method comparison",
+                            SearchQueryPlan(
+                                query=f"{payload.concept} limitations future work",
+                                purpose="limitations",
+                            ),
+                            SearchQueryPlan(
+                                query=f"{payload.concept} efficient method comparison",
+                                purpose="comparison",
+                            ),
                         ]
                     )
-                papers = []
+                retrieval_queries = _dedupe_query_plan(retrieval_queries)[:5]
+                transition(
+                    "paper_search",
+                    "arXiv 论文检索",
+                    22,
+                    f"已规划 {len(retrieval_queries)} 个检索角度，准备查询 {search_provider.name}",
+                )
+                paper_groups: list[list[PaperRecord]] = []
                 retrieval_interrupted = False
-                for index, query in enumerate(query_plan):
+                per_query_limit = min(
+                    12,
+                    max(2, math.ceil(payload.max_papers / max(1, len(retrieval_queries))) * 2),
+                )
+                for index, query_item in enumerate(retrieval_queries):
+                    query = query_item.query
                     search_terms.append(query)
-                    progress = 25 + min(index * 8, 20)
+                    progress = 25 + round((index / max(1, len(retrieval_queries))) * 20)
                     self._update(
                         job_id,
                         generation=generation,
                         progress=progress,
-                        message=f"正在通过 {search_provider.name} 检索：{query}",
+                        message=(
+                            f"正在通过 {search_provider.name} 检索 {index + 1}/{len(retrieval_queries)}："
+                            f"{query}"
+                        ),
+                        current_stage="paper_search",
+                        stage_timings=list(stage_timings),
                     )
                     try:
-                        papers.extend(search_provider.search(query, payload.max_papers))
+                        paper_groups.append(search_provider.search(query, per_query_limit))
                     except ProviderUnavailable as exc:
                         retrieval_interrupted = True
                         if not settings.demo_mode and index == 0:
@@ -268,9 +346,8 @@ class ResearchService:
                         if search_provider.name != "demo" and settings.demo_mode:
                             warnings.append("已切换到演示资料；演示资料不应当作为正式科学证据引用。")
                             search_provider = DemoSearchProvider()
-                            papers.extend(search_provider.search(query, payload.max_papers))
-                papers = _dedupe_papers(papers)
-                papers = papers[: payload.max_papers]
+                            paper_groups.append(search_provider.search(query, per_query_limit))
+                papers = _merge_paper_groups(paper_groups, payload.max_papers)
                 if not papers:
                     if retrieval_interrupted:
                         warnings.append(
@@ -280,9 +357,19 @@ class ResearchService:
                     else:
                         warnings.append("检索没有返回论文，请尝试补充英文关键词或切换数据源。")
 
-            self._update(job_id, generation=generation, progress=52, message="正在生成段落级证据卡")
+            transition(
+                "evidence_extraction",
+                "摘要证据抽取",
+                52,
+                f"正在从 {len(papers)} 篇论文摘要中提取分类证据",
+            )
             evidence = _build_evidence(payload.concept, papers)
-            self._update(job_id, generation=generation, progress=70, message="正在生成分层解释和概念关系")
+            transition(
+                "explanation_generation",
+                "分层解释生成",
+                70,
+                f"正在等待解释模型阅读 {len(papers)} 篇摘要并生成分层解释",
+            )
             try:
                 explanation = explanation_provider.explain(
                     payload.concept,
@@ -309,11 +396,15 @@ class ResearchService:
             # the optional links or returns an ID that is not part of this run.
             evidence_ids = {item.id for item in evidence}
             linked_ids = [item_id for item_id in explanation.evidence_ids if item_id in evidence_ids]
-            if not linked_ids and evidence:
-                linked_ids = [item.id for item in evidence]
             explanation = explanation.model_copy(update={"evidence_ids": linked_ids})
+            explanation = _normalize_evolution_provenance(explanation, papers, evidence)
 
-            self._update(job_id, generation=generation, progress=86, message="正在构建概念树")
+            transition(
+                "concept_graph",
+                "概念树与证据账本",
+                86,
+                "正在构建概念树并逐条匹配主张与证据",
+            )
             if not self._is_generation_current(generation):
                 return
             graph = _build_graph(
@@ -343,11 +434,11 @@ class ResearchService:
                 # them.  A branch failure is surfaced inside the brief rather
                 # than turning a missing community connector into a false
                 # novelty claim.
-                self._update(
-                    job_id,
-                    generation=generation,
-                    progress=90,
-                    message="三个研究 Agent 并行寻找痛点、脑暴和 Future Work",
+                transition(
+                    "research_agents",
+                    "研究 Agent 综合",
+                    90,
+                    "三个研究 Agent 并行寻找痛点、脑暴和 Future Work",
                 )
                 baseline_candidates = _build_innovation_candidates(
                     payload.concept, papers, explanation
@@ -364,6 +455,8 @@ class ResearchService:
                 )
                 innovation_candidates = research_brief.innovation_candidates
                 warnings.extend(research_brief.warnings)
+            finish_current_stage()
+            total_duration_ms = max(0, round((perf_counter() - pipeline_started) * 1000))
             result = AnalysisResult(
                 id=str(job_id),
                 concept=payload.concept,
@@ -372,6 +465,7 @@ class ResearchService:
                 provider=f"search={search_provider.name}; explanation={explanation_provider.name}",
                 warnings=warnings,
                 search_terms=search_terms,
+                retrieval_queries=retrieval_queries,
                 retrieval_scope=(
                     "摘要和论文元数据；研究模式额外检索限制、未来工作和方法对比词。"
                     if payload.level == "research"
@@ -389,23 +483,30 @@ class ResearchService:
                 ),
                 research_brief=research_brief,
                 evidence_ledger=evidence_ledger,
+                stage_timings=stage_timings,
+                total_duration_ms=total_duration_ms,
             )
             self._update(
                 job_id,
                 generation=generation,
                 status="completed",
                 progress=100,
-                message="分析完成",
+                message=f"分析完成，总耗时 {total_duration_ms / 1000:.1f} 秒",
+                current_stage=None,
+                stage_timings=stage_timings,
                 result=result,
                 completed_at=datetime.now(timezone.utc),
             )
         except Exception as exc:  # noqa: BLE001 - job must expose failure to the UI
+            finish_current_stage()
             self._update(
                 job_id,
                 generation=generation,
                 status="failed",
                 progress=100,
                 message="分析失败",
+                current_stage=None,
+                stage_timings=stage_timings,
                 error=str(exc),
                 completed_at=datetime.now(timezone.utc),
             )
@@ -452,27 +553,52 @@ def _explanation_provider(settings: Settings) -> ExplanationProvider:
 
 
 def _build_evidence(concept: str, papers: list[PaperRecord]) -> list[EvidenceCard]:
+    """Extract a few typed, sentence-level clues from every abstract.
+
+    The cards are deliberately smaller than the full abstract and retain the
+    exact sentence text.  This lets later claim matching distinguish a result
+    from a limitation instead of treating one generic paper card as support
+    for every generated statement.
+    """
+
     cards: list[EvidenceCard] = []
     for paper in papers:
         if not paper.abstract:
             continue
-        sentences = [part.strip() for part in paper.abstract.replace("?", ".").split(".") if part.strip()]
-        excerpt = " ".join(sentences[:3])
-        evidence_type, claim = _classify_abstract_evidence(paper.title, excerpt, concept)
-        cards.append(
-            EvidenceCard(
-                paper_id=paper.id,
-                claim=claim,
-                excerpt=excerpt,
-                location="abstract",
-                locator=EvidenceLocator(kind="abstract", url=paper.url),
-                evidence_type=evidence_type,
-                relation="background",
-                confidence="low" if paper.source_kind == "demo" else "medium",
-                verification_status="unverified",
-                source_url=paper.url,
+        sentences = _split_abstract_sentences(paper.abstract)
+        typed_excerpts: dict[str, str] = {}
+        for sentence in sentences:
+            evidence_type = _classify_abstract_sentence(sentence)
+            if evidence_type and evidence_type not in typed_excerpts:
+                typed_excerpts[evidence_type] = sentence
+            if len(typed_excerpts) >= 3:
+                break
+        if not typed_excerpts:
+            typed_excerpts["context"] = " ".join(sentences[:2]) or paper.abstract.strip()
+
+        for evidence_type, excerpt in typed_excerpts.items():
+            label = {
+                "definition": "定义",
+                "mechanism": "机制或方法",
+                "result": "实验结果",
+                "limitation": "限制或成本",
+                "future_work": "未解决问题或未来工作",
+                "context": "背景",
+            }[evidence_type]
+            cards.append(
+                EvidenceCard(
+                    paper_id=paper.id,
+                    claim=f"《{paper.title}》的摘要提供了与“{concept}”相关的{label}线索。",
+                    excerpt=excerpt,
+                    location="abstract",
+                    locator=EvidenceLocator(kind="abstract", url=paper.url),
+                    evidence_type=evidence_type,
+                    relation=("background" if evidence_type == "context" else "qualified_support"),
+                    confidence="low" if paper.source_kind == "demo" else "medium",
+                    verification_status="unverified",
+                    source_url=paper.url,
+                )
             )
-        )
     return cards
 
 
@@ -491,18 +617,8 @@ def _build_evidence_ledger(
     """
 
     evidence_by_id = {card.id: card for card in evidence}
+    paper_by_id = {paper.id: paper for paper in papers}
     claims: list[ClaimRecord] = []
-    type_map = {
-        "definition": "definition",
-        "mechanism": "mechanism",
-        "result": "result",
-        "limitation": "limitation",
-        "future_work": "research_gap",
-        "context": "definition",
-    }
-
-    def valid_ids(ids: list[str]) -> list[str]:
-        return [evidence_id for evidence_id in ids if evidence_id in evidence_by_id]
 
     def claim_status(linked_ids: list[str], *, hypothesis: bool = False) -> tuple[str, str]:
         if hypothesis or not linked_ids:
@@ -512,7 +628,7 @@ def _build_evidence_ledger(
             return "contradicted", "low"
         if any(card.relation == "qualified_support" for card in linked_cards):
             reviewed = any(card.verification_status == "reviewed" for card in linked_cards)
-            return "partially_supported", "medium" if reviewed else "low"
+            return ("partially_supported", "medium") if reviewed else ("unverified", "low")
         reviewed_cards = [card for card in linked_cards if card.verification_status == "reviewed"]
         if len(reviewed_cards) == len(linked_cards):
             confidence = "high" if all(card.confidence == "high" for card in linked_cards) else "medium"
@@ -524,8 +640,8 @@ def _build_evidence_ledger(
     def add_claim(
         text: str,
         claim_type: str,
-        evidence_ids: list[str],
         *,
+        preferred_evidence_ids: list[str] | None = None,
         scope: str = "",
         hypothesis: bool = False,
         next_action: str = "人工核对原文和适用边界",
@@ -533,20 +649,35 @@ def _build_evidence_ledger(
         text = text.strip()
         if not text:
             return
-        linked_ids = valid_ids(evidence_ids)
+        matches = _match_claim_evidence(
+            text,
+            claim_type,
+            evidence,
+            paper_by_id,
+            preferred_evidence_ids or [],
+        )
+        linked_ids = [card.id for card, _, _ in matches]
+        hypothesis = hypothesis and not linked_ids
         status, confidence = claim_status(linked_ids, hypothesis=hypothesis)
-        links = [
-            ClaimEvidenceLink(
-                evidence_id=evidence_id,
-                relation="background" if hypothesis else "supports",
-                note=(
-                    "模型/规则生成的待验证假设"
-                    if hypothesis
-                    else "该证据目前未完成全文级人工核验"
-                ),
+        links: list[ClaimEvidenceLink] = []
+        for card, score, overlap_count in matches:
+            relation = {
+                "supports": "supports",
+                "contradicts": "contradicts",
+                "qualified_support": "qualifies",
+                "background": "background",
+                "unclear": "background",
+            }[card.relation]
+            links.append(
+                ClaimEvidenceLink(
+                    evidence_id=card.id,
+                    relation=relation,
+                    note=(
+                        f"自动匹配：{card.evidence_type} 类型，重合词项 {overlap_count} 个，"
+                        f"相关度 {score:.2f}；摘要级，尚未全文核验"
+                    ),
+                )
             )
-            for evidence_id in linked_ids
-        ]
         claims.append(
             ClaimRecord(
                 text=text,
@@ -559,60 +690,38 @@ def _build_evidence_ledger(
             )
         )
 
-    all_evidence_ids = [card.id for card in evidence]
     add_claim(
         explanation.one_sentence,
         "definition",
-        explanation.evidence_ids or all_evidence_ids,
+        preferred_evidence_ids=explanation.evidence_ids,
         next_action="核对定义是否适用于当前任务和读者场景",
     )
     add_claim(
         explanation.technical,
         "mechanism",
-        explanation.evidence_ids or all_evidence_ids,
+        preferred_evidence_ids=explanation.evidence_ids,
         next_action="回到论文方法部分，确认机制、假设和计算条件",
     )
-    for index, item in enumerate(explanation.evolution[:12]):
-        nearest = [evidence[index].id] if index < len(evidence) else all_evidence_ids
-        add_claim(item, "evolution", nearest, next_action="核对时间线和论文版本关系")
-    limitation_ids = [card.id for card in evidence if card.evidence_type == "limitation"] or all_evidence_ids
+    if explanation.evolution_items:
+        for item in explanation.evolution_items[:12]:
+            year_prefix = f"{item.year}：" if item.year else ""
+            add_claim(
+                f"{year_prefix}{item.title}——{item.summary}",
+                "evolution",
+                preferred_evidence_ids=item.evidence_ids,
+                next_action="核对时间线、论文版本和摘要中的实际贡献",
+            )
+    else:
+        for item in explanation.evolution[:12]:
+            add_claim(item, "evolution", next_action="核对时间线和论文版本关系")
     for item in explanation.limitations[:12]:
-        add_claim(item, "limitation", limitation_ids, next_action="确认限制出现的实验条件和适用边界")
+        add_claim(item, "limitation", next_action="确认限制出现的实验条件和适用边界")
     for item in explanation.related_concepts[:12]:
         add_claim(
             f"“{item}”与当前概念存在值得继续核验的关联。",
             "related_concept",
-            [],
             hypothesis=True,
             next_action="检索该关联的定义、关系类型和代表性论文",
-        )
-
-    for card in evidence:
-        claim_type = type_map.get(card.evidence_type, "definition")
-        status = "contradicted" if card.relation == "contradicts" else "unverified"
-        locator = card.location or (card.locator.kind if card.locator else "未知")
-        relation = {
-            "supports": "supports",
-            "contradicts": "contradicts",
-            "qualified_support": "qualifies",
-            "background": "background",
-        }.get(card.relation, "background")
-        claims.append(
-            ClaimRecord(
-                text=card.claim,
-                claim_type=claim_type,
-                status=status,
-                confidence=card.confidence,
-                scope=f"来源：{card.paper_id}；位置：{locator}",
-                evidence_links=[
-                    ClaimEvidenceLink(
-                        evidence_id=card.id,
-                        relation=relation,
-                        note="由证据卡直接抽取；当前通常仍是摘要级线索",
-                    )
-                ],
-                next_action="打开来源并核对原文上下文",
-            )
         )
 
     linked_claim_count = sum(1 for claim in claims if claim.evidence_links)
@@ -632,6 +741,9 @@ def _build_evidence_ledger(
         warnings.append("当前所有证据卡尚未完成人工全文核验，主张状态保持为未验证。")
     if any(paper.source_kind == "demo" for paper in papers):
         warnings.append("账本中包含演示资料；演示资料不能作为正式论文证据引用。")
+    unlinked_count = sum(1 for claim in claims if not claim.evidence_links)
+    if unlinked_count:
+        warnings.append(f"有 {unlinked_count} 条主张没有达到自动匹配阈值，已明确保留为缺少证据。")
     return EvidenceLedger(
         analysis_id=analysis_id,
         claims=claims,
@@ -659,17 +771,213 @@ def _dedupe_papers(papers: list[PaperRecord]) -> list[PaperRecord]:
     return unique
 
 
-def _classify_abstract_evidence(title: str, excerpt: str, concept: str) -> tuple[str, str]:
-    """Assign a transparent, deliberately modest label to an abstract snippet."""
+def _dedupe_query_plan(items: list[SearchQueryPlan]) -> list[SearchQueryPlan]:
+    seen: set[str] = set()
+    unique: list[SearchQueryPlan] = []
+    for item in items:
+        key = " ".join(item.query.casefold().split())
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        unique.append(item)
+    return unique
 
-    text = f"{title} {excerpt}".lower()
-    if any(token in text for token in ("limitation", "trade-off", "bottleneck", "cost", "限制", "瓶颈")):
-        return "limitation", f"摘要提到了“{concept}”相关方法的限制或成本线索。"
-    if any(token in text for token in ("report", "result", "improv", "faster", "lower memory", "结果", "提升")):
-        return "result", f"摘要报告了“{concept}”相关方法的结果或性能线索。"
-    if any(token in text for token in ("introduc", "propos", "architecture", "mechanism", "algorithm", "机制", "算法")):
-        return "mechanism", f"摘要描述了“{concept}”相关方法的机制或算法线索。"
-    return "context", f"摘要提供了与“{concept}”相关的背景线索。"
+
+def _merge_paper_groups(groups: list[list[PaperRecord]], limit: int) -> list[PaperRecord]:
+    """Round-robin query result groups so the first angle cannot dominate."""
+
+    merged: list[PaperRecord] = []
+    seen: set[str] = set()
+    index = 0
+    while len(merged) < limit and any(index < len(group) for group in groups):
+        for group in groups:
+            if index >= len(group):
+                continue
+            paper = group[index]
+            key = (paper.canonical_id or paper.doi or paper.provider_id or paper.title).strip().casefold()
+            if key and key not in seen:
+                seen.add(key)
+                merged.append(paper)
+                if len(merged) >= limit:
+                    break
+        index += 1
+    return merged
+
+
+def _normalize_evolution_provenance(
+    explanation: ExplanationResult,
+    papers: list[PaperRecord],
+    evidence: list[EvidenceCard],
+) -> ExplanationResult:
+    """Keep only timeline IDs from this run and derive an auditable fallback."""
+
+    paper_by_id = {paper.id: paper for paper in papers}
+    evidence_by_id = {card.id: card for card in evidence}
+    title_to_id = {paper.title.casefold(): paper.id for paper in papers}
+    evidence_by_paper: dict[str, list[str]] = {}
+    for card in evidence:
+        evidence_by_paper.setdefault(card.paper_id, []).append(card.id)
+
+    normalized: list[EvolutionItem] = []
+    for item in explanation.evolution_items[:12]:
+        valid_paper_ids = [paper_id for paper_id in item.paper_ids if paper_id in paper_by_id]
+        if not valid_paper_ids:
+            matched_id = title_to_id.get(item.title.casefold())
+            if matched_id:
+                valid_paper_ids = [matched_id]
+        if not valid_paper_ids:
+            continue
+        valid_evidence_ids = [
+            evidence_id
+            for evidence_id in item.evidence_ids
+            if evidence_id in evidence_by_id
+            and evidence_by_id[evidence_id].paper_id in set(valid_paper_ids)
+        ]
+        if not valid_evidence_ids:
+            for paper_id in valid_paper_ids:
+                valid_evidence_ids.extend(evidence_by_paper.get(paper_id, []))
+        source_paper = paper_by_id[valid_paper_ids[0]]
+        normalized.append(
+            item.model_copy(
+                update={
+                    "year": source_paper.year if source_paper.year is not None else item.year,
+                    "paper_ids": valid_paper_ids[:3],
+                    "evidence_ids": list(dict.fromkeys(valid_evidence_ids))[:3],
+                }
+            )
+        )
+
+    if not normalized:
+        for paper in sorted(papers, key=lambda item: (item.year is None, item.year or 9999))[:8]:
+            matching_line = next(
+                (line for line in explanation.evolution if paper.title.casefold() in line.casefold()),
+                None,
+            )
+            normalized.append(
+                EvolutionItem(
+                    year=paper.year,
+                    title=paper.title,
+                    summary=(
+                        matching_line
+                        or "该论文摘要构成当前检索范围内的一条方法演变线索；具体贡献需打开原文核对。"
+                    ),
+                    paper_ids=[paper.id],
+                    evidence_ids=evidence_by_paper.get(paper.id, [])[:3],
+                )
+            )
+    normalized.sort(key=lambda item: (item.year is None, item.year or 9999, item.title.casefold()))
+    return explanation.model_copy(update={"evolution_items": normalized})
+
+
+def _split_abstract_sentences(abstract: str) -> list[str]:
+    normalized = re.sub(r"\s+", " ", abstract).strip()
+    if not normalized:
+        return []
+    parts = re.split(r"(?<=[.!?。！？])\s+|(?<=[。！？])", normalized)
+    return [part.strip() for part in parts if part.strip()]
+
+
+_ABSTRACT_TYPE_PATTERNS: dict[str, tuple[str, ...]] = {
+    "future_work": (
+        "future work", "future research", "further work", "remains open",
+        "open problem", "next step", "未来工作", "后续工作", "有待研究", "仍待解决",
+    ),
+    "limitation": (
+        "limitation", "limited by", "trade-off", "tradeoff", "bottleneck",
+        "overhead", "cost", "challenge", "drawback", "限制", "瓶颈", "开销", "代价", "挑战",
+    ),
+    "result": (
+        "we show", "we find", "we demonstrate", "results show", "outperform",
+        "improve", "reduce", "faster", "lower memory", "accuracy", "结果", "提升", "降低", "优于",
+    ),
+    "mechanism": (
+        "we propose", "we introduce", "we present", "architecture", "mechanism",
+        "algorithm", "framework", "method", "approach", "通过", "提出", "机制", "算法", "框架", "方法",
+    ),
+    "definition": (
+        "is a", "refers to", "defined as", "we study", "we investigate",
+        "是一种", "是指", "定义为", "研究的是",
+    ),
+}
+
+
+def _classify_abstract_sentence(sentence: str) -> str | None:
+    """Classify one exact abstract sentence using visible keyword rules."""
+
+    text = sentence.casefold()
+    for evidence_type in ("future_work", "limitation", "result", "mechanism", "definition"):
+        if any(token in text for token in _ABSTRACT_TYPE_PATTERNS[evidence_type]):
+            return evidence_type
+    return None
+
+
+_TOKEN_STOPWORDS = {
+    "the", "and", "for", "with", "from", "that", "this", "into", "using", "based",
+    "一个", "一种", "相关", "当前", "概念", "存在", "值得", "继续", "核验", "论文", "摘要",
+}
+
+
+def _match_tokens(text: str) -> set[str]:
+    tokens: set[str] = set()
+    for word in re.findall(r"[a-zA-Z][a-zA-Z0-9_-]{1,}", text.casefold()):
+        if word in _TOKEN_STOPWORDS:
+            continue
+        for suffix in ("ing", "ed", "es", "s"):
+            if word.endswith(suffix) and len(word) - len(suffix) >= 4:
+                word = word[: -len(suffix)]
+                break
+        tokens.add(word)
+    for phrase in re.findall(r"[\u4e00-\u9fff]{2,}", text):
+        if phrase in _TOKEN_STOPWORDS:
+            continue
+        max_width = min(4, len(phrase))
+        for width in range(2, max_width + 1):
+            tokens.update(phrase[index : index + width] for index in range(len(phrase) - width + 1))
+    return tokens
+
+
+_TYPE_COMPATIBILITY: dict[str, dict[str, float]] = {
+    "definition": {"definition": 1.8, "context": 0.9},
+    "mechanism": {"mechanism": 1.8, "result": 0.45},
+    "result": {"result": 1.8, "mechanism": 0.35},
+    "evolution": {"mechanism": 0.8, "result": 0.9, "context": 0.35},
+    "limitation": {"limitation": 2.0, "future_work": 1.2},
+    "research_gap": {"future_work": 2.0, "limitation": 0.8},
+    "related_concept": {},
+    "hypothesis": {},
+}
+
+
+def _match_claim_evidence(
+    claim_text: str,
+    claim_type: str,
+    evidence: list[EvidenceCard],
+    paper_by_id: dict[str, PaperRecord],
+    preferred_evidence_ids: list[str],
+) -> list[tuple[EvidenceCard, float, int]]:
+    """Rank at most three evidence cards and refuse low-relevance links."""
+
+    claim_tokens = _match_tokens(claim_text)
+    preferred = set(preferred_evidence_ids)
+    compatibility = _TYPE_COMPATIBILITY.get(claim_type, {})
+    ranked: list[tuple[EvidenceCard, float, int]] = []
+    for card in evidence:
+        paper = paper_by_id.get(card.paper_id)
+        source_text = f"{paper.title if paper else ''} {card.excerpt}"
+        overlap_count = len(claim_tokens & _match_tokens(source_text))
+        type_score = compatibility.get(card.evidence_type, 0.0)
+        preferred_bonus = 1.25 if card.id in preferred else 0.0
+        # A model-provided ID is a useful hint, not permission to link an
+        # unrelated card.  Without either text overlap or strong type fit, the
+        # claim stays visibly unlinked.
+        if overlap_count == 0 and preferred_bonus == 0:
+            continue
+        score = min(overlap_count, 8) * 0.42 + type_score + preferred_bonus
+        threshold = 0.75 if claim_type == "related_concept" else 1.05
+        if score >= threshold:
+            ranked.append((card, score, overlap_count))
+    ranked.sort(key=lambda item: (-item[1], -item[2], item[0].id))
+    return ranked[:3]
 
 
 def _build_graph(

@@ -2,6 +2,8 @@ from fastapi.testclient import TestClient
 
 from app.config import Settings, get_settings
 from app.main import app
+from app.research_schemas import ExplanationResult, PaperRecord
+from app.services.research_service import _build_evidence, _build_evidence_ledger
 
 
 client = TestClient(app)
@@ -72,3 +74,41 @@ def test_quick_analysis_ledger_marks_explanation_as_unverified() -> None:
         assert ledger["warnings"]
     finally:
         app.dependency_overrides.clear()
+
+
+def test_claim_matching_is_sparse_typed_and_keeps_irrelevant_claim_unlinked() -> None:
+    paper = PaperRecord(
+        id="paper-paged-cache",
+        title="Paged KV Cache Management",
+        year=2024,
+        abstract=(
+            "We propose a fixed-size paging method for KV cache management. "
+            "Results show lower memory fragmentation and higher serving throughput. "
+            "However, page-table overhead remains a limitation for very short requests."
+        ),
+        source="test_fixture",
+        source_kind="academic",
+        access_type="abstract_only",
+    )
+    evidence = _build_evidence("KV cache compression", [paper])
+    explanation = ExplanationResult(
+        one_sentence="This claim is about an unrelated botanical taxonomy.",
+        intuitive="A paging analogy can help explain the idea.",
+        technical="The method uses fixed-size paging for KV cache management.",
+        limitations=["Page-table overhead is a limitation for short requests."],
+        related_concepts=[],
+        evidence_ids=[],
+    )
+
+    ledger = _build_evidence_ledger("analysis-test", explanation, evidence, [paper])
+
+    assert all(len(claim.evidence_links) <= 3 for claim in ledger.claims)
+    definition = next(claim for claim in ledger.claims if claim.claim_type == "definition")
+    mechanism = next(claim for claim in ledger.claims if claim.claim_type == "mechanism")
+    limitation = next(claim for claim in ledger.claims if claim.claim_type == "limitation")
+    assert definition.evidence_links == []
+    assert mechanism.evidence_links
+    assert limitation.evidence_links
+    assert all(link.relation in {"qualifies", "background"} for link in mechanism.evidence_links)
+    assert any("自动匹配" in link.note for link in limitation.evidence_links)
+    assert len(ledger.claims) == 3

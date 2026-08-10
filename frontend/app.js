@@ -263,8 +263,15 @@ const displayLabels = {
   evolution: "演变",
   limitation: "限制",
   result: "结果",
+  context: "背景",
+  future_work: "未来工作",
   related_concept: "相关概念",
   research_gap: "研究空白",
+  core: "核心术语",
+  foundational: "基础术语",
+  recent: "近期术语",
+  limitations: "限制与未来工作",
+  comparison: "方法对比",
 };
 
 function displayLabel(value) {
@@ -544,6 +551,26 @@ function resetAnalysisView() {
 function renderExplanation(result) {
   const explanation = result.explanation;
   const warnings = result.warnings || [];
+  const paperById = new Map((result.papers || []).map((paper) => [paper.id, paper]));
+  const evolutionItems = explanation.evolution_items || [];
+  const evolutionHtml = evolutionItems.length
+    ? `<ol class="evolution-timeline">${evolutionItems.map((item) => {
+        const sources = (item.paper_ids || []).map((paperId) => {
+          const paper = paperById.get(paperId);
+          if (!paper) return "";
+          const sourceUrl = safeExternalUrl(paper.url);
+          const label = escapeHtml(paper.title);
+          return sourceUrl
+            ? `<a href="${escapeHtml(sourceUrl)}" target="_blank" rel="noopener noreferrer">${label} ↗</a>`
+            : `<span>${label}</span>`;
+        }).filter(Boolean).join("");
+        return `<li>
+          <span class="timeline-year">${escapeHtml(item.year || "年份未知")}</span>
+          <div><strong>${escapeHtml(item.title)}</strong><p>${escapeHtml(item.summary)}</p>
+          <small>${sources || "未关联可打开的论文来源"} · ${escapeHtml((item.evidence_ids || []).length)} 条摘要证据</small></div>
+        </li>`;
+      }).join("")}</ol>`
+    : `<ol>${(explanation.evolution || []).map((item) => `<li>${escapeHtml(item)}</li>`).join("") || "<li>暂无足够资料</li>"}</ol>`;
   explanationEl.innerHTML = `
     ${warnings.length ? `<div class="warning-box"><strong>需要注意</strong><ul>${warnings.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul></div>` : ""}
     <section class="explanation-section featured-explanation">
@@ -561,7 +588,7 @@ function renderExplanation(result) {
     <section class="explanation-columns">
       <div class="explanation-section">
         <p class="section-label">演变过程</p>
-        <ol>${(explanation.evolution || []).map((item) => `<li>${escapeHtml(item)}</li>`).join("") || "<li>暂无足够资料</li>"}</ol>
+        ${evolutionHtml}
       </div>
       <div class="explanation-section">
         <p class="section-label">相关概念</p>
@@ -588,12 +615,24 @@ function renderPapers(result) {
     items.push(item);
     evidenceByPaper.set(item.paper_id, items);
   });
-  const retrievalSummary = result.search_terms?.length
+  const queryItems = result.retrieval_queries?.length
+    ? result.retrieval_queries.map((item) => `<span class="query-angle"><b>${escapeHtml(displayLabel(item.purpose))}</b>${escapeHtml(item.query)}</span>`).join("")
+    : (result.search_terms || []).map((item) => `<span class="query-angle">${escapeHtml(item)}</span>`).join("");
+  const timingItems = (result.stage_timings || []).map((item) =>
+    `<span>${escapeHtml(item.label)} ${(Number(item.duration_ms || 0) / 1000).toFixed(1)}s</span>`
+  ).join("");
+  const retrievalSummary = result.search_terms?.length || timingItems
     ? `<div class="retrieval-summary"><strong>本次检索范围：</strong>${escapeHtml(result.retrieval_scope || "摘要和元数据")}
-        <br /><strong>检索词：</strong>${result.search_terms.map(escapeHtml).join(" · ")}</div>`
+        ${queryItems ? `<div class="query-angle-list">${queryItems}</div>` : ""}
+        ${timingItems ? `<div class="timing-list"><strong>阶段耗时：</strong>${timingItems}<span>总计 ${(Number(result.total_duration_ms || 0) / 1000).toFixed(1)}s</span></div>` : ""}
+        <div class="paper-list-actions"><button type="button" class="secondary" data-paper-action="expand">展开全部论文</button><button type="button" class="secondary" data-paper-action="collapse">收起全部论文</button></div>
+      </div>`
     : "";
   papersEl.innerHTML = retrievalSummary + result.papers.map((paper) => {
     const sourceUrl = safeExternalUrl(paper.url);
+    const abstract = paper.abstract || "暂无摘要";
+    const preview = abstract.length > 320 ? `${abstract.slice(0, 320).trim()}…` : abstract;
+    const paperEvidence = evidenceByPaper.get(paper.id) || [];
     return `
     <article class="paper-row">
       <div class="paper-main">
@@ -602,14 +641,18 @@ function renderPapers(result) {
           <span class="tag ${paper.source_kind === "demo" ? "tag-missing" : "tag-configured"}">${escapeHtml(displayLabel(paper.source_kind))}</span>
         </div>
         <p class="paper-meta">${escapeHtml((paper.authors || []).slice(0, 3).join(", ") || "作者未提供")} · ${escapeHtml(paper.year || "年份未知")} · ${escapeHtml(paper.venue || paper.source)} · ${escapeHtml(displayLabel(paper.access_type))}</p>
-        <p class="paper-abstract">${escapeHtml(paper.abstract || "暂无摘要")}</p>
-        ${(evidenceByPaper.get(paper.id) || []).map((item) => `
-          <div class="evidence-item">
-            <span class="evidence-label">摘要片段 · ${escapeHtml(displayLabel(item.relation || "background"))} · ${escapeHtml(item.confidence)}</span>
-            <p>${escapeHtml(item.excerpt)}</p>
-            <small>${escapeHtml(item.location || item.locator?.kind || "摘要")} · ${escapeHtml(displayLabel(item.verification_status || "unverified"))} · ${escapeHtml(item.claim)}</small>
-          </div>
-        `).join("")}
+        <p class="paper-abstract paper-abstract-preview">${escapeHtml(preview)}</p>
+        <details class="paper-details">
+          <summary>展开完整摘要与 ${escapeHtml(paperEvidence.length)} 条分类证据</summary>
+          <p class="paper-abstract paper-abstract-full">${escapeHtml(abstract)}</p>
+          ${paperEvidence.map((item) => `
+            <div class="evidence-item">
+              <span class="evidence-label">${escapeHtml(displayLabel(item.evidence_type || "context"))} · ${escapeHtml(displayLabel(item.relation || "background"))} · ${escapeHtml(item.confidence)}</span>
+              <p>${escapeHtml(item.excerpt)}</p>
+              <small>${escapeHtml(item.location || item.locator?.kind || "摘要")} · ${escapeHtml(displayLabel(item.verification_status || "unverified"))} · ${escapeHtml(item.claim)}</small>
+            </div>
+          `).join("")}
+        </details>
       </div>
       ${sourceUrl ? `<a class="source-link" href="${escapeHtml(sourceUrl)}" target="_blank" rel="noopener noreferrer">打开来源 ↗</a>` : ""}
     </article>
@@ -630,25 +673,86 @@ function renderEvidenceLedger(result) {
   ledgerCoverageEl.textContent = `证据关联 ${linkCoverage}% · 已核验 ${verifiedCoverage}% · ${ledger.linked_claim_count || 0}/${ledger.claims?.length || 0} 条主张`;
   ledgerMessageEl.textContent = (ledger.warnings || []).join(" ") || "每条主张都可以展开查看关联证据。";
   const evidenceById = new Map((result.evidence || []).map((item) => [item.id, item]));
-  ledgerClaimsEl.innerHTML = (ledger.claims || []).map((claim) => {
+  const paperById = new Map((result.papers || []).map((item) => [item.id, item]));
+  const renderClaim = (claim) => {
     const links = (claim.evidence_links || []).map((link) => {
       const card = evidenceById.get(link.evidence_id);
-      return `<li><span class="tag">${escapeHtml(displayLabel(link.relation || "background"))}</span> ${escapeHtml(card?.claim || link.evidence_id)}<small>${escapeHtml(link.note || "")}</small></li>`;
+      const paper = card ? paperById.get(card.paper_id) : null;
+      return `<li><span class="tag">${escapeHtml(displayLabel(link.relation || "background"))}</span> ${escapeHtml(card?.excerpt || card?.claim || link.evidence_id)}<small>${escapeHtml(paper?.title || card?.paper_id || "来源未知")} · ${escapeHtml(link.note || "")}</small></li>`;
     }).join("");
     const statusClass = ["supported", "partially_supported"].includes(claim.status) ? "tag-configured" : "tag-missing";
     return `
-      <article class="ledger-claim ${escapeHtml(claim.status || "unverified")}">
-        <div class="ledger-claim-heading">
+      <details class="ledger-claim ${escapeHtml(claim.status || "unverified")}" data-has-evidence="${links ? "true" : "false"}">
+        <summary class="ledger-claim-heading">
           <span class="tag">${escapeHtml(displayLabel(claim.claim_type || "definition"))}</span>
+          <span class="ledger-claim-preview">${escapeHtml(claim.text)}</span>
           <span class="tag ${statusClass}">${escapeHtml(displayLabel(claim.status || "unverified"))} · ${escapeHtml(claim.confidence || "low")}</span>
+        </summary>
+        <div class="ledger-claim-body">
+          <p>${escapeHtml(claim.text)}</p>
+          ${claim.scope ? `<small class="ledger-scope">${escapeHtml(claim.scope)}</small>` : ""}
+          ${links ? `<ul class="ledger-links">${links}</ul>` : `<p class="warning-inline">缺少达到匹配阈值的摘要证据。${escapeHtml(claim.next_action || "需要人工核验")}</p>`}
         </div>
-        <p>${escapeHtml(claim.text)}</p>
-        ${claim.scope ? `<small class="ledger-scope">${escapeHtml(claim.scope)}</small>` : ""}
-        ${links ? `<ul class="ledger-links">${links}</ul>` : `<p class="warning-inline">${escapeHtml(claim.next_action || "需要人工核验")}</p>`}
-      </article>
+      </details>
     `;
-  }).join("") || '<p class="empty">当前没有可展示的主张。</p>';
+  };
+  const grouped = new Map();
+  (ledger.claims || []).forEach((claim) => {
+    const items = grouped.get(claim.claim_type) || [];
+    items.push(claim);
+    grouped.set(claim.claim_type, items);
+  });
+  const groupsHtml = [...grouped.entries()].map(([claimType, claims], index) => `
+    <details class="ledger-group" ${index === 0 ? "open" : ""}>
+      <summary><span>${escapeHtml(displayLabel(claimType))}</span><small>${claims.length} 条 · ${claims.filter((claim) => claim.evidence_links?.length).length} 条有证据</small></summary>
+      <div class="ledger-group-content">${claims.map(renderClaim).join("")}</div>
+    </details>
+  `).join("");
+  ledgerClaimsEl.innerHTML = `
+    <div class="ledger-toolbar">
+      <button type="button" class="secondary" data-ledger-action="expand">展开全部</button>
+      <button type="button" class="secondary" data-ledger-action="collapse">收起全部</button>
+      <button type="button" class="secondary" data-ledger-action="missing" aria-pressed="false">只看缺少证据</button>
+    </div>
+    ${groupsHtml || '<p class="empty">当前没有可展示的主张。</p>'}
+  `;
 }
+
+papersEl.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-paper-action]");
+  if (!button) return;
+  const shouldOpen = button.dataset.paperAction === "expand";
+  papersEl.querySelectorAll("details.paper-details").forEach((details) => {
+    details.open = shouldOpen;
+  });
+});
+
+ledgerClaimsEl.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-ledger-action]");
+  if (!button) return;
+  const action = button.dataset.ledgerAction;
+  if (["expand", "collapse"].includes(action)) {
+    const shouldOpen = action === "expand";
+    ledgerClaimsEl.querySelectorAll("details").forEach((details) => {
+      details.open = shouldOpen;
+    });
+    return;
+  }
+  if (action === "missing") {
+    const active = button.getAttribute("aria-pressed") !== "true";
+    button.setAttribute("aria-pressed", String(active));
+    button.textContent = active ? "显示全部主张" : "只看缺少证据";
+    ledgerClaimsEl.querySelectorAll(".ledger-claim").forEach((claim) => {
+      claim.classList.toggle("is-filtered-out", active && claim.dataset.hasEvidence === "true");
+    });
+    ledgerClaimsEl.querySelectorAll(".ledger-group").forEach((group) => {
+      const hasMissing = [...group.querySelectorAll(".ledger-claim")]
+        .some((claim) => claim.dataset.hasEvidence === "false");
+      group.classList.toggle("is-filtered-out", active && !hasMissing);
+      if (active && hasMissing) group.open = true;
+    });
+  }
+});
 
 function renderInnovations(result) {
   const candidates = result.innovation_candidates || [];
@@ -1633,7 +1737,11 @@ async function pollAnalysis(id) {
   const response = await apiFetch(`/api/v1/analyses/${encodeURIComponent(id)}`);
   if (!response.ok) throw new Error("analysis request failed");
   const job = await response.json();
-  setAnalysisMessage(`${job.message} · ${job.progress}%`);
+  const createdAt = Date.parse(job.created_at || "");
+  const elapsedSeconds = Number.isFinite(createdAt)
+    ? Math.max(0, (Date.now() - createdAt) / 1000).toFixed(1)
+    : null;
+  setAnalysisMessage(`${job.message} · ${job.progress}%${elapsedSeconds ? ` · 已用 ${elapsedSeconds}s` : ""}`);
   if (job.status === "completed") {
     analysisSubmit.disabled = false;
     renderAnalysis(job.result);
