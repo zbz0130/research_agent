@@ -35,6 +35,8 @@ ClaimStatus = Literal[
     "hypothesis",
 ]
 ClaimRelation = Literal["supports", "contradicts", "qualifies", "background"]
+LinkOrigin = Literal["model_quote", "model_hint_validated", "automatic_match", "manual"]
+MatchStrength = Literal["strong", "moderate", "weak"]
 
 
 class ClaimEvidenceLink(BaseModel):
@@ -45,6 +47,25 @@ class ClaimEvidenceLink(BaseModel):
     evidence_id: str = Field(min_length=1, max_length=200)
     relation: ClaimRelation = "supports"
     note: str = Field(default="", max_length=1000)
+    origin: LinkOrigin = "automatic_match"
+    match_strength: MatchStrength = "weak"
+    match_score: float = Field(default=0.0, ge=0.0)
+    matched_terms: list[str] = Field(default_factory=list, max_length=20)
+    evidence_scope: Literal["abstract", "full_text", "metadata", "unknown"] = "unknown"
+    verification_status: Literal["unverified", "reviewed"] = "unverified"
+    review_note: str = Field(default="", max_length=2000)
+    reviewed_by: str | None = Field(default=None, max_length=200)
+    reviewed_at: datetime | None = None
+
+
+class ClaimEvidenceReview(BaseModel):
+    """A researcher's explicit review of one claim-to-evidence relationship."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    relation: ClaimRelation
+    review_note: str = Field(min_length=2, max_length=2000)
+    reviewed_by: str = Field(default="本地研究者", min_length=1, max_length=200)
 
 
 class ClaimRecord(BaseModel):
@@ -80,6 +101,12 @@ class EvidenceLedger(BaseModel):
     coverage: float = Field(default=0.0, ge=0.0, le=1.0)
     link_coverage: float = Field(default=0.0, ge=0.0, le=1.0)
     verified_coverage: float = Field(default=0.0, ge=0.0, le=1.0)
+    direct_support_claim_count: int = Field(default=0, ge=0)
+    qualified_claim_count: int = Field(default=0, ge=0)
+    background_only_claim_count: int = Field(default=0, ge=0)
+    unlinked_claim_count: int = Field(default=0, ge=0)
+    direct_support_coverage: float = Field(default=0.0, ge=0.0, le=1.0)
+    qualified_coverage: float = Field(default=0.0, ge=0.0, le=1.0)
     contradicted_claim_count: int = Field(default=0, ge=0)
     warnings: list[str] = Field(default_factory=list, max_length=30)
     generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

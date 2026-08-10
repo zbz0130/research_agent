@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import logging
 import math
@@ -11,6 +12,7 @@ from uuid import UUID
 
 from app.config import Settings
 from app.evidence_schemas import (
+    ClaimEvidenceReview,
     ClaimEvidenceLink,
     ClaimRecord,
     EvidenceLedger,
@@ -59,6 +61,21 @@ class AnalysisNotFound(KeyError):
     pass
 
 
+class EvidenceLinkNotFound(KeyError):
+    pass
+
+
+@dataclass(frozen=True)
+class EvidenceMatch:
+    card: EvidenceCard
+    score: float
+    overlap_count: int
+    matched_terms: list[str]
+    relation: str
+    origin: str
+    match_strength: str
+
+
 class ResearchService:
     """Orchestrates the first concept-to-evidence analysis pipeline."""
 
@@ -93,6 +110,90 @@ class ResearchService:
                 if job is None:
                     raise AnalysisNotFound(job_id)
                 self._jobs[job.id] = job
+            return job.model_copy(deep=True)
+
+    def review_evidence_link(
+        self,
+        job_id: UUID,
+        claim_id: str,
+        evidence_id: str,
+        payload: ClaimEvidenceReview,
+    ) -> AnalysisJob:
+        """Persist a researcher's verdict on one claim-to-evidence edge."""
+
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                job = storage.get_analysis(str(job_id))
+                if job is None:
+                    raise AnalysisNotFound(job_id)
+                self._jobs[job.id] = job
+            if job.result is None or job.result.evidence_ledger is None:
+                raise EvidenceLinkNotFound((claim_id, evidence_id))
+
+            reviewed_at = datetime.now(timezone.utc)
+            reviewed_claims: list[ClaimRecord] = []
+            found = False
+            for claim in job.result.evidence_ledger.claims:
+                if claim.id != claim_id:
+                    reviewed_claims.append(claim)
+                    continue
+                links: list[ClaimEvidenceLink] = []
+                for link in claim.evidence_links:
+                    if link.evidence_id != evidence_id:
+                        links.append(link)
+                        continue
+                    found = True
+                    links.append(
+                        link.model_copy(
+                            update={
+                                "relation": payload.relation,
+                                "origin": "manual",
+                                "verification_status": "reviewed",
+                                "review_note": payload.review_note,
+                                "reviewed_by": payload.reviewed_by,
+                                "reviewed_at": reviewed_at,
+                            }
+                        )
+                    )
+                reviewed_count = sum(link.verification_status == "reviewed" for link in links)
+                scope = re.sub(
+                    r"人工确认\s+\d+/\d+",
+                    f"人工确认 {reviewed_count}/{len(links)}",
+                    claim.scope,
+                )
+                reviewed_claims.append(claim.model_copy(update={"evidence_links": links, "scope": scope}))
+
+            if not found:
+                raise EvidenceLinkNotFound((claim_id, evidence_id))
+
+            card_relation = {
+                "supports": "supports",
+                "qualifies": "qualified_support",
+                "contradicts": "contradicts",
+                "background": "background",
+            }[payload.relation]
+            reviewed_evidence = [
+                card.model_copy(
+                    update={
+                        "relation": card_relation,
+                        "verification_status": "reviewed",
+                        "review_note": payload.review_note,
+                        "reviewed_by": payload.reviewed_by,
+                        "reviewed_at": reviewed_at,
+                    }
+                )
+                if card.id == evidence_id
+                else card
+                for card in job.result.evidence
+            ]
+            ledger = _ledger_with_metrics(
+                job.result.evidence_ledger.model_copy(update={"claims": reviewed_claims})
+            )
+            job.result = job.result.model_copy(
+                update={"evidence": reviewed_evidence, "evidence_ledger": ledger}
+            )
+            storage.save_analysis(job)
             return job.model_copy(deep=True)
 
     def list(self) -> list[AnalysisSummary]:
@@ -358,7 +459,18 @@ class ResearchService:
                         )
                     except ProviderUnavailable as exc:
                         warnings.append(str(exc))
-                        warnings.append("补充检索词规划失败；本次结果仅覆盖首轮查询。")
+                        warnings.append("补充检索词规划失败；将尝试可追溯关键词规则。")
+                    if not feedback_queries:
+                        feedback_queries = RuleBasedExplanationProvider().plan_followup_queries(
+                            payload.concept,
+                            initial_papers,
+                            retrieval_queries,
+                            payload.language,
+                        )
+                        if feedback_queries:
+                            warnings.append(
+                                "摘要反馈模型未生成可用查询，已使用可追溯关键词规则补充检索词。"
+                            )
                     feedback_queries = [
                         item.model_copy(update={"phase": "feedback"})
                         for item in _dedupe_query_plan(feedback_queries)
@@ -396,6 +508,10 @@ class ResearchService:
                                 retrieval_interrupted = True
                                 warnings.append(str(exc))
                         retrieval_queries.extend(feedback_queries)
+                    else:
+                        warnings.append(
+                            "首轮摘要未产生通过校验的补充检索词；本次未执行摘要反馈检索。"
+                        )
                 papers = _merge_paper_groups(paper_groups, payload.max_papers)
                 if not papers:
                     if retrieval_interrupted:
@@ -441,6 +557,12 @@ class ResearchService:
                     payload.language,
                 )
 
+            explanation, evidence = _augment_evidence_from_claim_quotes(
+                explanation,
+                papers,
+                evidence,
+            )
+            explanation = _soften_unverified_strong_language(explanation)
             # Keep the explanation auditable even when a compatible model omits
             # the optional links or returns an ID that is not part of this run.
             evidence_ids = {item.id for item in evidence}
@@ -602,48 +724,39 @@ def _explanation_provider(settings: Settings) -> ExplanationProvider:
 
 
 def _build_evidence(concept: str, papers: list[PaperRecord]) -> list[EvidenceCard]:
-    """Extract a few typed, sentence-level clues from every abstract.
-
-    The cards are deliberately smaller than the full abstract and retain the
-    exact sentence text.  This lets later claim matching distinguish a result
-    from a limitation instead of treating one generic paper card as support
-    for every generated statement.
-    """
+    """Keep multi-label sentence candidates for later claim-driven alignment."""
 
     cards: list[EvidenceCard] = []
     for paper in papers:
         if not paper.abstract:
             continue
         sentences = _split_abstract_sentences(paper.abstract)
-        candidates: dict[str, str] = {}
+        candidates: list[tuple[str, list[str], str]] = []
+        seen_sentences: set[str] = set()
         for sentence in sentences:
-            evidence_type = _classify_abstract_sentence(sentence)
-            if evidence_type and evidence_type not in candidates:
-                candidates[evidence_type] = sentence
-        typed_excerpts = {
-            evidence_type: candidates[evidence_type]
-            for evidence_type in (
-                "limitation",
-                "future_work",
-                "result",
-                "mechanism",
-                "definition",
-            )
-            if evidence_type in candidates
-        }
-        typed_excerpts = dict(list(typed_excerpts.items())[:3])
-        if not typed_excerpts:
-            typed_excerpts["context"] = " ".join(sentences[:2]) or paper.abstract.strip()
+            normalized_sentence = _normalize_quote(sentence)
+            if not normalized_sentence or normalized_sentence in seen_sentences:
+                continue
+            evidence_types = _classify_abstract_sentence_types(sentence)
+            if not evidence_types:
+                continue
+            seen_sentences.add(normalized_sentence)
+            primary_type = _primary_evidence_type(evidence_types)
+            candidates.append((sentence, evidence_types, primary_type))
+        if not candidates:
+            excerpt = " ".join(sentences[:2]) or paper.abstract.strip()
+            candidates.append((excerpt, ["context"], "context"))
 
-        for evidence_type, excerpt in typed_excerpts.items():
-            label = {
+        for excerpt, evidence_types, evidence_type in candidates[:8]:
+            labels = {
                 "definition": "定义",
                 "mechanism": "机制或方法",
                 "result": "实验结果",
                 "limitation": "限制或成本",
                 "future_work": "未解决问题或未来工作",
                 "context": "背景",
-            }[evidence_type]
+            }
+            label = "、".join(labels[item] for item in evidence_types)
             cards.append(
                 EvidenceCard(
                     paper_id=paper.id,
@@ -652,7 +765,8 @@ def _build_evidence(concept: str, papers: list[PaperRecord]) -> list[EvidenceCar
                     location="abstract",
                     locator=EvidenceLocator(kind="abstract", url=paper.url),
                     evidence_type=evidence_type,
-                    relation=("background" if evidence_type == "context" else "qualified_support"),
+                    evidence_types=evidence_types,
+                    relation=("background" if evidence_type == "context" else "unclear"),
                     confidence="low" if paper.source_kind == "demo" else "medium",
                     verification_status="unverified",
                     source_url=paper.url,
@@ -667,34 +781,10 @@ def _build_evidence_ledger(
     evidence: list[EvidenceCard],
     papers: list[PaperRecord],
 ) -> EvidenceLedger:
-    """Create a conservative claim-to-evidence view for an analysis.
-
-    The first version often has abstract snippets rather than manually
-    reviewed full text. Therefore a linked claim is not automatically called
-    ``supported``: it remains ``unverified`` until the underlying evidence
-    card is reviewed.
-    """
-
+    """Create claim-driven links whose labels keep matching and review separate."""
     evidence_by_id = {card.id: card for card in evidence}
     paper_by_id = {paper.id: paper for paper in papers}
     claims: list[ClaimRecord] = []
-
-    def claim_status(linked_ids: list[str], *, hypothesis: bool = False) -> tuple[str, str]:
-        if hypothesis or not linked_ids:
-            return ("hypothesis" if hypothesis else "unverified"), "low"
-        linked_cards = [evidence_by_id[item] for item in linked_ids]
-        if any(card.relation == "contradicts" for card in linked_cards):
-            return "contradicted", "low"
-        if any(card.relation == "qualified_support" for card in linked_cards):
-            reviewed = any(card.verification_status == "reviewed" for card in linked_cards)
-            return ("partially_supported", "medium") if reviewed else ("unverified", "low")
-        reviewed_cards = [card for card in linked_cards if card.verification_status == "reviewed"]
-        if len(reviewed_cards) == len(linked_cards):
-            confidence = "high" if all(card.confidence == "high" for card in linked_cards) else "medium"
-            return "supported", confidence
-        if reviewed_cards:
-            return "partially_supported", "medium" if any(card.confidence in {"high", "medium"} for card in reviewed_cards) else "low"
-        return "unverified", "medium" if any(card.confidence == "medium" for card in linked_cards) else "low"
 
     def add_claim(
         text: str,
@@ -702,8 +792,9 @@ def _build_evidence_ledger(
         *,
         preferred_evidence_ids: list[str] | None = None,
         preferred_paper_ids: list[str] | None = None,
+        evidence_quotes: list[str] | None = None,
         allowed_evidence_types: set[str] | None = None,
-        scope: str = "",
+        scope_context: str = "",
         hypothesis: bool = False,
         next_action: str = "人工核对原文和适用边界",
     ) -> None:
@@ -717,29 +808,33 @@ def _build_evidence_ledger(
             paper_by_id,
             preferred_evidence_ids or [],
             preferred_paper_ids or [],
+            evidence_quotes or [],
             allowed_evidence_types,
         )
-        linked_ids = [card.id for card, _, _ in matches]
-        status, confidence = claim_status(linked_ids, hypothesis=hypothesis)
-        links: list[ClaimEvidenceLink] = []
-        for card, score, overlap_count in matches:
-            relation = "background" if hypothesis else {
-                "supports": "supports",
-                "contradicts": "contradicts",
-                "qualified_support": "qualifies",
-                "background": "background",
-                "unclear": "background",
-            }[card.relation]
-            links.append(
-                ClaimEvidenceLink(
-                    evidence_id=card.id,
-                    relation=relation,
-                    note=(
-                        f"自动匹配：{card.evidence_type} 类型，重合词项 {overlap_count} 个，"
-                        f"相关度 {score:.2f}；摘要级，尚未全文核验"
-                    ),
-                )
+        links = [
+            ClaimEvidenceLink(
+                evidence_id=match.card.id,
+                relation=("background" if hypothesis else match.relation),
+                note=(
+                    f"系统校验：{'+'.join(match.card.evidence_types or [match.card.evidence_type])} 类型，"
+                    f"重合词项 {match.overlap_count} 个，匹配分 {match.score:.2f}；"
+                    "仅依据摘要，尚未人工确认关联"
+                ),
+                origin=match.origin,
+                match_strength=match.match_strength,
+                match_score=round(match.score, 4),
+                matched_terms=match.matched_terms[:20],
+                evidence_scope="abstract",
+                verification_status="unverified",
             )
+            for match in matches
+        ]
+        status, confidence = _claim_status_from_links(links, hypothesis=hypothesis)
+        scope = _system_claim_scope(
+            links,
+            preferred_paper_ids or [],
+            scope_context=scope_context,
+        )
         claims.append(
             ClaimRecord(
                 text=text,
@@ -759,7 +854,8 @@ def _build_evidence_ledger(
                 draft.claim_type,
                 preferred_evidence_ids=draft.evidence_ids,
                 preferred_paper_ids=draft.paper_ids,
-                scope=draft.scope,
+                evidence_quotes=draft.evidence_quotes,
+                scope_context=(draft.scope if not draft.paper_ids else ""),
                 next_action=(
                     "核对论文原文中的指标、基准和实验条件"
                     if draft.claim_type == "result"
@@ -772,12 +868,14 @@ def _build_evidence_ledger(
             explanation.one_sentence,
             "definition",
             preferred_evidence_ids=explanation.evidence_ids,
+            scope_context="通用定义",
             next_action="核对定义是否适用于当前任务和读者场景",
         )
         add_claim(
             explanation.technical,
             "mechanism",
             preferred_evidence_ids=explanation.evidence_ids,
+            scope_context="兼容旧解释结果",
             next_action="回到论文方法部分，确认机制、假设和计算条件",
         )
         if explanation.evolution_items:
@@ -788,6 +886,7 @@ def _build_evidence_ledger(
                     "evolution",
                     preferred_evidence_ids=item.evidence_ids,
                     preferred_paper_ids=item.paper_ids,
+                    scope_context="相关工作时间线",
                     next_action="核对时间线、论文版本和摘要中的实际贡献",
                 )
         else:
@@ -802,7 +901,9 @@ def _build_evidence_ledger(
             for evidence_id in item.evidence_ids
             if evidence_id in evidence_by_id
             and evidence_by_id[evidence_id].paper_id in source_papers
-            and evidence_by_id[evidence_id].evidence_type in {"limitation", "future_work"}
+            and set(evidence_by_id[evidence_id].evidence_types or [evidence_by_id[evidence_id].evidence_type])
+            & {"limitation", "future_work"}
+            and _has_explicit_negative_outcome(evidence_by_id[evidence_id].excerpt)
         ]
         if item.explicitness != "explicit" or not valid_limitation_ids:
             rejected_limitations += 1
@@ -817,7 +918,7 @@ def _build_evidence_ledger(
             preferred_evidence_ids=valid_limitation_ids,
             preferred_paper_ids=item.paper_ids,
             allowed_evidence_types={"limitation", "future_work"},
-            scope=limitation_scope,
+            scope_context=limitation_scope,
             next_action="阅读全文确认限制的条件、实验设置和作者原始表述",
         )
 
@@ -831,33 +932,16 @@ def _build_evidence_ledger(
             "research_gap",
             preferred_evidence_ids=item.evidence_ids,
             preferred_paper_ids=item.paper_ids,
-            scope=item.scope,
+            scope_context=item.scope,
             hypothesis=True,
             next_action="扩大检索范围，尝试证伪该研究空白候选",
         )
-    for item in explanation.related_concepts[:12]:
-        add_claim(
-            f"“{item}”与当前概念存在值得继续核验的关联。",
-            "related_concept",
-            hypothesis=True,
-            next_action="检索该关联的定义、关系类型和代表性论文",
-        )
 
-    linked_claim_count = sum(1 for claim in claims if claim.evidence_links)
-    claim_total = len(claims)
-    link_coverage = linked_claim_count / claim_total if claim_total else 0.0
-    verified_claim_count = sum(
-        1
-        for claim in claims
-        if claim.evidence_links and claim.status in {"supported", "partially_supported"}
-    )
-    verified_coverage = verified_claim_count / claim_total if claim_total else 0.0
-    contradicted_claim_count = sum(1 for claim in claims if claim.status == "contradicted")
     warnings: list[str] = []
     if not evidence:
         warnings.append("本次分析没有可用证据卡；解释和相关概念只能作为模型/规则假设。")
     elif all(card.verification_status != "reviewed" for card in evidence):
-        warnings.append("当前所有证据卡尚未完成人工全文核验，主张状态保持为未验证。")
+        warnings.append("当前所有主张—证据关联均未人工确认；摘要关联不等于论文结论已核验。")
     if any(paper.source_kind == "demo" for paper in papers):
         warnings.append("账本中包含演示资料；演示资料不能作为正式论文证据引用。")
     if rejected_limitations:
@@ -866,18 +950,134 @@ def _build_evidence_ledger(
         )
     unlinked_count = sum(1 for claim in claims if not claim.evidence_links)
     if unlinked_count:
-        warnings.append(f"有 {unlinked_count} 条主张没有达到自动匹配阈值，已明确保留为缺少证据。")
-    return EvidenceLedger(
+        warnings.append(f"有 {unlinked_count} 条主张没有通过严格证据校验，已明确保留为无摘要关联。")
+    ledger = EvidenceLedger(
         analysis_id=analysis_id,
         claims=claims,
         evidence_count=len(evidence),
-        linked_claim_count=linked_claim_count,
-        coverage=round(link_coverage, 4),
-        link_coverage=round(link_coverage, 4),
-        verified_coverage=round(verified_coverage, 4),
-        contradicted_claim_count=contradicted_claim_count,
         warnings=warnings,
     )
+    return _ledger_with_metrics(ledger)
+
+
+def _claim_status_from_links(
+    links: list[ClaimEvidenceLink],
+    *,
+    hypothesis: bool = False,
+) -> tuple[str, str]:
+    if hypothesis:
+        return "hypothesis", "low"
+    if not links:
+        return "unverified", "low"
+    reviewed = [link for link in links if link.verification_status == "reviewed"]
+    if any(link.relation == "contradicts" for link in reviewed):
+        return "contradicted", "low"
+    if not reviewed:
+        return "unverified", "low"
+    if len(reviewed) < len(links):
+        return "partially_supported", "medium"
+    if reviewed and all(link.relation == "supports" for link in reviewed):
+        return "supported", "high"
+    return "partially_supported", "medium"
+
+
+def _system_claim_scope(
+    links: list[ClaimEvidenceLink],
+    preferred_paper_ids: list[str],
+    *,
+    scope_context: str = "",
+) -> str:
+    context = f"；范围：{scope_context}" if scope_context else ""
+    if not links:
+        if preferred_paper_ids:
+            return f"指定论文摘要中未找到通过系统校验的证据{context}。"
+        return f"通用知识或模型解释，尚无论文证据{context}。"
+    direct = sum(link.relation == "supports" for link in links)
+    qualified = sum(link.relation == "qualifies" for link in links)
+    background = sum(link.relation == "background" for link in links)
+    reviewed = sum(link.verification_status == "reviewed" for link in links)
+    return (
+        f"摘要级；{len(links)} 条系统校验关联（直接支持 {direct}、有条件支持 {qualified}、"
+        f"背景 {background}）；人工确认 {reviewed}/{len(links)}{context}。"
+    )
+
+
+def _ledger_with_metrics(ledger: EvidenceLedger) -> EvidenceLedger:
+    refreshed_claims: list[ClaimRecord] = []
+    for claim in ledger.claims:
+        status, confidence = _claim_status_from_links(
+            claim.evidence_links,
+            hypothesis=claim.claim_type in {"research_gap", "hypothesis"},
+        )
+        refreshed_claims.append(claim.model_copy(update={"status": status, "confidence": confidence}))
+
+    claim_total = len(refreshed_claims)
+    linked_claim_count = sum(bool(claim.evidence_links) for claim in refreshed_claims)
+    direct_support_count = sum(
+        any(link.relation == "supports" for link in claim.evidence_links)
+        for claim in refreshed_claims
+    )
+    qualified_count = sum(
+        bool(claim.evidence_links)
+        and not any(link.relation == "supports" for link in claim.evidence_links)
+        and any(link.relation == "qualifies" for link in claim.evidence_links)
+        for claim in refreshed_claims
+    )
+    background_only_count = sum(
+        bool(claim.evidence_links)
+        and all(link.relation == "background" for link in claim.evidence_links)
+        for claim in refreshed_claims
+    )
+    unlinked_count = claim_total - linked_claim_count
+    verified_claim_count = sum(
+        claim.status in {"supported", "partially_supported", "contradicted"}
+        for claim in refreshed_claims
+    )
+    contradicted_count = sum(claim.status == "contradicted" for claim in refreshed_claims)
+    warnings = [
+        warning
+        for warning in ledger.warnings
+        if not warning.startswith("当前所有主张—证据关联")
+        and "没有通过严格证据校验" not in warning
+    ]
+    if linked_claim_count and not any(
+        link.verification_status == "reviewed"
+        for claim in refreshed_claims
+        for link in claim.evidence_links
+    ):
+        warnings.append("当前所有主张—证据关联均未人工确认；摘要关联不等于论文结论已核验。")
+    if unlinked_count:
+        warnings.append(f"有 {unlinked_count} 条主张没有通过严格证据校验，已明确保留为无摘要关联。")
+    divisor = claim_total or 1
+    return ledger.model_copy(
+        update={
+            "claims": refreshed_claims,
+            "linked_claim_count": linked_claim_count,
+            "coverage": round(linked_claim_count / divisor, 4),
+            "link_coverage": round(linked_claim_count / divisor, 4),
+            "verified_coverage": round(verified_claim_count / divisor, 4),
+            "direct_support_claim_count": direct_support_count,
+            "qualified_claim_count": qualified_count,
+            "background_only_claim_count": background_only_count,
+            "unlinked_claim_count": unlinked_count,
+            "direct_support_coverage": round(direct_support_count / divisor, 4),
+            "qualified_coverage": round(qualified_count / divisor, 4),
+            "contradicted_claim_count": contradicted_count,
+            "warnings": list(dict.fromkeys(warnings))[:30],
+        }
+    )
+
+
+def _has_explicit_negative_outcome(text: str) -> bool:
+    normalized = text.casefold()
+    signals = (
+        "fails to", "failure", "degrad", "impossible", "cannot", "unable to",
+        "information loss", "at the cost of", "incurs overhead", "suffers from",
+        "remains a limitation", "is a limitation", "drawback", "bottleneck",
+        "not been investigated", "little systematic guidance", "限制", "失败", "退化",
+        "无法", "不可能", "丢失", "代价", "尚未研究", "缺乏系统",
+    )
+    return any(signal in normalized for signal in signals)
 
 
 def _dedupe_papers(papers: list[PaperRecord]) -> list[PaperRecord]:
@@ -925,6 +1125,151 @@ def _merge_paper_groups(groups: list[list[PaperRecord]], limit: int) -> list[Pap
                     break
         index += 1
     return merged
+
+
+def _augment_evidence_from_claim_quotes(
+    explanation: ExplanationResult,
+    papers: list[PaperRecord],
+    evidence: list[EvidenceCard],
+) -> tuple[ExplanationResult, list[EvidenceCard]]:
+    """Re-scan cited abstracts and materialize exact model quotes as evidence cards."""
+
+    paper_by_id = {paper.id: paper for paper in papers}
+    cards = list(evidence)
+    card_by_excerpt = {
+        (card.paper_id, _normalize_quote(card.excerpt)): card for card in cards
+    }
+    normalized_claims = []
+    missing_quotes = 0
+    invalid_quotes = 0
+    for draft in explanation.claims:
+        quote_ids: list[str] = []
+        validated_quotes: list[str] = []
+        for quote in draft.evidence_quotes:
+            quote_key = _normalize_quote(quote)
+            if len(quote_key) < 12:
+                invalid_quotes += 1
+                continue
+            matched = False
+            for paper_id in draft.paper_ids:
+                paper = paper_by_id.get(paper_id)
+                if paper is None:
+                    continue
+                for sentence in _split_abstract_sentences(paper.abstract):
+                    sentence_key = _normalize_quote(sentence)
+                    if not (
+                        quote_key == sentence_key
+                        or (len(quote_key) >= 30 and quote_key in sentence_key)
+                    ):
+                        continue
+                    card = card_by_excerpt.get((paper_id, sentence_key))
+                    if card is None:
+                        evidence_types = _classify_abstract_sentence_types(sentence) or ["context"]
+                        primary_type = _primary_evidence_type(evidence_types)
+                        card = EvidenceCard(
+                            paper_id=paper_id,
+                            claim=f"《{paper.title}》摘要中与原子主张逐字对应的原句。",
+                            excerpt=sentence,
+                            location="abstract",
+                            locator=EvidenceLocator(kind="abstract", url=paper.url),
+                            evidence_type=primary_type,
+                            evidence_types=evidence_types,
+                            relation="unclear",
+                            confidence="low" if paper.source_kind == "demo" else "medium",
+                            verification_status="unverified",
+                            source_url=paper.url,
+                        )
+                        cards.append(card)
+                        card_by_excerpt[(paper_id, sentence_key)] = card
+                    quote_ids.append(card.id)
+                    validated_quotes.append(sentence)
+                    matched = True
+                    break
+                if matched:
+                    break
+            if not matched:
+                invalid_quotes += 1
+        if draft.paper_ids and not draft.evidence_quotes:
+            missing_quotes += 1
+        normalized_claims.append(
+            draft.model_copy(
+                update={
+                    "evidence_ids": list(dict.fromkeys([*quote_ids, *draft.evidence_ids]))[:3],
+                    "evidence_quotes": list(dict.fromkeys(validated_quotes))[:3],
+                }
+            )
+        )
+
+    model_warnings = list(explanation.model_output_warnings)
+    if missing_quotes:
+        model_warnings.append(
+            f"有 {missing_quotes} 条论文特定主张未提供可逐字核对的摘要原句，系统不会仅凭证据 ID 建立强关联。"
+        )
+    if invalid_quotes:
+        model_warnings.append(
+            f"有 {invalid_quotes} 条模型给出的证据原句无法在指定论文摘要中定位，已忽略。"
+        )
+    return explanation.model_copy(
+        update={
+            "claims": normalized_claims,
+            "model_output_warnings": model_warnings[:20],
+        }
+    ), cards
+
+
+def _soften_unverified_strong_language(explanation: ExplanationResult) -> ExplanationResult:
+    claims = [
+        draft.model_copy(update={"text": _soften_text(draft.text, draft.evidence_quotes)})
+        for draft in explanation.claims
+    ]
+    evolution_items = [
+        item.model_copy(update={"summary": _soften_text(item.summary, [])})
+        for item in explanation.evolution_items
+    ]
+    return explanation.model_copy(update={"claims": claims, "evolution_items": evolution_items})
+
+
+def _soften_text(text: str, evidence_quotes: list[str]) -> str:
+    source = " ".join(evidence_quotes).casefold()
+    softened = text
+    if not any(token in source for token in ("first", "首次", "首个")):
+        softened = softened.replace("首次提出", "提出").replace("首次", "").replace("首个", "一种")
+    if not any(token in source for token in ("guarantee", "guaranteed", "保证")):
+        softened = softened.replace("理论保证", "理论分析")
+    if not any(token in source for token in ("optimal", "state-of-the-art", "最优")):
+        softened = softened.replace("最优", "较优")
+    if not any(token in source for token in ("lossless", "无损")):
+        softened = softened.replace("无损", "保持性能的")
+    return re.sub(r"\s+", " ", softened).strip()
+
+
+def _is_atomic_claim(draft: object) -> bool:
+    """Reject obvious multi-operation claims instead of citing them as one fact."""
+
+    text = getattr(draft, "text", "")
+    if len(_split_abstract_sentences(text)) > 1:
+        return False
+    if getattr(draft, "claim_type", "") != "mechanism":
+        return True
+    normalized = text.casefold()
+    operation_families = (
+        ("quantiz", "量化"),
+        ("compress", "压缩"),
+        ("evict", "淘汰"),
+        ("prun", "剪枝"),
+        ("retain", "保留"),
+        ("select", "选择"),
+        ("predict", "预测"),
+        ("cluster", "聚类"),
+        ("merge", "合并"),
+        ("project", "投影"),
+        ("discard", "丢弃"),
+    )
+    operation_count = sum(
+        any(signal in normalized for signal in family)
+        for family in operation_families
+    )
+    return operation_count <= 1
 
 
 def _normalize_evolution_provenance(
@@ -991,7 +1336,11 @@ def _normalize_evolution_provenance(
     normalized.sort(key=lambda item: (item.year is None, item.year or 9999, item.title.casefold()))
 
     normalized_claims = []
+    rejected_non_atomic_claims = 0
     for draft in explanation.claims[:40]:
+        if not _is_atomic_claim(draft):
+            rejected_non_atomic_claims += 1
+            continue
         valid_paper_ids = [paper_id for paper_id in draft.paper_ids if paper_id in paper_by_id]
         if draft.claim_type in {"mechanism", "result", "evolution"}:
             valid_paper_ids = valid_paper_ids[:1]
@@ -1025,7 +1374,12 @@ def _normalize_evolution_provenance(
             for evidence_id in item.evidence_ids
             if evidence_id in evidence_by_id
             and evidence_by_id[evidence_id].paper_id in set(valid_paper_ids)
-            and evidence_by_id[evidence_id].evidence_type in {"limitation", "future_work"}
+            and set(
+                evidence_by_id[evidence_id].evidence_types
+                or [evidence_by_id[evidence_id].evidence_type]
+            )
+            & {"limitation", "future_work"}
+            and _has_explicit_negative_outcome(evidence_by_id[evidence_id].excerpt)
         ]
         if not valid_paper_ids or not valid_evidence_ids:
             continue
@@ -1075,6 +1429,10 @@ def _normalize_evolution_provenance(
         scope_warnings.append(
             f"有 {dropped_limitations} 条限制候选缺少同论文的明确限制证据，未纳入研究局限。"
         )
+    if rejected_non_atomic_claims:
+        scope_warnings.append(
+            f"有 {rejected_non_atomic_claims} 条主张同时包含多个句子或机制操作，已拒绝进入主张账本。"
+        )
     return explanation.model_copy(
         update={
             "evolution_items": normalized,
@@ -1121,14 +1479,32 @@ _ABSTRACT_TYPE_PATTERNS: dict[str, tuple[str, ...]] = {
 }
 
 
-def _classify_abstract_sentence(sentence: str) -> str | None:
-    """Classify one exact abstract sentence using visible keyword rules."""
-
+def _classify_abstract_sentence_types(sentence: str) -> list[str]:
+    """Return every applicable label instead of letting one keyword win."""
     text = sentence.casefold()
-    for evidence_type in ("future_work", "limitation", "result", "mechanism", "definition"):
-        if any(token in text for token in _ABSTRACT_TYPE_PATTERNS[evidence_type]):
+    return [
+        evidence_type
+        for evidence_type in ("future_work", "limitation", "result", "mechanism", "definition")
+        if any(token in text for token in _ABSTRACT_TYPE_PATTERNS[evidence_type])
+    ]
+
+
+def _primary_evidence_type(evidence_types: list[str]) -> str:
+    """Choose a display label while retaining all labels for matching."""
+    for evidence_type in ("future_work", "mechanism", "result", "limitation", "definition", "context"):
+        if evidence_type in evidence_types:
             return evidence_type
-    return None
+    return "context"
+
+
+def _classify_abstract_sentence(sentence: str) -> str | None:
+    """Compatibility wrapper used by older tests and callers."""
+    evidence_types = _classify_abstract_sentence_types(sentence)
+    return _primary_evidence_type(evidence_types) if evidence_types else None
+
+
+def _normalize_quote(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip().casefold()
 
 
 _TOKEN_STOPWORDS = {
@@ -1175,36 +1551,142 @@ def _match_claim_evidence(
     paper_by_id: dict[str, PaperRecord],
     preferred_evidence_ids: list[str],
     preferred_paper_ids: list[str] | None = None,
+    evidence_quotes: list[str] | None = None,
     allowed_evidence_types: set[str] | None = None,
-) -> list[tuple[EvidenceCard, float, int]]:
-    """Rank at most three evidence cards and refuse low-relevance links."""
+) -> list[EvidenceMatch]:
+    """Rank evidence only after claim-type-specific hard validation."""
 
     claim_tokens = _match_tokens(claim_text)
     preferred = set(preferred_evidence_ids)
     preferred_papers = set(preferred_paper_ids or [])
+    quotes = [_normalize_quote(quote) for quote in evidence_quotes or [] if _normalize_quote(quote)]
     compatibility = _TYPE_COMPATIBILITY.get(claim_type, {})
-    ranked: list[tuple[EvidenceCard, float, int]] = []
+    ranked: list[EvidenceMatch] = []
     for card in evidence:
         if preferred_papers and card.paper_id not in preferred_papers:
             continue
-        if allowed_evidence_types and card.evidence_type not in allowed_evidence_types:
+        card_types = set(card.evidence_types or [card.evidence_type])
+        if allowed_evidence_types and not card_types & allowed_evidence_types:
             continue
-        paper = paper_by_id.get(card.paper_id)
-        source_text = f"{paper.title if paper else ''} {card.excerpt}"
-        overlap_count = len(claim_tokens & _match_tokens(source_text))
-        type_score = compatibility.get(card.evidence_type, 0.0)
-        preferred_bonus = 1.25 if card.id in preferred else 0.0
-        # A model-provided ID is a useful hint, not permission to link an
-        # unrelated card.  Without either text overlap or strong type fit, the
-        # claim stays visibly unlinked.
-        if overlap_count == 0 and preferred_bonus == 0:
+        excerpt_tokens = _match_tokens(card.excerpt)
+        matched_terms = sorted(claim_tokens & excerpt_tokens)
+        overlap_count = len(matched_terms)
+        quote_match = any(
+            quote == _normalize_quote(card.excerpt)
+            or quote in _normalize_quote(card.excerpt)
+            or _normalize_quote(card.excerpt) in quote
+            for quote in quotes
+        )
+        if not _passes_claim_evidence_gate(
+            claim_text,
+            claim_type,
+            card,
+            overlap_count=overlap_count,
+            preferred=card.id in preferred,
+            quote_match=quote_match,
+        ):
             continue
-        score = min(overlap_count, 8) * 0.42 + type_score + preferred_bonus
-        threshold = 0.75 if claim_type == "related_concept" else 1.05
-        if score >= threshold:
-            ranked.append((card, score, overlap_count))
-    ranked.sort(key=lambda item: (-item[1], -item[2], item[0].id))
+        type_score = max((compatibility.get(item, 0.0) for item in card_types), default=0.0)
+        score = min(overlap_count, 8) * 0.42 + type_score
+        if card.id in preferred:
+            score += 0.3
+        if quote_match:
+            score += 2.0
+        origin = (
+            "model_quote"
+            if quote_match
+            else "model_hint_validated"
+            if card.id in preferred
+            else "automatic_match"
+        )
+        relation = _automatic_link_relation(
+            claim_type,
+            card,
+            quote_match=quote_match,
+            preferred=card.id in preferred,
+        )
+        strength = "strong" if quote_match or score >= 3.0 else "moderate" if score >= 2.0 else "weak"
+        ranked.append(
+            EvidenceMatch(
+                card=card,
+                score=score,
+                overlap_count=overlap_count,
+                matched_terms=matched_terms,
+                relation=relation,
+                origin=origin,
+                match_strength=strength,
+            )
+        )
+    ranked.sort(key=lambda item: (-item.score, -item.overlap_count, item.card.id))
     return ranked[:3]
+
+
+def _passes_claim_evidence_gate(
+    claim_text: str,
+    claim_type: str,
+    card: EvidenceCard,
+    *,
+    overlap_count: int,
+    preferred: bool,
+    quote_match: bool,
+) -> bool:
+    card_types = set(card.evidence_types or [card.evidence_type])
+    claim_numbers = _extract_numbers(claim_text)
+    evidence_numbers = _extract_numbers(card.excerpt)
+    numbers_match = not claim_numbers or claim_numbers <= evidence_numbers
+    if claim_type == "result":
+        if "result" not in card_types:
+            return False
+        return numbers_match if claim_numbers else quote_match
+    if claim_type == "mechanism":
+        if claim_numbers and not numbers_match:
+            return False
+        return (
+            "mechanism" in card_types
+            and (quote_match or (preferred and overlap_count >= 2) or overlap_count >= 4)
+        )
+    if claim_type == "evolution":
+        return (
+            numbers_match
+            and bool(card_types & {"mechanism", "result"})
+            and (quote_match or (preferred and overlap_count >= 1))
+        )
+    if claim_type == "limitation":
+        return (
+            bool(card_types & {"limitation", "future_work"})
+            and _has_explicit_negative_outcome(card.excerpt)
+            and (quote_match or preferred or overlap_count >= 3)
+        )
+    if claim_type == "research_gap":
+        return (quote_match or preferred) and bool(card_types & {"future_work", "limitation"})
+    if claim_type == "definition":
+        return (quote_match or overlap_count >= 2) and bool(card_types & {"definition", "context"})
+    return False
+
+
+def _automatic_link_relation(
+    claim_type: str,
+    card: EvidenceCard,
+    *,
+    quote_match: bool,
+    preferred: bool,
+) -> str:
+    if claim_type in {"research_gap", "hypothesis"}:
+        return "background"
+    if quote_match:
+        return "supports"
+    if claim_type == "result" and _extract_numbers(card.excerpt):
+        return "supports"
+    if claim_type == "limitation" and preferred and _has_explicit_negative_outcome(card.excerpt):
+        return "supports"
+    return "qualifies"
+
+
+def _extract_numbers(text: str) -> set[str]:
+    return {
+        value.lstrip("0") or "0"
+        for value in re.findall(r"(?<![A-Za-z])\d+(?:\.\d+)?", text.replace(",", ""))
+    }
 
 
 def _build_graph(

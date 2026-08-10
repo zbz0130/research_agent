@@ -173,8 +173,15 @@ select { width: 100%; margin-top: 7px; border: 1px solid #34465b; border-radius:
 .ledger-claim-body > p { margin: 9px 0 5px; color: #d2dfed; line-height: 1.55; }
 .ledger-scope { color: #8295aa; line-height: 1.45; }
 .ledger-links { margin: 8px 0 0; padding-left: 19px; color: #a9bfd4; line-height: 1.5; }
-.ledger-links li { margin: 4px 0; }
+.ledger-links li { margin: 8px 0; }
 .ledger-links small { display: block; color: #8195aa; }
+.ledger-link { border-left: 2px solid rgba(93, 145, 194, 0.42); padding: 4px 0 8px 11px; }
+.ledger-link > p { margin: 7px 0; color: #c8d8e8; }
+.ledger-link-tags, .evidence-review-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.evidence-review-actions { margin-top: 9px; }
+.evidence-review-actions button { padding: 5px 9px; font-size: 0.7rem; }
+.inline-source-link { display: inline-block; margin-top: 5px; color: #91c8f4; font-size: 0.76rem; }
+.review-note { margin-top: 5px; color: #a8c7e2 !important; }
 .is-filtered-out { display: none !important; }
 .graph-card { overflow: hidden; }
 .graph-placeholder { min-height: 250px; }

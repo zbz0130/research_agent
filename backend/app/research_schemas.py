@@ -144,9 +144,13 @@ class EvidenceCard(BaseModel):
     location: str | None = None
     locator: EvidenceLocator | None = None
     evidence_type: EvidenceType = "context"
+    evidence_types: list[EvidenceType] = Field(default_factory=list, max_length=6)
     relation: EvidenceRelation = "background"
     confidence: Confidence = "medium"
     verification_status: VerificationStatus = "unverified"
+    review_note: str = Field(default="", max_length=2000)
+    reviewed_by: str | None = Field(default=None, max_length=200)
+    reviewed_at: datetime | None = None
     source_url: str | None = None
 
     @field_validator("source_url", mode="before")
@@ -187,6 +191,7 @@ class AtomicClaimDraft(BaseModel):
     text: str = Field(min_length=1, max_length=1200)
     paper_ids: list[str] = Field(default_factory=list, max_length=3)
     evidence_ids: list[str] = Field(default_factory=list, max_length=3)
+    evidence_quotes: list[str] = Field(default_factory=list, max_length=3)
     scope: str = Field(default="", max_length=1000)
 
 

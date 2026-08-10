@@ -9,7 +9,13 @@ from app.research_schemas import (
     ResearchGapCandidate,
     ResearchLimitation,
 )
-from app.services.research_service import _build_evidence, _build_evidence_ledger
+from app.services.research_service import (
+    _build_evidence,
+    _build_evidence_ledger,
+    _classify_abstract_sentence_types,
+    _is_atomic_claim,
+    _match_claim_evidence,
+)
 
 
 client = TestClient(app)
@@ -116,7 +122,7 @@ def test_claim_matching_is_sparse_typed_and_keeps_irrelevant_claim_unlinked() ->
     assert mechanism.evidence_links
     assert limitation.evidence_links
     assert all(link.relation in {"qualifies", "background"} for link in mechanism.evidence_links)
-    assert any("自动匹配" in link.note for link in limitation.evidence_links)
+    assert any("系统校验" in link.note for link in limitation.evidence_links)
     assert len(ledger.claims) == 3
 
 
@@ -135,8 +141,8 @@ def test_explicit_atomic_claims_replace_long_explanation_and_separate_real_limit
         access_type="abstract_only",
     )
     evidence = _build_evidence("KV cache compression", [paper])
-    limitation_card = next(item for item in evidence if item.evidence_type == "limitation")
-    mechanism_card = next(item for item in evidence if item.evidence_type == "mechanism")
+    limitation_card = next(item for item in evidence if "limitation" in item.evidence_types)
+    mechanism_card = next(item for item in evidence if item.excerpt.startswith("We propose CodeComp"))
     result_card = next(item for item in evidence if item.evidence_type == "result")
     explanation = ExplanationResult(
         one_sentence="A display summary that must not become a ledger claim.",
@@ -148,12 +154,14 @@ def test_explicit_atomic_claims_replace_long_explanation_and_separate_real_limit
                 text="CodeComp uses code property graphs to retain critical tokens.",
                 paper_ids=[paper.id],
                 evidence_ids=[mechanism_card.id],
+                evidence_quotes=[mechanism_card.excerpt],
             ),
             AtomicClaimDraft(
                 claim_type="result",
                 text="CodeComp improves bug localization accuracy under equal memory budgets.",
                 paper_ids=[paper.id],
                 evidence_ids=[result_card.id],
+                evidence_quotes=[result_card.excerpt],
             ),
         ],
         research_limitations=[
@@ -202,3 +210,153 @@ def test_explicit_atomic_claims_replace_long_explanation_and_separate_real_limit
     gap = next(claim for claim in ledger.claims if claim.claim_type == "research_gap")
     assert gap.status == "hypothesis"
     assert any("未进入研究局限账本" in warning for warning in ledger.warnings)
+
+
+def test_abstract_evidence_keeps_mechanism_and_limitation_labels() -> None:
+    sentence = (
+        "We propose VidKV, a token quantization method that reduces memory, "
+        "but it can cause information loss on long videos."
+    )
+
+    labels = _classify_abstract_sentence_types(sentence)
+
+    assert "mechanism" in labels
+    assert "limitation" in labels
+
+
+def test_mechanism_atomicity_rejects_multiple_operations() -> None:
+    atomic = AtomicClaimDraft(
+        claim_type="mechanism",
+        text="The method quantizes keys and values.",
+    )
+    bundled = AtomicClaimDraft(
+        claim_type="mechanism",
+        text="The method quantizes keys and prunes value tokens.",
+    )
+
+    assert _is_atomic_claim(atomic) is True
+    assert _is_atomic_claim(bundled) is False
+
+
+def test_wrong_model_evidence_id_cannot_override_claim_alignment() -> None:
+    paper = PaperRecord(
+        id="paper-squat",
+        title="SQuat KV Cache Quantization",
+        abstract=(
+            "We propose a generic KV cache compression baseline. "
+            "SQuat is a method that selectively quantizes spatial tokens and retains salient spatial tokens."
+        ),
+        source="fixture",
+        source_kind="academic",
+        access_type="abstract_only",
+    )
+    evidence = _build_evidence("KV cache compression", [paper])
+    wrong = next(card for card in evidence if "generic" in card.excerpt)
+    correct = next(card for card in evidence if "SQuat" in card.excerpt)
+
+    matches = _match_claim_evidence(
+        "SQuat selectively quantizes spatial tokens.",
+        "mechanism",
+        evidence,
+        {paper.id: paper},
+        [wrong.id],
+        [paper.id],
+    )
+
+    assert matches
+    assert matches[0].card.id == correct.id
+    assert all(match.card.id != wrong.id for match in matches)
+
+
+def test_result_claim_requires_matching_numbers() -> None:
+    paper = PaperRecord(
+        id="paper-result",
+        title="Measured Cache Compression",
+        abstract="Results show a 5.6x speedup while retaining task accuracy.",
+        source="fixture",
+        source_kind="academic",
+        access_type="abstract_only",
+    )
+    evidence = _build_evidence("KV cache compression", [paper])
+    result_card = evidence[0]
+
+    wrong = _match_claim_evidence(
+        "The method achieves a 13x speedup.",
+        "result",
+        evidence,
+        {paper.id: paper},
+        [result_card.id],
+        [paper.id],
+        [result_card.excerpt],
+    )
+    correct = _match_claim_evidence(
+        "The method achieves a 5.6x speedup.",
+        "result",
+        evidence,
+        {paper.id: paper},
+        [result_card.id],
+        [paper.id],
+        [result_card.excerpt],
+    )
+
+    assert wrong == []
+    assert correct
+    assert correct[0].relation == "supports"
+
+
+def test_related_concepts_stay_out_of_claim_ledger() -> None:
+    explanation = ExplanationResult(
+        one_sentence="A cautious definition.",
+        intuitive="An analogy.",
+        technical="A technical note.",
+        related_concepts=["Transformer", "Token pruning"],
+    )
+
+    ledger = _build_evidence_ledger("analysis-related", explanation, [], [])
+
+    assert all(claim.claim_type != "related_concept" for claim in ledger.claims)
+
+
+def test_researcher_can_review_a_claim_evidence_link() -> None:
+    app.dependency_overrides[get_settings] = lambda: Settings(
+        paper_provider="demo",
+        explanation_provider="rule_based",
+        demo_mode=True,
+    )
+    try:
+        created = client.post(
+            "/api/v1/analyses",
+            json={"concept": "Attention Mechanism", "level": "literature", "max_papers": 2},
+        )
+        job = _wait_for_job(created.json()["id"])
+        claim = next(
+            item for item in job["result"]["evidence_ledger"]["claims"]
+            if item["evidence_links"]
+        )
+        link = claim["evidence_links"][0]
+
+        reviewed = client.patch(
+            f"/api/v1/analyses/{job['id']}/claims/{claim['id']}/evidence/{link['evidence_id']}/review",
+            json={
+                "relation": "supports",
+                "review_note": "摘要原句与该主张直接一致。",
+                "reviewed_by": "测试研究者",
+            },
+        )
+
+        assert reviewed.status_code == 200
+        payload = reviewed.json()["result"]
+        reviewed_claim = next(
+            item for item in payload["evidence_ledger"]["claims"] if item["id"] == claim["id"]
+        )
+        reviewed_link = reviewed_claim["evidence_links"][0]
+        assert reviewed_link["origin"] == "manual"
+        assert reviewed_link["verification_status"] == "reviewed"
+        assert reviewed_link["reviewed_by"] == "测试研究者"
+        assert payload["evidence_ledger"]["verified_coverage"] > 0
+        reviewed_card = next(
+            item for item in payload["evidence"] if item["id"] == link["evidence_id"]
+        )
+        assert reviewed_card["verification_status"] == "reviewed"
+    finally:
+        app.dependency_overrides.clear()

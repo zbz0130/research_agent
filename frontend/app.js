@@ -191,6 +191,7 @@ function navigateTo(route, selector = "") {
 
 const state = {
   analysisId: null,
+  analysisResult: null,
   graphId: null,
   graph: null,
   graphs: [],
@@ -230,6 +231,7 @@ const displayLabels = {
   unknown: "来源类型未知",
   supports: "支持线索",
   contradicts: "反驳线索",
+  qualifies: "有条件支持",
   qualified_support: "有条件支持",
   background: "背景线索",
   unclear: "关系未核验",
@@ -282,6 +284,16 @@ const displayLabels = {
   application: "应用场景",
   limitations: "限制与未来工作",
   comparison: "方法对比",
+  strong: "强匹配",
+  moderate: "中等匹配",
+  weak: "弱匹配",
+  model_quote: "模型原句已定位",
+  model_hint_validated: "模型提示经系统校验",
+  automatic_match: "系统自动匹配",
+  manual: "人工判定",
+  abstract: "摘要",
+  full_text: "全文",
+  metadata: "元数据",
 };
 
 function displayLabel(value) {
@@ -518,6 +530,7 @@ function setAnalysisMessage(text, kind = "") {
 
 function resetAnalysisView() {
   state.analysisId = null;
+  state.analysisResult = null;
   state.graphId = null;
   state.graph = null;
   state.graphs = [];
@@ -700,13 +713,22 @@ function renderPapers(result) {
         <details class="paper-details">
           <summary>展开完整摘要与 ${escapeHtml(paperEvidence.length)} 条分类证据</summary>
           <p class="paper-abstract paper-abstract-full">${escapeHtml(abstract)}</p>
-          ${paperEvidence.map((item) => `
-            <div class="evidence-item">
-              <span class="evidence-label">${escapeHtml(displayLabel(item.evidence_type || "context"))} · ${escapeHtml(displayLabel(item.relation || "background"))} · ${escapeHtml(item.confidence)}</span>
-              <p>${escapeHtml(item.excerpt)}</p>
-              <small>${escapeHtml(item.location || item.locator?.kind || "摘要")} · ${escapeHtml(displayLabel(item.verification_status || "unverified"))} · ${escapeHtml(item.claim)}</small>
-            </div>
-          `).join("")}
+          ${paperEvidence.map((item) => {
+            const evidenceTypes = item.evidence_types?.length
+              ? item.evidence_types
+              : [item.evidence_type || "context"];
+            const reviewStatus = item.verification_status === "reviewed"
+              ? `已人工核验${item.reviewed_by ? ` · ${item.reviewed_by}` : ""}`
+              : "摘要候选 · 未人工核验";
+            return `
+              <div class="evidence-item">
+                <span class="evidence-label">${evidenceTypes.map((type) => escapeHtml(displayLabel(type))).join(" + ")} · ${escapeHtml(reviewStatus)}</span>
+                <p>${escapeHtml(item.excerpt)}</p>
+                <small>${escapeHtml(item.location || item.locator?.kind || "摘要")} · ${escapeHtml(item.claim)}</small>
+                ${item.review_note ? `<small class="review-note">核验记录：${escapeHtml(item.review_note)}</small>` : ""}
+              </div>
+            `;
+          }).join("")}
         </details>
       </div>
       ${sourceUrl ? `<a class="source-link" href="${escapeHtml(sourceUrl)}" target="_blank" rel="noopener noreferrer">打开来源 ↗</a>` : ""}
@@ -725,7 +747,9 @@ function renderEvidenceLedger(result) {
   evidenceLedgerEl.classList.remove("hidden");
   const linkCoverage = Math.round(Number(ledger.link_coverage ?? ledger.coverage ?? 0) * 100);
   const verifiedCoverage = Math.round(Number(ledger.verified_coverage || 0) * 100);
-  ledgerCoverageEl.textContent = `证据关联 ${linkCoverage}% · 已核验 ${verifiedCoverage}% · ${ledger.linked_claim_count || 0}/${ledger.claims?.length || 0} 条主张`;
+  const directCoverage = Math.round(Number(ledger.direct_support_coverage || 0) * 100);
+  const qualifiedCoverage = Math.round(Number(ledger.qualified_coverage || 0) * 100);
+  ledgerCoverageEl.textContent = `摘要关联 ${linkCoverage}% · 系统判为直接支持 ${directCoverage}% · 有条件支持 ${qualifiedCoverage}% · 人工确认 ${verifiedCoverage}%`;
   ledgerMessageEl.textContent = (ledger.warnings || []).join(" ") || "每条主张都可以展开查看关联证据。";
   const evidenceById = new Map((result.evidence || []).map((item) => [item.id, item]));
   const paperById = new Map((result.papers || []).map((item) => [item.id, item]));
@@ -733,7 +757,28 @@ function renderEvidenceLedger(result) {
     const links = (claim.evidence_links || []).map((link) => {
       const card = evidenceById.get(link.evidence_id);
       const paper = card ? paperById.get(card.paper_id) : null;
-      return `<li><span class="tag">${escapeHtml(displayLabel(link.relation || "background"))}</span> ${escapeHtml(card?.excerpt || card?.claim || link.evidence_id)}<small>${escapeHtml(paper?.title || card?.paper_id || "来源未知")} · ${escapeHtml(link.note || "")}</small></li>`;
+      const sourceUrl = safeExternalUrl(paper?.url || card?.source_url);
+      const reviewMeta = link.verification_status === "reviewed"
+        ? `已由 ${link.reviewed_by || "研究者"} 核验${link.reviewed_at ? ` · ${new Date(link.reviewed_at).toLocaleString()}` : ""}`
+        : "尚未人工确认";
+      return `<li class="ledger-link">
+        <div class="ledger-link-tags">
+          <span class="tag">${escapeHtml(displayLabel(link.relation || "background"))}</span>
+          <span class="tag">${escapeHtml(displayLabel(link.match_strength || "weak"))}</span>
+          <span class="tag">${escapeHtml(displayLabel(link.evidence_scope || "unknown"))}</span>
+          <span class="tag ${link.verification_status === "reviewed" ? "tag-configured" : "tag-missing"}">${escapeHtml(displayLabel(link.verification_status || "unverified"))}</span>
+        </div>
+        <p>${escapeHtml(card?.excerpt || card?.claim || link.evidence_id)}</p>
+        <small>${escapeHtml(paper?.title || card?.paper_id || "来源未知")} · ${escapeHtml(displayLabel(link.origin || "automatic_match"))} · ${escapeHtml(link.note || "")}</small>
+        ${sourceUrl ? `<a class="inline-source-link" href="${escapeHtml(sourceUrl)}" target="_blank" rel="noopener noreferrer">打开论文来源 ↗</a>` : ""}
+        ${link.review_note ? `<small class="review-note">核验记录：${escapeHtml(link.review_note)} · ${escapeHtml(reviewMeta)}</small>` : `<small>${escapeHtml(reviewMeta)}</small>`}
+        <div class="evidence-review-actions" aria-label="人工核验此主张与证据的关系">
+          <button type="button" class="secondary" data-evidence-review="supports" data-claim-id="${escapeHtml(claim.id)}" data-evidence-id="${escapeHtml(link.evidence_id)}">支持</button>
+          <button type="button" class="secondary" data-evidence-review="qualifies" data-claim-id="${escapeHtml(claim.id)}" data-evidence-id="${escapeHtml(link.evidence_id)}">有条件</button>
+          <button type="button" class="secondary" data-evidence-review="contradicts" data-claim-id="${escapeHtml(claim.id)}" data-evidence-id="${escapeHtml(link.evidence_id)}">反驳</button>
+          <button type="button" class="secondary" data-evidence-review="background" data-claim-id="${escapeHtml(claim.id)}" data-evidence-id="${escapeHtml(link.evidence_id)}">仅背景</button>
+        </div>
+      </li>`;
     }).join("");
     const statusClass = ["supported", "partially_supported"].includes(claim.status) ? "tag-configured" : "tag-missing";
     return `
@@ -741,7 +786,7 @@ function renderEvidenceLedger(result) {
         <summary class="ledger-claim-heading">
           <span class="tag">${escapeHtml(displayLabel(claim.claim_type || "definition"))}</span>
           <span class="ledger-claim-preview">${escapeHtml(claim.text)}</span>
-          <span class="tag ${statusClass}">${escapeHtml(displayLabel(claim.status || "unverified"))} · ${escapeHtml(claim.confidence || "low")}</span>
+          <span class="tag ${statusClass}">${escapeHtml(displayLabel(claim.status || "unverified"))}</span>
         </summary>
         <div class="ledger-claim-body">
           <p>${escapeHtml(claim.text)}</p>
@@ -759,7 +804,7 @@ function renderEvidenceLedger(result) {
   });
   const groupsHtml = [...grouped.entries()].map(([claimType, claims], index) => `
     <details class="ledger-group" ${index === 0 ? "open" : ""}>
-      <summary><span>${escapeHtml(displayLabel(claimType))}</span><small>${claims.length} 条 · ${claims.filter((claim) => claim.evidence_links?.length).length} 条有证据</small></summary>
+      <summary><span>${escapeHtml(displayLabel(claimType))}</span><small>${claims.length} 条主张 · ${claims.filter((claim) => claim.evidence_links?.length).length} 条有摘要关联 · ${claims.filter((claim) => claim.evidence_links?.some((link) => link.verification_status === "reviewed")).length} 条已人工确认</small></summary>
       <div class="ledger-group-content">${claims.map(renderClaim).join("")}</div>
     </details>
   `).join("");
@@ -767,7 +812,7 @@ function renderEvidenceLedger(result) {
     <div class="ledger-toolbar">
       <button type="button" class="secondary" data-ledger-action="expand">展开全部</button>
       <button type="button" class="secondary" data-ledger-action="collapse">收起全部</button>
-      <button type="button" class="secondary" data-ledger-action="missing" aria-pressed="false">只看缺少证据</button>
+      <button type="button" class="secondary" data-ledger-action="missing" aria-pressed="false">只看无摘要关联</button>
     </div>
     ${groupsHtml || '<p class="empty">当前没有可展示的主张。</p>'}
   `;
@@ -782,7 +827,43 @@ papersEl.addEventListener("click", (event) => {
   });
 });
 
-ledgerClaimsEl.addEventListener("click", (event) => {
+ledgerClaimsEl.addEventListener("click", async (event) => {
+  const reviewButton = event.target.closest("[data-evidence-review]");
+  if (reviewButton) {
+    if (!state.analysisId) {
+      setAnalysisMessage("当前分析任务 ID 不可用，无法保存核验记录。", "error-text");
+      return;
+    }
+    const reviewNote = window.prompt("请写下核验依据或适用条件（至少 2 个字）：");
+    if (reviewNote === null) return;
+    if (reviewNote.trim().length < 2) {
+      setAnalysisMessage("核验记录至少需要 2 个字。", "error-text");
+      return;
+    }
+    reviewButton.disabled = true;
+    try {
+      const response = await apiFetch(
+        `/api/v1/analyses/${encodeURIComponent(state.analysisId)}/claims/${encodeURIComponent(reviewButton.dataset.claimId)}/evidence/${encodeURIComponent(reviewButton.dataset.evidenceId)}/review`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            relation: reviewButton.dataset.evidenceReview,
+            review_note: reviewNote.trim(),
+            reviewed_by: "本地研究者",
+          }),
+        },
+      );
+      if (!response.ok) throw new Error(await response.text());
+      const job = await response.json();
+      renderAnalysis(job.result);
+      setAnalysisMessage("人工核验记录已保存。", "success-text");
+    } catch (error) {
+      reviewButton.disabled = false;
+      setAnalysisMessage(`保存核验记录失败：${error.message}`, "error-text");
+    }
+    return;
+  }
   const button = event.target.closest("[data-ledger-action]");
   if (!button) return;
   const action = button.dataset.ledgerAction;
@@ -796,7 +877,7 @@ ledgerClaimsEl.addEventListener("click", (event) => {
   if (action === "missing") {
     const active = button.getAttribute("aria-pressed") !== "true";
     button.setAttribute("aria-pressed", String(active));
-    button.textContent = active ? "显示全部主张" : "只看缺少证据";
+    button.textContent = active ? "显示全部主张" : "只看无摘要关联";
     ledgerClaimsEl.querySelectorAll(".ledger-claim").forEach((claim) => {
       claim.classList.toggle("is-filtered-out", active && claim.dataset.hasEvidence === "true");
     });
@@ -1814,6 +1895,7 @@ async function pollAnalysis(id) {
 }
 
 function renderAnalysis(result) {
+  state.analysisResult = result;
   analysisProviderEl.textContent = result.provider;
   renderExplanation(result);
   renderPapers(result);

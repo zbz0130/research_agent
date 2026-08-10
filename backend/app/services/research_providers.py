@@ -689,14 +689,13 @@ class RuleBasedExplanationProvider:
         paper_by_id = {paper.id: paper for paper in papers}
         claims: list[AtomicClaimDraft] = []
         if evidence:
-            first = evidence[0]
             claims.append(
                 AtomicClaimDraft(
                     claim_type="definition",
                     text=f"{concept} 是围绕当前论文摘要所描述问题的一类研究方法。",
-                    paper_ids=[first.paper_id],
-                    evidence_ids=[first.id],
-                    scope="规则回退，仅用于演示证据链",
+                    paper_ids=[],
+                    evidence_ids=[],
+                    scope="规则回退的通用定义，尚无论文证据",
                 )
             )
         else:
@@ -710,15 +709,24 @@ class RuleBasedExplanationProvider:
                 )
             )
         for card in evidence:
-            if card.evidence_type not in {"mechanism", "result"}:
+            card_types = set(card.evidence_types or [card.evidence_type])
+            claim_type = (
+                "result"
+                if "result" in card_types
+                else "mechanism"
+                if "mechanism" in card_types
+                else None
+            )
+            if claim_type is None:
                 continue
             paper = paper_by_id.get(card.paper_id)
             claims.append(
                 AtomicClaimDraft(
-                    claim_type=card.evidence_type,
+                    claim_type=claim_type,
                     text=f"《{paper.title if paper else card.paper_id}》摘要指出：{card.excerpt}",
                     paper_ids=[card.paper_id],
                     evidence_ids=[card.id],
+                    evidence_quotes=[card.excerpt],
                     scope="摘要级线索",
                 )
             )
@@ -946,8 +954,11 @@ claims 必须是原子主张数组：
 - 每条只能表达一个可独立核验的事实，不能把多个论文、多个机制或机制与指标写在同一条；
 - claim_type 只能是 definition、mechanism、result、evolution；
 - 论文特定的 mechanism、result、evolution 每条只能使用一个 paper_id；
+- mechanism 每条只能描述一个主要操作；键量化、值量化、token 保留等不同操作必须拆开；
 - 数字、压缩率、速度和准确率必须单独写成 result，不能混入 mechanism；
 - paper_ids 和 evidence_ids 必须来自下方资料；没有证据的通用定义允许 ID 为空，但必须在 scope 中说明。
+- 论文特定主张必须在 evidence_quotes 中逐字复制 1 至 3 条摘要原句；禁止翻译、改写或拼接原句。
+- “首次、首个、最优、保证、无损”等强表述只有在 evidence_quotes 原文明确出现对应含义时才能使用。
 
 research_limitations 只允许写“当前研究方法、理论或实验本身”的局限，不得写系统或调研过程警告。
 每项必须包含 text、limitation_kind、target、condition、consequence、paper_ids、evidence_ids、explicitness。
@@ -990,6 +1001,7 @@ scope_warnings 必须说明本次没有检索论文。limitations 和 evidence_i
 必须返回 JSON，字段为：one_sentence、intuitive、technical、evolution（字符串数组）、
 evolution_items（对象数组，每项含 year、title、summary、paper_ids、evidence_ids）、
 claims（原子主张对象数组，每项含 claim_type、text、paper_ids、evidence_ids、scope）、
+其中论文特定主张还必须包含 evidence_quotes（从摘要逐字复制的字符串数组），
 research_limitations（研究局限对象数组）、
 research_gap_candidates（对象数组，每项含 text、scope、paper_ids、evidence_ids）、
 reproducibility_checks（对象数组，每项含 text、check_type、paper_ids）、

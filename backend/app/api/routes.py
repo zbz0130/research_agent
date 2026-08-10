@@ -3,7 +3,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from app.config import Settings, get_settings
-from app.evidence_schemas import EvidenceLedger
+from app.evidence_schemas import ClaimEvidenceReview, EvidenceLedger
 from app.experiment_schemas import ExperimentPlan, ExperimentPlanRequest, ExperimentPlanReview
 from app.research_schemas import (
     AnalysisCreate,
@@ -28,7 +28,11 @@ from app.schemas import ApiKeyStatusResponse, ApiKeyUpdate, HealthResponse, Proj
 from app.services.graph_service import GraphConflict, GraphNotFound, graph_service
 from app.services.graph_agent_patch_service import graph_agent_patch_service
 from app.services.project_service import project_service
-from app.services.research_service import AnalysisNotFound, research_service
+from app.services.research_service import (
+    AnalysisNotFound,
+    EvidenceLinkNotFound,
+    research_service,
+)
 from app.services.idea_service import IdeaCheckNotFound, idea_service
 from app.services.research_providers import ProviderUnavailable
 from app.services.settings_service import api_key_status as build_api_key_status, update_api_keys
@@ -138,6 +142,32 @@ def get_evidence_ledger(analysis_id: UUID) -> EvidenceLedger:
     if job.result is None or job.result.evidence_ledger is None:
         raise HTTPException(status_code=404, detail="该分析没有可用的证据账本")
     return job.result.evidence_ledger
+
+
+@router.patch(
+    "/analyses/{analysis_id}/claims/{claim_id}/evidence/{evidence_id}/review",
+    response_model=AnalysisJob,
+    tags=["research"],
+)
+def review_claim_evidence(
+    analysis_id: UUID,
+    claim_id: str,
+    evidence_id: str,
+    payload: ClaimEvidenceReview,
+) -> AnalysisJob:
+    """Save one explicit human verdict without changing the source excerpt."""
+
+    try:
+        return research_service.review_evidence_link(
+            analysis_id,
+            claim_id,
+            evidence_id,
+            payload,
+        )
+    except AnalysisNotFound as exc:
+        raise HTTPException(status_code=404, detail="分析任务不存在") from exc
+    except EvidenceLinkNotFound as exc:
+        raise HTTPException(status_code=404, detail="主张或证据关联不存在") from exc
 
 
 @router.post("/ideas/check", response_model=IdeaCheckResult, tags=["research"])
