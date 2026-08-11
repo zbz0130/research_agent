@@ -14,6 +14,7 @@ GitHub Pages（公开 HTML / CSS / JavaScript）
 ## 一次性配置
 
 1. 将 FastAPI 服务部署在一个公开的 **HTTPS** 地址，例如 `https://wishforge-api.example.com`。它仍应在服务器环境中配置各类 `WISHFORGE_*_API_KEY`。
+   如果解释模型走代理，在这个后端环境中同时设置 `WISHFORGE_EXPLANATION_BASE_URL=https://proxy.example.com/v1`；该地址属于“后端到模型服务”的连接，不是 Pages 的 API 地址。
 2. 在该 API 服务设置 CORS，允许 Pages 域名。对于本仓库，设置：
 
    ```env
@@ -42,6 +43,7 @@ GitHub Pages（公开 HTML / CSS / JavaScript）
 - 本地由 FastAPI 同源提供页面，`frontend/runtime-config.js` 保持空字符串即可；浏览器请求会发往当前站点的 `/api/v1/...`。
 - GitHub Pages 工作流只会在发布副本中覆写 `runtime-config.js`，将 API 基地址写成仓库 Variable 的公开值。
 - 页面上的 API Key 配置表单会把密钥提交给所连接的 FastAPI 服务；第一版该服务将网页输入仅保留在进程内存。没有登录、权限和持久化密钥管理时，不应将这个管理接口暴露给不受信任的公网用户。
+- “后端 API 基地址”只决定浏览器请求发往哪个 WishForge 服务；“解释模型代理 Base URL”决定 WishForge 服务向哪个 OpenAI 兼容模型端点发请求，两者不要混填。
 
 ## 发布前检查
 

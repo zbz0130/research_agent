@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 from typing import Literal
+from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -47,6 +48,45 @@ class ApiKeyUpdate(BaseModel):
     def require_at_least_one_slot(self) -> "ApiKeyUpdate":
         if not self.model_dump(exclude_unset=True):
             raise ValueError("至少需要提供一个 API Key 槽位")
+        return self
+
+
+class RuntimeProviderSettings(BaseModel):
+    """Non-secret provider settings used by the current API process."""
+
+    explanation_provider: str
+    explanation_model: str
+    explanation_base_url: str
+    demo_mode: bool
+    storage: Literal["environment", "runtime_memory"] = "environment"
+
+
+class RuntimeProviderSettingsUpdate(BaseModel):
+    """Update the model endpoint without accepting or returning credentials."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    explanation_provider: Literal["openai", "openai_compatible", "rule_based"] | None = None
+    explanation_model: str | None = Field(default=None, min_length=1, max_length=200)
+    explanation_base_url: str | None = Field(default=None, max_length=500)
+    demo_mode: bool | None = None
+
+    @model_validator(mode="after")
+    def validate_endpoint(self) -> "RuntimeProviderSettingsUpdate":
+        values = self.model_dump(exclude_unset=True)
+        if not values:
+            raise ValueError("至少需要提供一个运行时 Provider 设置")
+        if any(value is None for value in values.values()):
+            raise ValueError("运行时 Provider 设置不能为 null")
+        if "explanation_base_url" in values:
+            value = values["explanation_base_url"]
+            if value == "":
+                raise ValueError("解释模型代理 Base URL 不能为空；如需规则解释，请将 Provider 设为 rule_based")
+            parsed = urlparse(value)
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                raise ValueError("解释模型代理 Base URL 必须是完整的 http:// 或 https:// 地址")
+            if parsed.query or parsed.fragment:
+                raise ValueError("解释模型代理 Base URL 不应包含 query 或 fragment")
         return self
 
 

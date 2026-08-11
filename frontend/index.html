@@ -490,6 +490,49 @@
           </p>
         </section>
 
+        <section class="card model-endpoint-card">
+          <div class="card-heading settings-card-heading">
+            <div>
+              <p class="eyebrow">MODEL ROUTING</p>
+              <h2>解释模型代理</h2>
+            </div>
+            <span id="model-settings-status" class="tag">正在读取</span>
+          </div>
+          <p class="settings-note">
+            这里配置的是“WishForge 后端 → 模型服务”的地址，不是 GitHub Pages 的后端地址。
+            代理需要提供 OpenAI 兼容的 <code>/chat/completions</code> 接口；请填写到 <code>/v1</code> 这一层，系统会自动补上接口路径。
+          </p>
+          <form id="model-settings-form" class="analysis-form">
+            <div class="form-grid model-settings-grid">
+              <label>
+                Provider
+                <select id="explanation-provider">
+                  <option value="openai">OpenAI</option>
+                  <option value="openai_compatible">OpenAI 兼容代理</option>
+                  <option value="rule_based">规则回退（不调用模型）</option>
+                </select>
+              </label>
+              <label>
+                模型名称
+                <input id="explanation-model" maxlength="200" placeholder="例如：gpt-4.1-mini 或代理支持的模型名" />
+              </label>
+            </div>
+            <label>
+              模型代理 Base URL
+              <input id="explanation-base-url" type="url" inputmode="url" autocomplete="url" placeholder="https://api.openai.com/v1" />
+            </label>
+            <div class="form-actions">
+              <button type="submit" id="save-model-settings">保存模型路由</button>
+              <span id="model-settings-message" class="form-message" role="status"></span>
+            </div>
+          </form>
+          <p class="settings-hint">
+            对应环境变量：<code>WISHFORGE_EXPLANATION_PROVIDER</code> ·
+            <code>WISHFORGE_EXPLANATION_MODEL</code> ·
+            <code>WISHFORGE_EXPLANATION_BASE_URL</code>。网页修改只保存在当前后端进程，长期部署请改后端环境变量。
+          </p>
+        </section>
+
         <section class="card settings-card">
           <div class="card-heading settings-card-heading">
             <div>

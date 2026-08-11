@@ -90,6 +90,8 @@ WISHFORGE_EXPLANATION_BASE_URL  # OpenAI-compatible 服务地址
 
 复制 [.env.example](<D:/C++/search_agent/.env.example>) 为 `.env` 后填写。网页设置面板只显示“已配置/未配置”和掩码，不会返回明文密钥。
 
+如果使用 OpenAI 兼容代理，代理地址不是填在 API Key 输入框，而是在设置页的“解释模型代理”卡片中填写；对应环境变量是 `WISHFORGE_EXPLANATION_BASE_URL`。地址填写到 `/v1` 这一层，例如 `https://proxy.example.com/v1`，后端会自动请求 `/chat/completions`。网页输入的 Provider、模型名和 Base URL 只覆盖当前 API 进程，长期部署请写入后端 `.env`。
+
 配置状态接口：
 
 ```text
@@ -113,6 +115,22 @@ Content-Type: application/json
 接口只返回掩码和 `configured` 状态，绝不返回明文。第一版把网页输入保存在当前 API 进程的内存中，服务重启后消失；正式部署应改用操作系统密钥环或 Secret Manager。传入空字符串可清除对应槽位。
 
 当前接口没有用户登录和权限系统，网页密钥配置只适合本机或受保护的内网演示；不要把这个版本直接暴露到公网。
+
+模型代理的非敏感运行时设置接口：
+
+```text
+GET /api/v1/settings/runtime
+PATCH /api/v1/settings/runtime
+Content-Type: application/json
+
+{
+  "explanation_provider": "openai_compatible",
+  "explanation_model": "qwen-plus",
+  "explanation_base_url": "https://proxy.example.com/v1"
+}
+```
+
+这个接口不会接收或返回 API Key；Key 仍通过 `/settings/api-keys` 单独配置。
 
 也可以不用网页，直接用 API 验收一轮：
 

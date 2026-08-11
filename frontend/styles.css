@@ -179,6 +179,8 @@ button.secondary { padding: 8px 12px; color: #c3d6e9; background: #26384c; }
 .settings-overview-card code { color: #b8d6f2; font-family: "SFMono-Regular", Consolas, monospace; font-size: 0.73rem; }
 .settings-overview-icon { display: grid; flex: 0 0 auto; width: 31px; height: 31px; place-items: center; border: 1px solid #567da2; border-radius: 10px; color: #bae0ff; background: rgba(72, 115, 153, 0.17); font-family: "SFMono-Regular", Consolas, monospace; }
 .api-endpoint-card { margin: 0 0 18px; border-color: #36516e; background: linear-gradient(145deg, rgba(36, 58, 81, 0.65), rgba(21, 29, 40, 0.94)); }
+.model-endpoint-card { margin: 0 0 18px; border-color: #4b456c; background: linear-gradient(145deg, rgba(55, 47, 77, 0.5), rgba(21, 29, 40, 0.94)); }
+.model-settings-grid { grid-template-columns: 0.9fr 1.1fr; }
 .settings-card { margin-top: 0; }
 .settings-card-heading { margin-bottom: 12px; }
 .settings-note, .settings-hint { margin: 0 0 16px; color: #9eafc2; line-height: 1.6; font-size: 0.86rem; }
@@ -322,6 +324,7 @@ button.secondary { padding: 8px 12px; color: #c3d6e9; background: #26384c; }
   .patch-row { flex-direction: column; }
   .innovation-details div { grid-template-columns: 1fr; gap: 3px; }
   .experiment-form-grid, .experiment-section-grid { grid-template-columns: 1fr; }
+  .model-settings-grid { grid-template-columns: 1fr; }
   .experiment-plan-heading, .experiment-review-heading { align-items: flex-start; flex-direction: column; }
   .experiment-plan-status { justify-content: flex-start; }
   .experiment-resource-grid { grid-template-columns: 1fr 1fr; }

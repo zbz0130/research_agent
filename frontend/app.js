@@ -70,6 +70,12 @@ const apiBaseInput = document.querySelector("#api-base-url");
 const apiBaseStatusEl = document.querySelector("#api-base-status");
 const apiBaseMessageEl = document.querySelector("#api-base-message");
 const resetApiBaseButton = document.querySelector("#reset-api-base");
+const modelSettingsForm = document.querySelector("#model-settings-form");
+const modelProviderInput = document.querySelector("#explanation-provider");
+const modelNameInput = document.querySelector("#explanation-model");
+const modelBaseUrlInput = document.querySelector("#explanation-base-url");
+const modelSettingsStatusEl = document.querySelector("#model-settings-status");
+const modelSettingsMessageEl = document.querySelector("#model-settings-message");
 const routeLinks = [...document.querySelectorAll("[data-route-link]")];
 const appViews = [...document.querySelectorAll("[data-view]")];
 
@@ -309,6 +315,7 @@ apiBaseForm.addEventListener("submit", (event) => {
   loadHealth();
   loadProjects();
   loadApiKeys();
+  loadModelSettings();
 });
 
 resetApiBaseButton.addEventListener("click", () => {
@@ -322,6 +329,7 @@ resetApiBaseButton.addEventListener("click", () => {
   loadHealth();
   loadProjects();
   loadApiKeys();
+  loadModelSettings();
 });
 
 function renderApiKeys(slots) {
@@ -412,6 +420,67 @@ async function loadApiKeys() {
     apiKeysEl.innerHTML = '<p class="empty error-text">配置状态读取失败，请确认 API 正在运行。</p>';
   }
 }
+
+function setModelSettingsMessage(text, kind = "") {
+  modelSettingsMessageEl.textContent = text;
+  modelSettingsMessageEl.className = `form-message ${kind}`;
+}
+
+function renderModelSettings(settings) {
+  modelProviderInput.value = settings.explanation_provider || "openai";
+  modelNameInput.value = settings.explanation_model || "";
+  modelBaseUrlInput.value = settings.explanation_base_url || "";
+  const storageLabel = settings.storage === "runtime_memory" ? "当前进程覆盖" : "环境配置";
+  modelSettingsStatusEl.textContent = `${storageLabel} · ${settings.demo_mode ? "Demo 开启" : "正式 Provider"}`;
+  modelSettingsStatusEl.className = `tag ${settings.storage === "runtime_memory" ? "tag-configured" : "tag-missing"}`;
+}
+
+async function loadModelSettings() {
+  try {
+    const response = await apiFetch("/api/v1/settings/runtime");
+    if (!response.ok) throw new Error("runtime settings request failed");
+    renderModelSettings(await response.json());
+  } catch (error) {
+    modelSettingsStatusEl.textContent = "后端不可用";
+    modelSettingsStatusEl.className = "tag tag-missing";
+    setModelSettingsMessage("无法读取模型路由配置，请先检查后端 API 地址。", "error-text");
+  }
+}
+
+modelSettingsForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const provider = modelProviderInput.value;
+  const model = modelNameInput.value.trim();
+  const baseUrl = modelBaseUrlInput.value.trim();
+  if (!model || !baseUrl) {
+    setModelSettingsMessage("Provider、模型名称和 Base URL 都需要填写。", "error-text");
+    return;
+  }
+  const saveButton = document.querySelector("#save-model-settings");
+  saveButton.disabled = true;
+  setModelSettingsMessage("正在保存模型路由…");
+  try {
+    const response = await apiFetch("/api/v1/settings/runtime", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        explanation_provider: provider,
+        explanation_model: model,
+        explanation_base_url: baseUrl,
+      }),
+    });
+    if (!response.ok) {
+      const detail = await response.text();
+      throw new Error(detail || "runtime settings update failed");
+    }
+    renderModelSettings(await response.json());
+    setModelSettingsMessage("模型路由已保存；后续分析会使用当前进程配置。", "");
+  } catch (error) {
+    setModelSettingsMessage(`保存失败：${error.message}`, "error-text");
+  } finally {
+    saveButton.disabled = false;
+  }
+});
 
 async function updateApiKeys(payload) {
   const response = await apiFetch("/api/v1/settings/api-keys", {
@@ -1708,7 +1777,10 @@ projectForm.addEventListener("submit", async (event) => {
 });
 
 document.querySelector("#refresh").addEventListener("click", loadProjects);
-document.querySelector("#refresh-settings").addEventListener("click", loadApiKeys);
+document.querySelector("#refresh-settings").addEventListener("click", () => {
+  loadApiKeys();
+  loadModelSettings();
+});
 window.addEventListener("hashchange", () => renderRoute());
 routeLinks.forEach((link) => {
   link.addEventListener("click", () => {
@@ -1721,3 +1793,4 @@ renderRoute();
 loadHealth();
 loadProjects();
 loadApiKeys();
+loadModelSettings();

@@ -24,14 +24,27 @@ from app.research_schemas import (
     NodeExplanationCreate,
     ResearchBrief,
 )
-from app.schemas import ApiKeyStatusResponse, ApiKeyUpdate, HealthResponse, Project, ProjectCreate
+from app.schemas import (
+    ApiKeyStatusResponse,
+    ApiKeyUpdate,
+    HealthResponse,
+    Project,
+    ProjectCreate,
+    RuntimeProviderSettings,
+    RuntimeProviderSettingsUpdate,
+)
 from app.services.graph_service import GraphConflict, GraphNotFound, graph_service
 from app.services.graph_agent_patch_service import graph_agent_patch_service
 from app.services.project_service import project_service
 from app.services.research_service import AnalysisNotFound, research_service
 from app.services.idea_service import IdeaCheckNotFound, idea_service
 from app.services.research_providers import ProviderUnavailable
-from app.services.settings_service import api_key_status as build_api_key_status, update_api_keys
+from app.services.settings_service import (
+    api_key_status as build_api_key_status,
+    runtime_provider_status,
+    update_api_keys,
+    update_runtime_provider_settings,
+)
 from app.services.experiment_service import experiment_service
 from app.storage import storage
 
@@ -63,6 +76,23 @@ def update_api_key_status(
     """
 
     return update_api_keys(settings, payload)
+
+
+@router.get("/settings/runtime", response_model=RuntimeProviderSettings, tags=["settings"])
+def runtime_settings_status(settings: Settings = Depends(get_settings)) -> RuntimeProviderSettings:
+    """Expose non-secret model endpoint settings for the local settings UI."""
+
+    return runtime_provider_status(settings)
+
+
+@router.patch("/settings/runtime", response_model=RuntimeProviderSettings, tags=["settings"])
+def update_runtime_settings(
+    payload: RuntimeProviderSettingsUpdate,
+    settings: Settings = Depends(get_settings),
+) -> RuntimeProviderSettings:
+    """Change model provider, model name, proxy URL, or demo mode in memory."""
+
+    return update_runtime_provider_settings(settings, payload)
 
 
 @router.get("/projects", response_model=list[Project], tags=["projects"])

@@ -35,6 +35,10 @@ class Settings(BaseSettings):
     # This private marker lets the status endpoint explain whether a value
     # came from .env or from the in-memory runtime overlay without exposing it.
     _runtime_api_key_slots: set[str] = PrivateAttr(default_factory=set)
+    # Non-secret provider settings entered through the local web UI are also
+    # process-local.  Keep the original values so a future reset operation can
+    # restore the environment-backed configuration without re-reading secrets.
+    _runtime_provider_slots: set[str] = PrivateAttr(default_factory=set)
 
     model_config = SettingsConfigDict(
         env_file=".env",

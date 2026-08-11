@@ -1,7 +1,13 @@
 from collections.abc import Iterable
 
 from app.config import Settings
-from app.schemas import ApiKeySlot, ApiKeyStatusResponse, ApiKeyUpdate
+from app.schemas import (
+    ApiKeySlot,
+    ApiKeyStatusResponse,
+    ApiKeyUpdate,
+    RuntimeProviderSettings,
+    RuntimeProviderSettingsUpdate,
+)
 from pydantic import SecretStr
 
 
@@ -94,3 +100,41 @@ def update_api_keys(settings: Settings, payload: ApiKeyUpdate) -> ApiKeyStatusRe
         setattr(settings, attribute, SecretStr(raw_value) if raw_value else None)
         runtime_slots.add(slot_id)
     return api_key_status(settings)
+
+
+def runtime_provider_status(settings: Settings) -> RuntimeProviderSettings:
+    """Return non-secret model-provider settings for the settings page."""
+
+    runtime_slots = getattr(settings, "_runtime_provider_slots", set())
+    return RuntimeProviderSettings(
+        explanation_provider=settings.explanation_provider,
+        explanation_model=settings.explanation_model,
+        explanation_base_url=settings.explanation_base_url,
+        demo_mode=settings.demo_mode,
+        storage="runtime_memory" if runtime_slots else "environment",
+    )
+
+
+def update_runtime_provider_settings(
+    settings: Settings,
+    payload: RuntimeProviderSettingsUpdate,
+) -> RuntimeProviderSettings:
+    """Apply non-secret model endpoint settings to the current process.
+
+    API credentials remain handled by ``update_api_keys``.  Separating these
+    operations makes it difficult for a UI or client to accidentally serialize
+    a key while changing a proxy URL or model name.
+    """
+
+    values = payload.model_dump(exclude_unset=True)
+    runtime_slots = getattr(settings, "_runtime_provider_slots", None)
+    if runtime_slots is None:
+        runtime_slots = set()
+        setattr(settings, "_runtime_provider_slots", runtime_slots)
+
+    for field, raw_value in values.items():
+        if field == "explanation_base_url" and isinstance(raw_value, str):
+            raw_value = raw_value.rstrip("/")
+        setattr(settings, field, raw_value)
+        runtime_slots.add(field)
+    return runtime_provider_status(settings)

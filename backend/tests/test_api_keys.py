@@ -1,4 +1,5 @@
 from fastapi.testclient import TestClient
+from pydantic import SecretStr
 
 from app.config import Settings, get_settings
 from app.main import app
@@ -60,3 +61,46 @@ def test_invalid_runtime_api_key_request_does_not_echo_secret() -> None:
     )
     assert response.status_code == 422
     assert secret not in response.text
+
+
+def test_runtime_model_proxy_settings_are_non_secret_and_process_local() -> None:
+    settings = Settings(
+        explanation_provider="openai",
+        explanation_model="gpt-4.1-mini",
+        explanation_base_url="https://api.openai.com/v1",
+        explanation_api_key=SecretStr("model-secret-1234"),
+        demo_mode=True,
+    )
+    app.dependency_overrides[get_settings] = lambda: settings
+    try:
+        initial = client.get("/api/v1/settings/runtime")
+        assert initial.status_code == 200
+        assert initial.json()["explanation_base_url"] == "https://api.openai.com/v1"
+        assert initial.json()["storage"] == "environment"
+
+        response = client.patch(
+            "/api/v1/settings/runtime",
+            json={
+                "explanation_provider": "openai_compatible",
+                "explanation_model": "qwen-plus",
+                "explanation_base_url": "https://proxy.example.test/v1/",
+            },
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["explanation_provider"] == "openai_compatible"
+        assert body["explanation_model"] == "qwen-plus"
+        assert body["explanation_base_url"] == "https://proxy.example.test/v1"
+        assert body["storage"] == "runtime_memory"
+        assert settings.explanation_base_url == "https://proxy.example.test/v1"
+        assert "model-secret-1234" not in response.text
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_runtime_model_proxy_settings_reject_invalid_base_url() -> None:
+    response = client.patch(
+        "/api/v1/settings/runtime",
+        json={"explanation_base_url": "proxy.example.test/v1"},
+    )
+    assert response.status_code == 422
