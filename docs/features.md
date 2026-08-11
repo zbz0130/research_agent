@@ -3,7 +3,7 @@
 > 这份文档描述当前产品已经可以使用的功能、入口、数据边界和验收方式。
 > 它和 [`log.md`](../log.md) 的职责不同：`log.md` 记录开发过程、失败实验和提交时间线；本文件只维护“现在有什么、怎么用、能相信到什么程度”。
 >
-> 文档基线：`codex/iterative-retrieval-atomic-claims` 的 `cc3f43a`，以及本地 `main` 上待合并的运行时模型代理提交 `df9411c`。
+> 文档基线：功能分支的 `43fa676`，以及已经合入 `main` 的运行时模型代理提交 `df9411c`。两部分最终由 `main` 的合并提交统一提供。
 
 ## 1. 产品定位
 
@@ -311,7 +311,7 @@ arXiv Provider 默认不需要论文 Key。解释模型使用 OpenAI-compatible 
 
 ### 10.2 运行时解释模型代理
 
-本地 `main` 的 `df9411c` 增加了非敏感运行时设置：
+`main` 的 `df9411c` 增加了非敏感运行时设置：
 
 ```text
 GET   /api/v1/settings/runtime
@@ -333,7 +333,7 @@ https://proxy.example.com/v1
 
 后端会请求 `/chat/completions`。该接口不接收 API Key；Key 仍然通过独立的 `/settings/api-keys` 配置。网页修改只覆盖当前进程，长期部署请写入后端 `.env` 或 Secret Manager。
 
-当前目标分支在合并 `main` 前还没有这两个 runtime endpoint；合并完成后它们会随 `df9411c` 一起进入 `main`。
+这两个 runtime endpoint 已随 `df9411c` 合入 `main`。开发分支在合并前曾不包含它们，因此如果单独检出旧的功能分支提交，需要以 `main` 的合并结果为准。
 
 ## 11. 前端、后端和持久化
 
@@ -362,7 +362,7 @@ FastAPI API 统一挂载在 `/api/v1`。主要资源包括：
 | 实验草案 | `POST/GET /experiments/plans`、review |
 | 概念图 | `POST/GET/PATCH /graphs`、compare、subset |
 | GraphPatch | 创建、Agent 提议、列表、apply、reject |
-| 设置 | `GET/PATCH /settings/api-keys`；合并 `main` 后增加 runtime 设置 |
+| 设置 | `GET/PATCH /settings/api-keys`；`main` 已提供 runtime 设置 |
 
 常见响应边界：创建分析通常返回 `202 Accepted`，创建项目、图谱或实验草案返回 `201 Created`；不存在的资源返回 `404`，图谱版本冲突返回 `409`，请求字段不合法返回 `422`，Provider 不可用时返回 `503`。具体响应以 `/docs` 中的 OpenAPI 为准。
 
