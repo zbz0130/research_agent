@@ -8,6 +8,20 @@ from app.main import app
 client = TestClient(app)
 
 
+def test_arxiv_paper_search_is_ready_without_a_credential() -> None:
+    settings = Settings(paper_provider="arxiv", paper_api_key=None, _env_file=None)
+    app.dependency_overrides[get_settings] = lambda: settings
+    try:
+        response = client.get("/api/v1/settings/api-keys")
+        assert response.status_code == 200
+        slots = {slot["id"]: slot for slot in response.json()["slots"]}
+        assert slots["paper_search"]["provider"] == "arxiv"
+        assert slots["paper_search"]["configured"] is False
+        assert slots["paper_search"]["credential_required"] is False
+    finally:
+        app.dependency_overrides.clear()
+
+
 def test_runtime_api_key_update_is_masked_and_separated() -> None:
     settings = Settings(
         paper_provider="semantic_scholar",

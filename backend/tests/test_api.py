@@ -4,8 +4,19 @@ from pydantic import SecretStr
 
 from app.config import Settings, get_settings
 from app.main import app
-from app.research_schemas import ConceptGraph, ConceptNode, GraphPatchCreate, PaperRecord
+from app.research_schemas import (
+    ConceptGraph,
+    ConceptNode,
+    ExplanationResult,
+    GraphPatchCreate,
+    PaperRecord,
+    SearchQueryPlan,
+)
 from app.services.graph_service import GraphConflict, graph_service
+from app.services.research_providers import (
+    ArxivSearchProvider,
+    OpenAICompatibleExplanationProvider,
+)
 from app.services.research_service import research_service
 from app.services.settings_service import api_key_slots
 from app.storage import Storage, storage
@@ -70,6 +81,7 @@ def test_api_key_status_is_separated_and_masked() -> None:
         experiment_provider="remote_runner",
         paper_api_key=SecretStr("paper-secret-1234"),
         community_api_key=SecretStr("community-secret-4321"),
+        explanation_api_key=None,
         experiment_api_key=SecretStr("run-secret-5678"),
     )
 
@@ -98,7 +110,10 @@ def test_settings_load_separate_environment_keys(monkeypatch) -> None:
     monkeypatch.setenv("WISHFORGE_COMMUNITY_API_KEY", "community-env-7777")
     monkeypatch.setenv("WISHFORGE_EXPERIMENT_API_KEY", "runner-env-8888")
 
-    slots = {slot.id: slot for slot in api_key_slots(Settings())}
+    # Read the environment variables set by this test, but do not let a
+    # developer's repository-local .env leak a real explanation key into the
+    # expected unconfigured slot.
+    slots = {slot.id: slot for slot in api_key_slots(Settings(_env_file=None))}
 
     assert slots["paper_search"].configured is True
     assert slots["paper_search"].masked == "••••••••9999"
@@ -136,13 +151,143 @@ def test_concept_analysis_creates_evidence_and_graph() -> None:
         assert job["status"] == "completed"
         result = job["result"]
         assert len(result["papers"]) == 2
-        assert len(result["evidence"]) == 2
+        assert len(result["evidence"]) >= len(result["papers"])
+        assert {item["evidence_type"] for item in result["evidence"]} & {"mechanism", "result", "limitation"}
         assert result["graph"]["root_id"] == "root"
         assert result["graph"]["name"] == "Attention Mechanism 概念图"
         assert result["graph"]["version"] == 1
         assert result["evidence"][0]["locator"]["kind"] == "abstract"
         assert len(result["graph"]["nodes"]) >= 5
         assert result["explanation"]["one_sentence"]
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_literature_analysis_uses_model_query_planner_and_arxiv(monkeypatch) -> None:
+    searched: list[str] = []
+
+    def fake_plan(
+        self: OpenAICompatibleExplanationProvider, concept: str, language: str
+    ) -> list[SearchQueryPlan]:
+        assert concept == "注意力机制"
+        assert language == "zh-CN"
+        return [
+            SearchQueryPlan(query="attention mechanism", purpose="core"),
+            SearchQueryPlan(query="neural sequence alignment", purpose="foundational"),
+            SearchQueryPlan(query="efficient self attention", purpose="recent"),
+        ]
+
+    def fake_search(
+        self: ArxivSearchProvider, concept: str, limit: int
+    ) -> list[PaperRecord]:
+        searched.append(concept)
+        index = len(searched)
+        return [
+            PaperRecord(
+                id="arxiv:1706.03762" if index == 1 else f"arxiv:test-{index}",
+                arxiv_id="1706.03762" if index == 1 else f"test-{index}",
+                title="Attention Is All You Need" if index == 1 else f"Retrieval Angle {index}",
+                authors=["Ashish Vaswani"],
+                year=2017,
+                abstract="The Transformer is based solely on attention mechanisms.",
+                url="https://arxiv.org/abs/1706.03762",
+                source="arxiv",
+                source_kind="academic",
+                access_type="open_access",
+            )
+        ]
+
+    def fake_followup(
+        self: OpenAICompatibleExplanationProvider,
+        concept: str,
+        papers: list[PaperRecord],
+        existing_queries: list[SearchQueryPlan],
+        language: str,
+    ) -> list[SearchQueryPlan]:
+        assert papers
+        assert len(existing_queries) == 3
+        return [
+            SearchQueryPlan(
+                query="attention token pruning",
+                purpose="method_family",
+                phase="feedback",
+                derived_from_paper_ids=[papers[0].id],
+            )
+        ]
+
+    def fake_explain(
+        self: OpenAICompatibleExplanationProvider,
+        concept: str,
+        papers: list[PaperRecord],
+        evidence: list,
+        audience: str,
+        language: str,
+    ) -> ExplanationResult:
+        assert papers[0].source == "arxiv"
+        return ExplanationResult(
+            one_sentence="注意力机制让模型按相关性聚合信息。",
+            intuitive="像阅读时关注关键句。",
+            technical="通过查询、键和值计算权重。",
+            evolution=["2017：Transformer 将自注意力作为核心结构。"],
+            related_concepts=["Self-Attention", "Transformer"],
+            limitations=["当前只核对摘要。"],
+            evidence_ids=[item.id for item in evidence],
+        )
+
+    monkeypatch.setattr(OpenAICompatibleExplanationProvider, "plan_search_queries", fake_plan)
+    monkeypatch.setattr(OpenAICompatibleExplanationProvider, "plan_followup_queries", fake_followup)
+    monkeypatch.setattr(OpenAICompatibleExplanationProvider, "explain", fake_explain)
+    monkeypatch.setattr(ArxivSearchProvider, "search", fake_search)
+    app.dependency_overrides[get_settings] = lambda: Settings(
+        paper_provider="arxiv",
+        explanation_provider="openai",
+        explanation_api_key=SecretStr("model-key"),
+        demo_mode=False,
+        _env_file=None,
+    )
+    try:
+        created = client.post(
+            "/api/v1/analyses",
+            json={
+                "concept": "注意力机制",
+                "level": "literature",
+                "audience": "beginner",
+                "max_papers": 3,
+            },
+        )
+        assert created.status_code == 202
+        job_id = created.json()["id"]
+        for _ in range(50):
+            job = client.get(f"/api/v1/analyses/{job_id}").json()
+            if job["status"] in {"completed", "failed"}:
+                break
+
+        assert job["status"] == "completed"
+        assert searched == [
+            "attention mechanism",
+            "neural sequence alignment",
+            "efficient self attention",
+            "attention token pruning",
+        ]
+        assert job["result"]["search_terms"] == searched
+        assert job["result"]["provider"] == "search=arxiv; explanation=openai_compatible"
+        assert job["result"]["papers"][0]["arxiv_id"] == "1706.03762"
+        assert job["result"]["explanation"]["evolution"]
+        assert job["result"]["explanation"]["evolution_items"]
+        assert job["result"]["retrieval_queries"] == [
+            {"query": "attention mechanism", "purpose": "core", "phase": "initial", "derived_from_paper_ids": []},
+            {"query": "neural sequence alignment", "purpose": "foundational", "phase": "initial", "derived_from_paper_ids": []},
+            {"query": "efficient self attention", "purpose": "recent", "phase": "initial", "derived_from_paper_ids": []},
+            {
+                "query": "attention token pruning",
+                "purpose": "method_family",
+                "phase": "feedback",
+                "derived_from_paper_ids": ["arxiv:1706.03762"],
+            },
+        ]
+        assert job["result"]["stage_timings"]
+        assert job["result"]["total_duration_ms"] >= 0
+        assert job["result"]["explanation"]["related_concepts"]
     finally:
         app.dependency_overrides.clear()
 
@@ -388,7 +533,7 @@ def test_research_mode_exposes_cautious_innovation_candidate() -> None:
                 break
         assert job["status"] == "completed"
         result = job["result"]
-        assert len(result["search_terms"]) == 3
+        assert result["search_terms"]
         assert result["innovation_candidates"]
         candidate = result["innovation_candidates"][0]
         assert candidate["confidence"] == "low"

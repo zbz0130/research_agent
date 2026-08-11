@@ -251,7 +251,11 @@ def _future_work_signals(
                 "权衡",
             )
         )
-        if not hint and not (card and card.evidence_type in {"limitation", "future_work"}):
+        if not hint and not (
+            card
+            and set(card.evidence_types or [card.evidence_type])
+            & {"limitation", "future_work"}
+        ):
             continue
         excerpt = (card.excerpt if card else paper.abstract[:800]).strip()
         # The current provider only supplies abstracts.  Keep the section as
