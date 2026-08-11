@@ -1,3 +1,5 @@
+import sqlite3
+
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
@@ -156,6 +158,9 @@ def test_concept_analysis_creates_evidence_and_graph() -> None:
         assert result["graph"]["root_id"] == "root"
         assert result["graph"]["name"] == "Attention Mechanism 概念图"
         assert result["graph"]["version"] == 1
+        assert result["graph_save_state"] == "transient"
+        assert result["graph"]["save_state"] == "transient"
+        assert client.get(f"/api/v1/graphs/{result['graph']['id']}").status_code == 404
         assert result["evidence"][0]["locator"]["kind"] == "abstract"
         assert len(result["graph"]["nodes"]) >= 5
         assert result["explanation"]["one_sentence"]
@@ -308,6 +313,12 @@ def test_agent_graph_patch_requires_user_apply() -> None:
             if job["status"] in {"completed", "failed"}:
                 break
         graph = job["result"]["graph"]
+        saved = client.post(
+            f"/api/v1/analyses/{job_id}/graph/save",
+            json={"expected_version": graph["version"]},
+        )
+        assert saved.status_code == 200
+        graph = saved.json()["graph"]
         patch = client.post(
             f"/api/v1/graphs/{graph['id']}/patches",
             json={
@@ -909,6 +920,11 @@ def test_analysis_and_graph_survive_service_cache_reset() -> None:
                 break
         assert job["status"] == "completed"
         graph_id = job["result"]["graph"]["id"]
+        saved = client.post(
+            f"/api/v1/analyses/{job_id}/graph/save",
+            json={"expected_version": job["result"]["graph"]["version"]},
+        )
+        assert saved.status_code == 200
 
         # Simulate a service restart: durable rows remain, process-local caches
         # do not. The public GET/list APIs must hydrate from SQLite.
@@ -931,6 +947,114 @@ def test_analysis_and_graph_survive_service_cache_reset() -> None:
         app.dependency_overrides.clear()
 
 
+def test_analysis_graph_lifecycle_save_is_idempotent_and_delete_preserves_history() -> None:
+    app.dependency_overrides[get_settings] = lambda: Settings(
+        paper_provider="demo",
+        explanation_provider="rule_based",
+        demo_mode=True,
+    )
+    try:
+        created = client.post(
+            "/api/v1/analyses",
+            json={"concept": "Attention", "level": "literature", "max_papers": 1},
+        )
+        job_id = created.json()["id"]
+        for _ in range(30):
+            job = client.get(f"/api/v1/analyses/{job_id}").json()
+            if job["status"] in {"completed", "failed"}:
+                break
+        assert job["status"] == "completed"
+        graph = job["result"]["graph"]
+        graph_id = graph["id"]
+        assert client.get("/api/v1/graphs").json() == []
+
+        first = client.post(
+            f"/api/v1/analyses/{job_id}/graph/save",
+            json={"expected_version": graph["version"], "name": "Attention 已保存"},
+        )
+        assert first.status_code == 200
+        assert first.json()["saved_graph_id"] == graph_id
+        assert first.json()["graph"]["save_state"] == "saved"
+
+        second = client.post(
+            f"/api/v1/analyses/{job_id}/graph/save",
+            json={"expected_version": graph["version"]},
+        )
+        assert second.status_code == 200
+        assert second.json()["saved_graph_id"] == graph_id
+        assert len(client.get("/api/v1/graphs").json()) == 1
+
+        patch = client.post(
+            f"/api/v1/graphs/{graph_id}/patches",
+            json={
+                "actor": "agent",
+                "reason": "保存后增加一个节点",
+                "operations": [_add_node_operation("saved-extra")],
+            },
+        )
+        assert patch.status_code == 200
+        patch_id = patch.json()["id"]
+        deleted = client.delete(f"/api/v1/graphs/{graph_id}?expected_version=1")
+        assert deleted.status_code == 204
+        assert client.get(f"/api/v1/graphs/{graph_id}").status_code == 404
+        assert client.get(f"/api/v1/graphs/{graph_id}/patches").status_code == 404
+        # Deleting the library copy does not destroy the analysis snapshot.
+        restored = client.get(f"/api/v1/analyses/{job_id}/graph")
+        assert restored.status_code == 200
+        assert restored.json()["id"] == graph_id
+        assert restored.json()["save_state"] == "transient"
+        history = client.get(f"/api/v1/analyses/{job_id}")
+        assert history.status_code == 200
+        assert history.json()["result"]["graph_save_state"] == "transient"
+        assert history.json()["result"]["saved_graph_id"] is None
+        # The historical snapshot remains reusable after the library copy is
+        # removed, so the user can save it again later without creating a
+        # second analysis result.
+        resaved = client.post(
+            f"/api/v1/analyses/{job_id}/graph/save",
+            json={"expected_version": restored.json()["version"]},
+        )
+        assert resaved.status_code == 200
+        assert resaved.json()["saved_graph_id"] == graph_id
+        assert resaved.json()["graph"]["save_state"] == "saved"
+        assert client.get(f"/api/v1/graphs/{graph_id}/patches/{patch_id}").status_code in {
+            404,
+            405,
+        }
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_analysis_graph_metadata_patch_is_still_transient() -> None:
+    app.dependency_overrides[get_settings] = lambda: Settings(
+        paper_provider="demo",
+        explanation_provider="rule_based",
+        demo_mode=True,
+    )
+    try:
+        created = client.post(
+            "/api/v1/analyses",
+            json={"concept": "Attention", "level": "literature", "max_papers": 1},
+        )
+        job_id = created.json()["id"]
+        for _ in range(30):
+            job = client.get(f"/api/v1/analyses/{job_id}").json()
+            if job["status"] in {"completed", "failed"}:
+                break
+        graph = job["result"]["graph"]
+        updated = client.patch(
+            f"/api/v1/analyses/{job_id}/graph",
+            json={"name": "临时重命名", "base_version": graph["version"]},
+        )
+        assert updated.status_code == 200
+        assert updated.json()["name"] == "临时重命名"
+        assert updated.json()["version"] == graph["version"] + 1
+        assert updated.json()["save_state"] == "transient"
+        assert client.get("/api/v1/graphs").json() == []
+    finally:
+        app.dependency_overrides.clear()
+
+
 def test_storage_path_is_configurable_and_clear_is_available(tmp_path, monkeypatch) -> None:
     database_path = tmp_path / "custom-wishforge.db"
     monkeypatch.setenv("WISHFORGE_STORAGE_PATH", str(database_path))
@@ -941,6 +1065,47 @@ def test_storage_path_is_configurable_and_clear_is_available(tmp_path, monkeypat
     assert database_path.exists()
     isolated.clear()
     isolated.close()
+
+
+def test_phase1_storage_migration_adds_lifecycle_columns_and_patch_table(tmp_path) -> None:
+    database_path = tmp_path / "legacy-wishforge.db"
+    connection = sqlite3.connect(database_path)
+    connection.executescript(
+        """
+        CREATE TABLE concept_graphs (
+            id TEXT PRIMARY KEY,
+            payload TEXT NOT NULL,
+            project_id TEXT,
+            version INTEGER NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        PRAGMA user_version = 1;
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    isolated = Storage(str(database_path))
+    try:
+        connection = sqlite3.connect(database_path)
+        columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(concept_graphs)").fetchall()
+        }
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        version = connection.execute("PRAGMA user_version").fetchone()[0]
+        connection.close()
+        assert {"graph_kind", "source_analysis_id", "source_scope", "save_state", "generation_id"}.issubset(columns)
+        assert "overview_jobs" in tables
+        assert "analysis_graph_patches" in tables
+        assert version >= 2
+    finally:
+        isolated.close()
 
 
 def test_shared_storage_clear_removes_analysis_and_graph_rows() -> None:

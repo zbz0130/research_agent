@@ -45,7 +45,35 @@ ResearchLimitationKind = Literal[
     "evaluation_limitation",
     "theoretical_limit",
 ]
-GraphNodeType = Literal["concept", "method", "problem", "paper", "idea", "note"]
+GraphNodeType = Literal[
+    "concept",
+    "method",
+    "problem",
+    "paper",
+    "idea",
+    "note",
+    "direction",
+]
+GraphNodeRole = Literal[
+    "root",
+    "concept",
+    "method",
+    "problem",
+    "direction",
+    "paper",
+    "idea",
+    "note",
+]
+GraphKind = Literal["concept_network", "research_direction"]
+GraphSourceScope = Literal["metadata_abstract", "arxiv_sections"]
+GraphSaveState = Literal["transient", "saved"]
+GraphEdgeSourceKind = Literal[
+    "citation",
+    "semantic_similarity",
+    "keyword",
+    "model_inference",
+    "user",
+]
 GraphRelation = Literal[
     "is_a",
     "part_of",
@@ -210,6 +238,34 @@ class ResearchLimitation(BaseModel):
     explicitness: Literal["explicit", "inferred"] = "explicit"
 
 
+class PaperReadingSummary(BaseModel):
+    """A bounded, provenance-aware summary used by graph paper nodes.
+
+    Phase 1 only reserves the shared contract.  The current analyzer still
+    reads abstracts, while the Overview phase will populate
+    ``summary_level=arxiv_sections`` after legal open-PDF section extraction.
+    Keeping this object separate from ``PaperRecord`` prevents a short UI
+    explanation from being mistaken for the original paper metadata.
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    paper_id: str = Field(min_length=1, max_length=300)
+    title: str = Field(min_length=1, max_length=1000)
+    year: int | None = Field(default=None, ge=1800, le=2500)
+    published_at: datetime | None = None
+    source_url: str | None = Field(default=None, max_length=2000)
+    problem: str = Field(default="", max_length=3000)
+    method: str = Field(default="", max_length=4000)
+    how_it_works: str = Field(default="", max_length=4000)
+    limitations: str | None = Field(default=None, max_length=3000)
+    summary_level: Literal["abstract_only", "arxiv_sections"] = "abstract_only"
+    source_sections: list[str] = Field(default_factory=list, max_length=20)
+    evidence_ids: list[str] = Field(default_factory=list, max_length=30)
+    confidence: Confidence = "low"
+    warnings: list[str] = Field(default_factory=list, max_length=20)
+
+
 class ResearchGapCandidate(BaseModel):
     """A scoped, unverified gap candidate rather than a proven absence."""
 
@@ -255,13 +311,73 @@ class ModelCallTrace(BaseModel):
     message: str = Field(default="", max_length=1000)
 
 
+class GraphNodeVisual(BaseModel):
+    """Layout/statistics hints consumed by a graph renderer.
+
+    Coordinates remain optional so old snapshots and server-side graph edits do
+    not need to know about a particular renderer.  Scores are normalized by the
+    graph builder and are deliberately metadata rather than hard-coded colors.
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    x: float | None = None
+    y: float | None = None
+    radius: float = Field(default=24.0, gt=0, le=500)
+    heat_score: float = Field(default=0.0, ge=0.0, le=1.0)
+    recency_score: float = Field(default=0.0, ge=0.0, le=1.0)
+    activity_score: float = Field(default=0.0, ge=0.0, le=1.0)
+    heat_source: list[str] = Field(default_factory=list, max_length=20)
+
+
 class ConceptNode(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def infer_legacy_role(cls, value):
+        """Derive the additive role field for pre-lifecycle snapshots.
+
+        Older graph payloads only stored ``node_type``.  Leaving the new
+        field at its default would make paper and method nodes look like
+        generic concepts in clients, so compatibility decoding maps the old
+        type to the closest role while still allowing an explicit role to win.
+        """
+
+        if isinstance(value, dict) and not value.get("role"):
+            node_type = value.get("node_type", "concept")
+            value = {
+                **value,
+                "role": node_type if node_type in {
+                    "concept", "method", "problem", "paper", "direction", "idea", "note"
+                } else "concept",
+            }
+        return value
 
     id: str = Field(min_length=1, max_length=200)
     label: str = Field(min_length=1, max_length=500)
     summary: str = Field(default="", max_length=5000)
     node_type: GraphNodeType = "concept"
+    # ``role`` is intentionally additive.  Older graph snapshots only have
+    # ``node_type`` and continue to validate with the default role.
+    role: GraphNodeRole = "concept"
+    explanation: str = Field(default="", max_length=5000)
+    paper_id: str | None = Field(default=None, max_length=300)
+    paper_ids: list[str] = Field(default_factory=list, max_length=30)
+    year: int | None = Field(default=None, ge=1800, le=2500)
+    published_at: datetime | None = None
+    citation_count: int | None = Field(default=None, ge=0)
+    source_url: str | None = Field(default=None, max_length=2000)
+    source_sections: list[str] = Field(default_factory=list, max_length=20)
+    summary_level: Literal["model_inference", "abstract_only", "arxiv_sections"] = (
+        "model_inference"
+    )
+    problem_summary: str | None = Field(default=None, max_length=3000)
+    method_summary: str | None = Field(default=None, max_length=4000)
+    how_it_works: str | None = Field(default=None, max_length=4000)
+    limitations_summary: str | None = Field(default=None, max_length=3000)
+    confidence: Confidence = "low"
+    visual: GraphNodeVisual = Field(default_factory=GraphNodeVisual)
     evidence_ids: list[str] = Field(default_factory=list)
     editable: bool = True
 
@@ -274,6 +390,10 @@ class ConceptEdge(BaseModel):
     target: str = Field(min_length=1, max_length=200)
     relation: GraphRelation = "related_to"
     evidence_ids: list[str] = Field(default_factory=list)
+    weight: float = Field(default=1.0, ge=0)
+    confidence: Confidence = "low"
+    source_kind: GraphEdgeSourceKind = "model_inference"
+    explanation: str = Field(default="", max_length=2000)
 
 
 class ConceptGraph(BaseModel):
@@ -288,6 +408,13 @@ class ConceptGraph(BaseModel):
     description: str = Field(default="", max_length=2000)
     root_id: str = Field(min_length=1, max_length=200)
     version: int = Field(default=1, ge=1)
+    graph_kind: GraphKind = "concept_network"
+    source_analysis_id: str | None = Field(default=None, max_length=200)
+    source_scope: GraphSourceScope = "metadata_abstract"
+    save_state: GraphSaveState = "transient"
+    generation_id: str | None = Field(default=None, max_length=200)
+    warnings: list[str] = Field(default_factory=list, max_length=30)
+    layout_algorithm: str | None = Field(default=None, max_length=100)
     nodes: list[ConceptNode] = Field(default_factory=list)
     edges: list[ConceptEdge] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -300,6 +427,13 @@ class ConceptGraph(BaseModel):
             raise ValueError("root_id 必须指向图中的现有节点")
         if len(node_ids) != len(set(node_ids)):
             raise ValueError("概念图不能包含重复节点 ID")
+
+        # The root role is structural rather than semantic.  Mark it
+        # explicitly so renderers do not have to infer the root from the
+        # graph-level field, including when loading legacy snapshots.
+        for node in self.nodes:
+            if node.id == self.root_id:
+                node.role = "root"
 
         edge_ids = [edge.id for edge in self.edges]
         if len(edge_ids) != len(set(edge_ids)):
@@ -514,6 +648,10 @@ class AnalysisResult(BaseModel):
     evidence: list[EvidenceCard] = Field(default_factory=list)
     explanation: ExplanationResult
     graph: ConceptGraph
+    # The graph is embedded in the analysis snapshot even while it is
+    # transient.  This lets a user reopen an analysis and save it later.
+    graph_save_state: GraphSaveState = "transient"
+    saved_graph_id: str | None = Field(default=None, max_length=200)
     innovation_candidates: list[InnovationCandidate] = Field(default_factory=list)
     novelty_note: str | None = None
     research_brief: ResearchBrief | None = None
@@ -812,6 +950,9 @@ class GraphCreate(BaseModel):
     name: str = Field(default="未命名概念图", min_length=1, max_length=200)
     description: str = Field(default="", max_length=2000)
     root_id: str = Field(min_length=1, max_length=200)
+    graph_kind: GraphKind = "concept_network"
+    source_analysis_id: str | None = Field(default=None, max_length=200)
+    source_scope: GraphSourceScope = "metadata_abstract"
     nodes: list[ConceptNode] = Field(min_length=1, max_length=500)
     edges: list[ConceptEdge] = Field(default_factory=list, max_length=1000)
 
@@ -831,6 +972,24 @@ class GraphCreate(BaseModel):
         if any(edge.source == edge.target for edge in self.edges):
             raise ValueError("概念图不能包含自环边")
         return self
+
+
+class GraphSaveRequest(BaseModel):
+    """Request to promote an analysis' transient graph into the graph library."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    expected_version: int | None = Field(default=None, ge=1)
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+
+
+class AnalysisGraphSaveResponse(BaseModel):
+    """Explicit response for the idempotent analysis-graph save operation."""
+
+    analysis_id: UUID
+    graph: ConceptGraph
+    saved_graph_id: str
+    graph_save_state: GraphSaveState = "saved"
 
 
 class GraphPatch(BaseModel):

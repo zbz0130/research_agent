@@ -1,6 +1,6 @@
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 
 from app.config import Settings, get_settings
 from app.evidence_schemas import ClaimEvidenceReview, EvidenceLedger
@@ -9,12 +9,14 @@ from app.research_schemas import (
     AnalysisCreate,
     AnalysisJob,
     AnalysisSummary,
+    AnalysisGraphSaveResponse,
     ConceptGraph,
     GraphCreate,
     GraphAgentPatchCreate,
     GraphPatch,
     GraphPatchCreate,
     GraphMetadataUpdate,
+    GraphSaveRequest,
     GraphCompareCreate,
     GraphCompareResult,
     GraphSubsetResult,
@@ -138,6 +140,69 @@ def get_analysis(analysis_id: UUID) -> AnalysisJob:
         return research_service.get(analysis_id)
     except AnalysisNotFound as exc:
         raise HTTPException(status_code=404, detail="分析任务不存在") from exc
+
+
+@router.get(
+    "/analyses/{analysis_id}/graph",
+    response_model=ConceptGraph,
+    tags=["research", "graphs"],
+)
+def get_analysis_graph(analysis_id: UUID) -> ConceptGraph:
+    """Read a transient or saved graph embedded in an analysis snapshot."""
+
+    try:
+        return research_service.get_analysis_graph(analysis_id)
+    except AnalysisNotFound as exc:
+        raise HTTPException(status_code=404, detail="分析任务或概念图不存在") from exc
+
+
+@router.patch(
+    "/analyses/{analysis_id}/graph",
+    response_model=ConceptGraph,
+    tags=["research", "graphs"],
+)
+def update_analysis_graph(
+    analysis_id: UUID,
+    payload: GraphMetadataUpdate,
+) -> ConceptGraph:
+    """Edit analysis-graph metadata without promoting it to the graph library."""
+
+    try:
+        return research_service.update_analysis_graph_metadata(analysis_id, payload)
+    except AnalysisNotFound as exc:
+        raise HTTPException(status_code=404, detail="分析任务或概念图不存在") from exc
+    except GraphConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post(
+    "/analyses/{analysis_id}/graph/save",
+    response_model=AnalysisGraphSaveResponse,
+    tags=["research", "graphs"],
+)
+def save_analysis_graph(
+    analysis_id: UUID,
+    payload: GraphSaveRequest | None = None,
+) -> AnalysisGraphSaveResponse:
+    """Promote an analysis' transient graph after explicit user confirmation."""
+
+    request = payload or GraphSaveRequest()
+    try:
+        graph = research_service.save_analysis_graph(
+            analysis_id,
+            expected_version=request.expected_version,
+            name=request.name,
+        )
+        return AnalysisGraphSaveResponse(
+            analysis_id=analysis_id,
+            graph=graph,
+            saved_graph_id=graph.id,
+            graph_save_state="saved",
+        )
+    except AnalysisNotFound as exc:
+        raise HTTPException(status_code=404, detail="分析任务或概念图不存在") from exc
+    except GraphConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.get(
@@ -296,6 +361,27 @@ def get_graph(graph_id: str) -> ConceptGraph:
         return graph_service.get(graph_id)
     except GraphNotFound as exc:
         raise HTTPException(status_code=404, detail="概念图不存在") from exc
+
+
+@router.delete("/graphs/{graph_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["graphs"])
+def delete_graph(
+    graph_id: str,
+    expected_version: int | None = Query(default=None, ge=1),
+) -> Response:
+    """Delete a saved graph and its GraphPatch history."""
+
+    try:
+        graph_service.delete(graph_id, expected_version=expected_version)
+        # The graph repository and the analysis service have separate
+        # process-local caches.  SQLite already rewrites the durable snapshot
+        # transactionally; this refresh prevents a warm server from serving
+        # the stale ``saved`` state until its next restart.
+        research_service.mark_saved_graph_deleted(graph_id)
+    except GraphNotFound as exc:
+        raise HTTPException(status_code=404, detail="概念图不存在") from exc
+    except GraphConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.patch("/graphs/{graph_id}", response_model=ConceptGraph, tags=["graphs"])

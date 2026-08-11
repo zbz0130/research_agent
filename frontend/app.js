@@ -14,6 +14,7 @@ const papersEl = document.querySelector("#papers");
 const graphEl = document.querySelector("#graph");
 const graphVersionEl = document.querySelector("#graph-version");
 const graphPickerEl = document.querySelector("#graph-picker");
+const graphLifecycleNoteEl = document.querySelector("#graph-lifecycle-note");
 const analysisProviderEl = document.querySelector("#analysis-provider");
 const paperCountEl = document.querySelector("#paper-count");
 const evidenceLedgerEl = document.querySelector("#evidence-ledger");
@@ -65,6 +66,17 @@ const graphGalleryNodesInput = document.querySelector("#graph-gallery-nodes");
 const graphGallerySubmit = document.querySelector("#graph-gallery-submit");
 const graphGalleryMessageEl = document.querySelector("#graph-gallery-message");
 const graphGalleryEl = document.querySelector("#graph-gallery");
+const analysisGraphSaveActionsEl = document.querySelector("#analysis-graph-save-actions");
+const analysisGraphSaveStatusEl = document.querySelector("#analysis-graph-save-status");
+const saveAnalysisGraphButton = document.querySelector("#save-analysis-graph");
+const deleteCurrentGraphButton = document.querySelector("#delete-current-graph");
+const graphSaveDialog = document.querySelector("#graph-save-dialog");
+const saveGraphDialogConfirmButton = document.querySelector("#save-graph-dialog-confirm");
+const saveGraphDialogLaterButton = document.querySelector("#save-graph-dialog-later");
+const graphDeleteDialog = document.querySelector("#graph-delete-dialog");
+const graphDeleteDialogTitleEl = document.querySelector("#graph-delete-dialog-title");
+const graphDeleteDialogConfirmButton = document.querySelector("#delete-graph-dialog-confirm");
+const graphDeleteDialogCancelButton = document.querySelector("#delete-graph-dialog-cancel");
 const apiBaseForm = document.querySelector("#api-base-form");
 const apiBaseInput = document.querySelector("#api-base-url");
 const apiBaseStatusEl = document.querySelector("#api-base-status");
@@ -201,6 +213,10 @@ const state = {
   graphId: null,
   graph: null,
   graphs: [],
+  analysisGraphSaveState: null,
+  graphSavePromptedForAnalysis: null,
+  graphSaveDialogAction: null,
+  pendingGraphDeletion: null,
   pendingPatches: new Map(),
   experimentPlan: null,
   ideaCheck: null,
@@ -223,6 +239,267 @@ function safeExternalUrl(value) {
     return ["http:", "https:"].includes(url.protocol) ? url.href : null;
   } catch (error) {
     return null;
+  }
+}
+
+function graphSaveState(graph = state.graph, result = state.analysisResult) {
+  const explicitValues = [
+    graph?.save_state,
+    graph?.save_status,
+    result?.graph_save_state,
+    result?.graph_save_status,
+  ];
+  const explicit = explicitValues.find((value) => value === "transient" || value === "saved");
+  if (explicit) return explicit;
+  if (
+    state.analysisGraphSaveState
+    && result?.graph?.id
+    && graph?.id === result.graph.id
+  ) {
+    return state.analysisGraphSaveState;
+  }
+  if (graph?.id && state.graphs.some((item) => item.id === graph.id)) return "saved";
+  return null;
+}
+
+function isTransientAnalysisGraph(result = state.analysisResult, graph = state.graph) {
+  if (!result?.graph || !graph || result.graph.id !== graph.id) return false;
+  return graphSaveState(graph, result) === "transient";
+}
+
+function isSavedGraph(graph = state.graph) {
+  return Boolean(graph && graphSaveState(graph, state.analysisResult) === "saved");
+}
+
+function renderGraphLifecycleControls(graph = state.graph) {
+  const transient = Boolean(graph && graphSaveState(graph, state.analysisResult) === "transient");
+  // A transient graph is a readable analysis snapshot.  Its metadata can be
+  // renamed before saving, but structural/Agent patches target the durable
+  // graph repository and are therefore intentionally disabled until the user
+  // confirms saving.  This avoids exposing controls that would otherwise
+  // return a misleading 404.
+  nodeForm?.classList.toggle("hidden", transient || !graph);
+  graphActionsEl?.classList.toggle("hidden", transient || !graph);
+  graphAgentForm?.classList.toggle("hidden", transient || !graph);
+  graphLifecycleNoteEl?.classList.toggle("hidden", !transient);
+  if (graphLifecycleNoteEl) {
+    graphLifecycleNoteEl.textContent = transient
+      ? "这是分析历史中的临时概念图。保存后才能编辑节点、生成 Agent 修改提案或更新节点解释；名称和根节点可以先调整。"
+      : "";
+  }
+}
+
+function extractGraphFromResponse(payload) {
+  if (!payload || typeof payload !== "object") return null;
+  const candidates = [payload.graph, payload.saved_graph, payload.result];
+  for (const candidate of candidates) {
+    if (candidate && typeof candidate === "object" && Array.isArray(candidate.nodes)) return candidate;
+  }
+  if (Array.isArray(payload.nodes) && payload.root_id) return payload;
+  return null;
+}
+
+function setAnalysisGraphSaveState(value, graph = state.graph) {
+  if (value !== "transient" && value !== "saved") return;
+  state.analysisGraphSaveState = value;
+  if (graph && typeof graph === "object") graph.save_state = value;
+  if (state.analysisResult && typeof state.analysisResult === "object") {
+    state.analysisResult.graph_save_state = value;
+    if (state.analysisResult.graph && typeof state.analysisResult.graph === "object") {
+      state.analysisResult.graph.save_state = value;
+    }
+  }
+  renderAnalysisGraphSaveControls();
+}
+
+function renderAnalysisGraphSaveControls() {
+  if (!analysisGraphSaveActionsEl || !analysisGraphSaveStatusEl || !saveAnalysisGraphButton) return;
+  const isAnalysisGraph = Boolean(
+    state.analysisId
+    && state.analysisResult?.graph?.id
+    && state.graph?.id === state.analysisResult.graph.id,
+  );
+  const saveState = isAnalysisGraph ? graphSaveState(state.graph, state.analysisResult) : null;
+  analysisGraphSaveActionsEl.classList.toggle("hidden", !isAnalysisGraph || !saveState);
+  saveAnalysisGraphButton.classList.toggle("hidden", saveState !== "transient");
+  saveAnalysisGraphButton.disabled = false;
+  if (saveState === "saved") {
+    analysisGraphSaveStatusEl.textContent = "这张图已保存到概念图库；历史分析快照仍会保留。";
+  } else if (saveState === "transient") {
+    analysisGraphSaveStatusEl.textContent = "这张图暂时保留在分析历史中，保存后可以在概念图库继续编辑。";
+  } else {
+    analysisGraphSaveStatusEl.textContent = "";
+  }
+}
+
+function showDialog(dialog) {
+  if (!dialog) return;
+  if (typeof dialog.showModal === "function") {
+    if (!dialog.open) dialog.showModal();
+    return;
+  }
+  dialog.setAttribute("open", "");
+  dialog.classList.add("is-open");
+}
+
+function closeDialog(dialog) {
+  if (!dialog) return;
+  if (typeof dialog.close === "function" && dialog.open) {
+    dialog.close();
+    return;
+  }
+  dialog.removeAttribute("open");
+  dialog.classList.remove("is-open");
+}
+
+function openGraphSaveDialog() {
+  if (!isTransientAnalysisGraph()) return;
+  state.graphSaveDialogAction = null;
+  showDialog(graphSaveDialog);
+}
+
+function deferGraphSave() {
+  if (!isTransientAnalysisGraph()) {
+    closeDialog(graphSaveDialog);
+    return;
+  }
+  state.graphSaveDialogAction = "later";
+  closeDialog(graphSaveDialog);
+  renderAnalysisGraphSaveControls();
+  setAnalysisMessage("概念图暂不保存；它仍保留在本次分析历史中。", "");
+}
+
+async function saveAnalysisGraph() {
+  if (!state.analysisId || !isTransientAnalysisGraph()) return null;
+  const graph = state.graph || state.analysisResult?.graph;
+  const body = { expected_version: graph?.version ?? undefined };
+  if (graph?.name) body.name = graph.name;
+  saveAnalysisGraphButton.disabled = true;
+  setAnalysisMessage("正在保存概念图…", "");
+  try {
+    const response = await apiFetch(
+      `/api/v1/analyses/${encodeURIComponent(state.analysisId)}/graph/save`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    );
+    if (!response.ok) throw new Error(await response.text());
+    const payload = await response.json();
+    const savedGraph = extractGraphFromResponse(payload);
+    if (savedGraph) {
+      state.graph = savedGraph;
+      state.graphId = savedGraph.id || state.graphId;
+      if (state.analysisResult) state.analysisResult.graph = savedGraph;
+      renderGraph(savedGraph);
+    } else {
+      const savedGraphId = payload.saved_graph_id || payload.graph_id || payload.id;
+      if (savedGraphId) state.graphId = savedGraphId;
+    }
+    setAnalysisGraphSaveState("saved", state.graph);
+    await loadGraphPicker(state.graphId);
+    setAnalysisMessage("概念图已保存到概念图库。", "");
+    setGraphMessage("概念图已保存；现在可以继续编辑或删除整图。", "");
+    return payload;
+  } finally {
+    saveAnalysisGraphButton.disabled = false;
+    renderAnalysisGraphSaveControls();
+  }
+}
+
+function openGraphDeleteDialog(graph, source = "current") {
+  if (!graph?.id) return;
+  state.pendingGraphDeletion = {
+    id: graph.id,
+    version: Number.isFinite(Number(graph.version)) ? Number(graph.version) : null,
+    name: graph.name || "未命名概念图",
+    source,
+  };
+  if (graphDeleteDialogTitleEl) graphDeleteDialogTitleEl.textContent = `删除“${graph.name || "未命名概念图"}”？`;
+  if (graphDeleteDialogConfirmButton) graphDeleteDialogConfirmButton.disabled = false;
+  showDialog(graphDeleteDialog);
+}
+
+function closeGraphDeleteDialog() {
+  closeDialog(graphDeleteDialog);
+  state.pendingGraphDeletion = null;
+}
+
+function resetGraphViewAfterDeletion() {
+  state.graphId = null;
+  state.graph = null;
+  state.pendingPatches.clear();
+  graphVersionEl.textContent = "v—";
+  graphPickerEl.classList.add("hidden");
+  graphPickerEl.innerHTML = "";
+  graphEl.className = "graph-placeholder";
+  graphEl.textContent = "在工作台完成分析后会生成概念关系图。";
+  graphLifecycleNoteEl?.classList.add("hidden");
+  if (graphLifecycleNoteEl) graphLifecycleNoteEl.textContent = "";
+  nodeForm.classList.add("hidden");
+  graphActionsEl.classList.add("hidden");
+  graphAgentForm.classList.add("hidden");
+  graphMetaForm.classList.add("hidden");
+  deleteCurrentGraphButton?.classList.add("hidden");
+  renderPatches();
+}
+
+function removeGalleryGraphCard(graphId) {
+  [...graphGalleryEl.querySelectorAll("[data-gallery-graph-id]")].forEach((card) => {
+    if (card.dataset.galleryGraphId === graphId) card.remove();
+  });
+  if (!graphGalleryEl.querySelector("[data-gallery-graph-id]") && !graphGalleryEl.querySelector(".warning-box")) {
+    graphGalleryEl.innerHTML = '<p class="empty">还没有已保存的概念图。</p>';
+  }
+}
+
+async function handleGraphDeleted(graphId) {
+  const analysisGraphMatches = state.analysisResult?.graph?.id === graphId;
+  const deletedGraph = state.graph?.id === graphId ? state.graph : state.analysisResult?.graph;
+  state.graphs = state.graphs.filter((graph) => graph.id !== graphId);
+  removeGalleryGraphCard(graphId);
+  if (analysisGraphMatches && deletedGraph) {
+    // Keep the historical snapshot available for a later save, even though it
+    // no longer appears in the saved graph gallery.
+    state.graph = deletedGraph;
+    state.graphId = graphId;
+    setAnalysisGraphSaveState("transient", deletedGraph);
+    renderGraph(deletedGraph);
+    setGraphMessage("已从概念图库删除；历史分析快照仍保留，可稍后再次保存。", "");
+  } else if (state.graph?.id === graphId) {
+    resetGraphViewAfterDeletion();
+  }
+  const remaining = await loadGraphPicker(analysisGraphMatches ? null : state.graphId);
+  if (!analysisGraphMatches && remaining.length) {
+    state.graphId = remaining[0].id;
+    await refreshGraph();
+  }
+  if (!remaining.length && !analysisGraphMatches) resetGraphViewAfterDeletion();
+}
+
+async function deleteGraphById() {
+  const pending = state.pendingGraphDeletion;
+  if (!pending) return;
+  if (graphDeleteDialogConfirmButton) graphDeleteDialogConfirmButton.disabled = true;
+  setGraphGalleryMessage("正在删除整张概念图…", "");
+  setGraphMessage("正在删除整张概念图…", "");
+  try {
+    const query = pending.version ? `?expected_version=${encodeURIComponent(pending.version)}` : "";
+    const response = await apiFetch(`/api/v1/graphs/${encodeURIComponent(pending.id)}${query}`, { method: "DELETE" });
+    if (!response.ok) {
+      if (response.status === 409) await loadGraphPicker(state.graphId);
+      throw new Error(await response.text());
+    }
+    const deletedId = pending.id;
+    closeGraphDeleteDialog();
+    await handleGraphDeleted(deletedId);
+    setGraphGalleryMessage("概念图已删除；历史分析中的图快照仍然保留。", "");
+    setGraphMessage("概念图已删除；历史分析中的图快照仍然保留。", "");
+  } catch (error) {
+    if (graphDeleteDialogConfirmButton) graphDeleteDialogConfirmButton.disabled = false;
+    setGraphGalleryMessage(`删除失败：${error.message}`, "error-text");
+    setGraphMessage(`删除失败：${error.message}`, "error-text");
   }
 }
 
@@ -603,7 +880,13 @@ function resetAnalysisView() {
   state.graphId = null;
   state.graph = null;
   state.graphs = [];
+  state.analysisGraphSaveState = null;
+  state.graphSavePromptedForAnalysis = null;
+  state.graphSaveDialogAction = null;
+  state.pendingGraphDeletion = null;
   state.pendingPatches.clear();
+  closeDialog(graphSaveDialog);
+  closeDialog(graphDeleteDialog);
   analysisProviderEl.textContent = "分析中…";
   paperCountEl.textContent = "0 篇";
   graphVersionEl.textContent = "v—";
@@ -614,6 +897,8 @@ function resetAnalysisView() {
   papersEl.innerHTML = '<p class="empty">正在检索和整理资料…</p>';
   graphEl.className = "graph-placeholder";
   graphEl.textContent = "正在构建概念图…";
+  graphLifecycleNoteEl?.classList.add("hidden");
+  if (graphLifecycleNoteEl) graphLifecycleNoteEl.textContent = "";
   nodeForm.classList.add("hidden");
   graphActionsEl.classList.add("hidden");
   graphAgentForm.classList.add("hidden");
@@ -622,6 +907,9 @@ function resetAnalysisView() {
   graphMetaForm.classList.add("hidden");
   graphNameInput.value = "";
   graphRootInput.innerHTML = "";
+  analysisGraphSaveActionsEl?.classList.add("hidden");
+  saveAnalysisGraphButton && (saveAnalysisGraphButton.disabled = false);
+  deleteCurrentGraphButton?.classList.add("hidden");
   innovationCardEl.classList.add("hidden");
   innovationsEl.innerHTML = "";
   noveltyNoteEl.textContent = "";
@@ -1419,13 +1707,14 @@ function renderGraph(graph) {
   state.graph = graph;
   state.graphId = graph.id;
   graphVersionEl.textContent = `v${graph.version}`;
-  graphPickerEl.classList.remove("hidden");
-  graphPickerEl.value = graph.id;
-  nodeForm.classList.remove("hidden");
-  graphActionsEl.classList.remove("hidden");
-  graphAgentForm.classList.remove("hidden");
+  const saved = isSavedGraph(graph);
+  graphPickerEl.classList.toggle("hidden", !saved && !state.graphs.length);
+  if (saved) graphPickerEl.value = graph.id;
+  renderGraphLifecycleControls(graph);
   graphMetaForm.classList.remove("hidden");
   graphNameInput.value = graph.name || "";
+  deleteCurrentGraphButton?.classList.toggle("hidden", graphSaveState(graph, state.analysisResult) !== "saved");
+  renderAnalysisGraphSaveControls();
   graphRootInput.innerHTML = graph.nodes
     .map((node) => `<option value="${escapeHtml(node.id)}">${escapeHtml(node.label)}</option>`)
     .join("");
@@ -1447,8 +1736,8 @@ function renderGraph(graph) {
           <p>${escapeHtml(node.summary || "暂无说明")}</p>
         </div>
         <div class="node-actions">
-          ${node.editable ? `<button type="button" class="node-edit" data-node-id="${escapeHtml(node.id)}">编辑</button>` : ""}
-          <button type="button" class="node-explain" data-node-explain="${escapeHtml(node.id)}">AI解释</button>
+          ${saved && node.editable ? `<button type="button" class="node-edit" data-node-id="${escapeHtml(node.id)}">编辑</button>` : ""}
+          ${saved ? `<button type="button" class="node-explain" data-node-explain="${escapeHtml(node.id)}">AI解释</button>` : ""}
         </div>
       </div>
       ${relationsByTarget[node.id] ? `<small class="node-relation">${escapeHtml(relationsByTarget[node.id].join(" · "))}</small>` : ""}
@@ -1463,9 +1752,23 @@ function setGraphMessage(text, kind = "") {
 
 async function refreshGraph() {
   if (!state.graphId) return;
-  const graphResponse = await apiFetch(`/api/v1/graphs/${encodeURIComponent(state.graphId)}`);
+  const transientAnalysis = Boolean(
+    state.analysisId
+    && state.analysisResult?.graph?.id === state.graphId
+    && graphSaveState(state.analysisResult.graph, state.analysisResult) === "transient"
+  );
+  const graphPath = transientAnalysis
+    ? `/api/v1/analyses/${encodeURIComponent(state.analysisId)}/graph`
+    : `/api/v1/graphs/${encodeURIComponent(state.graphId)}`;
+  const graphResponse = await apiFetch(graphPath);
   if (!graphResponse.ok) throw new Error("graph request failed");
   renderGraph(await graphResponse.json());
+  if (transientAnalysis) {
+    state.pendingPatches.clear();
+    renderPatches();
+    await loadGraphPicker(null);
+    return;
+  }
   const patchesResponse = await apiFetch(`/api/v1/graphs/${encodeURIComponent(state.graphId)}/patches`);
   if (patchesResponse.ok) {
     const patches = await patchesResponse.json();
@@ -1479,7 +1782,7 @@ async function refreshGraph() {
 
 async function loadGraphPicker(selectedId = state.graphId) {
   const response = await apiFetch("/api/v1/graphs");
-  if (!response.ok) return;
+  if (!response.ok) return [];
   const graphs = await response.json();
   state.graphs = graphs;
   const previousCompareSelection = new Set(
@@ -1492,8 +1795,12 @@ async function loadGraphPicker(selectedId = state.graphId) {
     graphPickerEl.classList.add("hidden");
     graphComparePickerEl.innerHTML = '<option disabled>完成分析后这里会出现概念图</option>';
     graphGalleryPickerEl.innerHTML = '<option disabled>完成分析后这里会出现概念图</option>';
-    graphGalleryEl.innerHTML = '<p class="empty">还没有已保存的概念图。</p>';
-    return;
+    if (!graphGalleryEl.querySelector("[data-gallery-graph-id]")) {
+      graphGalleryEl.innerHTML = '<p class="empty">还没有已保存的概念图。</p>';
+    }
+    deleteCurrentGraphButton?.classList.add("hidden");
+    renderAnalysisGraphSaveControls();
+    return graphs;
   }
   graphPickerEl.classList.remove("hidden");
   graphPickerEl.innerHTML = graphs.map((graph) =>
@@ -1512,6 +1819,11 @@ async function loadGraphPicker(selectedId = state.graphId) {
   [...graphGalleryPickerEl.options].forEach((option) => {
     option.selected = previousGallerySelection.has(option.value) || option.value === selectedId;
   });
+  if (state.graph?.id) {
+    deleteCurrentGraphButton?.classList.toggle("hidden", graphSaveState(state.graph, state.analysisResult) !== "saved");
+  }
+  renderAnalysisGraphSaveControls();
+  return graphs;
 }
 
 graphPickerEl.addEventListener("change", async () => {
@@ -1626,6 +1938,7 @@ function renderGraphGallery(graphs, warnings = []) {
             <div class="graph-gallery-actions">
               <span class="tag">v${escapeHtml(graph.version)}</span>
               <button type="button" class="secondary graph-gallery-open" data-gallery-open="${escapeHtml(graph.id)}">打开编辑</button>
+              <button type="button" class="secondary danger-button graph-gallery-delete" data-gallery-delete="${escapeHtml(graph.id)}" data-gallery-version="${escapeHtml(graph.version)}" data-gallery-name="${escapeHtml(graph.name)}">删除整图</button>
             </div>
           </div>
           <p class="graph-gallery-description">${escapeHtml(graph.description || "暂无描述")}</p>
@@ -1680,6 +1993,15 @@ graphGalleryForm.addEventListener("submit", async (event) => {
 });
 
 graphGalleryEl.addEventListener("click", async (event) => {
+  const deleteButton = event.target.closest("[data-gallery-delete]");
+  if (deleteButton) {
+    openGraphDeleteDialog({
+      id: deleteButton.dataset.galleryDelete,
+      version: deleteButton.dataset.galleryVersion,
+      name: deleteButton.dataset.galleryName || "未命名概念图",
+    }, "gallery");
+    return;
+  }
   const openButton = event.target.closest("[data-gallery-open]");
   if (!openButton) return;
   const graphId = openButton.dataset.galleryOpen;
@@ -1692,8 +2014,64 @@ graphGalleryEl.addEventListener("click", async (event) => {
   }
 });
 
+saveAnalysisGraphButton?.addEventListener("click", openGraphSaveDialog);
+saveGraphDialogConfirmButton?.addEventListener("click", async () => {
+  state.graphSaveDialogAction = "save";
+  if (saveGraphDialogConfirmButton) saveGraphDialogConfirmButton.disabled = true;
+  try {
+    await saveAnalysisGraph();
+    closeDialog(graphSaveDialog);
+  } catch (error) {
+    state.graphSaveDialogAction = null;
+    if (saveGraphDialogConfirmButton) saveGraphDialogConfirmButton.disabled = false;
+    setAnalysisMessage(`概念图保存失败：${error.message}`, "error-text");
+    setGraphMessage(`概念图保存失败：${error.message}`, "error-text");
+  }
+});
+saveGraphDialogLaterButton?.addEventListener("click", deferGraphSave);
+graphSaveDialog?.addEventListener("cancel", (event) => {
+  event.preventDefault();
+  deferGraphSave();
+});
+graphSaveDialog?.addEventListener("close", () => {
+  if (!state.graphSaveDialogAction) {
+    deferGraphSave();
+    return;
+  }
+  state.graphSaveDialogAction = null;
+  if (saveGraphDialogConfirmButton) saveGraphDialogConfirmButton.disabled = false;
+});
+graphSaveDialog?.addEventListener("click", (event) => {
+  if (event.target.closest("[data-dialog-close='graph-save']")) deferGraphSave();
+});
+graphSaveDialog?.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" || event.defaultPrevented) return;
+  // The action-sheet buttons intentionally use `type=button` so closing the
+  // native dialog never silently chooses an action.  Make the recommended
+  // save action the keyboard default explicitly.
+  if (event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLInputElement) return;
+  event.preventDefault();
+  saveGraphDialogConfirmButton?.click();
+});
+
+deleteCurrentGraphButton?.addEventListener("click", () => {
+  if (state.graph) openGraphDeleteDialog(state.graph, "current");
+});
+graphDeleteDialogConfirmButton?.addEventListener("click", deleteGraphById);
+graphDeleteDialogCancelButton?.addEventListener("click", closeGraphDeleteDialog);
+graphDeleteDialog?.addEventListener("cancel", (event) => {
+  event.preventDefault();
+  closeGraphDeleteDialog();
+});
+graphDeleteDialog?.addEventListener("click", (event) => {
+  if (event.target.closest("[data-dialog-close='graph-delete']")) closeGraphDeleteDialog();
+});
+
 async function applyUserPatch(operations, reason) {
   if (!state.graphId) return;
+  if (!isSavedGraph(state.graph)) {
+    throw new Error("临时概念图尚未保存。请先保存概念图，再编辑节点结构。");
+  }
   const response = await apiFetch(`/api/v1/graphs/${encodeURIComponent(state.graphId)}/patches`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -1750,6 +2128,9 @@ function describeOperation(operation) {
 
 async function reviewPatch(patchId, action) {
   if (!state.graphId) return;
+  if (!isSavedGraph(state.graph)) {
+    throw new Error("临时概念图尚未保存，不能审核结构修改提案。");
+  }
   const response = await apiFetch(
     `/api/v1/graphs/${encodeURIComponent(state.graphId)}/patches/${encodeURIComponent(patchId)}/${action}`,
     { method: "POST" },
@@ -1776,6 +2157,10 @@ patchesEl.addEventListener("click", async (event) => {
 
 async function proposeAgentPatch() {
   if (!state.graph || !state.graphId) return;
+  if (!isSavedGraph(state.graph)) {
+    setGraphMessage("临时概念图需要先保存，才能生成 Agent 修改提案。", "error-text");
+    return;
+  }
   const hasAttention = state.graph.nodes.some((node) => /attention|注意力/i.test(node.label));
   const label = hasAttention ? "FlashAttention" : "待验证的跨领域方法";
   if (state.graph.nodes.some((node) => node.label === label)) {
@@ -1827,6 +2212,11 @@ agentProposeButton.addEventListener("click", () => {
 graphAgentForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   if (!state.graphId || !state.graph) return;
+  if (!isSavedGraph(state.graph)) {
+    graphAgentMessageEl.textContent = "请先保存临时概念图，再生成 Agent 修改提案。";
+    graphAgentMessageEl.className = "form-message error-text";
+    return;
+  }
   const request = graphAgentRequestInput.value.trim();
   if (!request) {
     graphAgentMessageEl.textContent = "请先写下想怎样修改概念图。";
@@ -1862,7 +2252,11 @@ graphMetaForm.addEventListener("submit", async (event) => {
   const name = graphNameInput.value.trim();
   const rootId = graphRootInput.value;
   if (!name && !rootId) return;
-  const response = await apiFetch(`/api/v1/graphs/${encodeURIComponent(state.graphId)}`, {
+  const transientAnalysis = isTransientAnalysisGraph();
+  const endpoint = transientAnalysis
+    ? `/api/v1/analyses/${encodeURIComponent(state.analysisId)}/graph`
+    : `/api/v1/graphs/${encodeURIComponent(state.graphId)}`;
+  const response = await apiFetch(endpoint, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ name: name || undefined, root_id: rootId || undefined, base_version: state.graph.version }),
@@ -1872,14 +2266,24 @@ graphMetaForm.addEventListener("submit", async (event) => {
     window.alert(`概念图名称保存失败：${await response.text()}`);
     return;
   }
-  renderGraph(await response.json());
-  await loadGraphPicker(state.graphId);
-  setGraphMessage("概念图名称已保存。", "");
+  const updated = await response.json();
+  if (transientAnalysis && state.analysisResult) {
+    state.analysisResult.graph = updated;
+    state.analysisResult.graph_save_state = "transient";
+    state.analysisResult.saved_graph_id = null;
+  }
+  renderGraph(updated);
+  if (!transientAnalysis) await loadGraphPicker(state.graphId);
+  setGraphMessage(transientAnalysis ? "临时概念图设置已保存；保存图后可继续编辑节点。" : "概念图名称已保存。", "");
 });
 
 graphEl.addEventListener("click", async (event) => {
   const explainButton = event.target.closest("[data-node-explain]");
   if (explainButton && state.graph) {
+    if (!isSavedGraph(state.graph)) {
+      setGraphMessage("请先保存临时概念图，再生成节点解释提案。", "error-text");
+      return;
+    }
     const nodeId = explainButton.dataset.nodeExplain;
     try {
       const response = await apiFetch(
@@ -1965,6 +2369,12 @@ async function pollAnalysis(id) {
 
 function renderAnalysis(result) {
   state.analysisResult = result;
+  state.analysisGraphSaveState =
+    result.graph_save_state
+    || result.graph_save_status
+    || result.graph?.save_state
+    || result.graph?.save_status
+    || null;
   analysisProviderEl.textContent = result.provider;
   renderExplanation(result);
   renderPapers(result);
@@ -1975,6 +2385,14 @@ function renderAnalysis(result) {
   loadGraphPicker(result.graph.id).catch(() => {});
   state.pendingPatches.clear();
   renderPatches();
+  renderAnalysisGraphSaveControls();
+  const shouldPrompt = ["literature", "research"].includes(result.level)
+    && isTransientAnalysisGraph(result)
+    && state.graphSavePromptedForAnalysis !== state.analysisId;
+  if (shouldPrompt) {
+    state.graphSavePromptedForAnalysis = state.analysisId;
+    window.requestAnimationFrame(() => openGraphSaveDialog());
+  }
 }
 
 analysisForm.addEventListener("submit", async (event) => {

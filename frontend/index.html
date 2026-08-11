@@ -107,6 +107,13 @@
             <div id="explanation" class="result-placeholder">
               输入一个概念后，这里会显示一句话定义、直觉类比、技术机制、演变过程和限制。
             </div>
+            <div id="analysis-graph-save-actions" class="analysis-graph-save-actions hidden" aria-live="polite">
+              <div>
+                <p class="section-label">概念图快照</p>
+                <p id="analysis-graph-save-status" class="settings-note">本次分析生成的概念图暂时保留在分析历史中。</p>
+              </div>
+              <button id="save-analysis-graph" type="button">保存为概念图</button>
+            </div>
           </article>
 
           <aside class="card workbench-guide-card">
@@ -191,9 +198,11 @@
             <div class="graph-heading-actions">
               <select id="graph-picker" class="graph-picker hidden" aria-label="选择概念图"></select>
               <span id="graph-version" class="tag">v—</span>
+              <button id="delete-current-graph" type="button" class="secondary danger-button hidden" aria-label="删除当前概念图">删除整图</button>
             </div>
           </div>
           <div id="graph" class="graph-placeholder">在工作台完成分析后会生成概念关系图。</div>
+          <p id="graph-lifecycle-note" class="settings-note hidden" role="status"></p>
           <form id="graph-meta-form" class="graph-meta-form hidden">
             <label>
               概念图名称
@@ -564,6 +573,30 @@
         </section>
       </section>
     </main>
+    <dialog id="graph-save-dialog" class="action-sheet-dialog" aria-labelledby="graph-save-dialog-title" aria-describedby="graph-save-dialog-description">
+      <form method="dialog" class="action-sheet-content">
+        <button type="button" class="dialog-close" data-dialog-close="graph-save" aria-label="关闭保存提示">×</button>
+        <p class="eyebrow">SAVE SNAPSHOT</p>
+        <h2 id="graph-save-dialog-title">保存本次概念图？</h2>
+        <p id="graph-save-dialog-description">保存后可以在“概念图”图库中继续编辑。暂不保存也不会丢失：它会保留在本次分析历史中，之后仍可保存。</p>
+        <div class="action-sheet-actions">
+          <button id="save-graph-dialog-confirm" type="button" autofocus>保存概念图</button>
+          <button id="save-graph-dialog-later" type="button" class="secondary">暂不保存</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="graph-delete-dialog" class="action-sheet-dialog danger-dialog" aria-labelledby="graph-delete-dialog-title" aria-describedby="graph-delete-dialog-description">
+      <form method="dialog" class="action-sheet-content">
+        <button type="button" class="dialog-close" data-dialog-close="graph-delete" aria-label="关闭删除提示">×</button>
+        <p class="eyebrow">DELETE GRAPH</p>
+        <h2 id="graph-delete-dialog-title">删除整张概念图？</h2>
+        <p id="graph-delete-dialog-description">这会删除已保存的图和它的修改提案，操作不可撤销。历史分析里的图快照仍会保留，你之后可以再次保存。</p>
+        <div class="action-sheet-actions">
+          <button id="delete-graph-dialog-confirm" type="button" class="danger-button">删除整图</button>
+          <button id="delete-graph-dialog-cancel" type="button" class="secondary">取消</button>
+        </div>
+      </form>
+    </dialog>
     <script src="runtime-config.js" defer></script>
     <script src="app.js" defer></script>
   </body>

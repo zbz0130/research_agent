@@ -39,9 +39,10 @@ from app.research_schemas import (
     GraphOperation,
     GraphPatch,
     GraphPatchCreate,
+    GraphMetadataUpdate,
 )
 from app.storage import storage
-from app.services.graph_service import graph_service
+from app.services.graph_service import GraphConflict, graph_service
 from app.services.research_orchestration import research_orchestrator
 from app.services.research_providers import (
     ArxivSearchProvider,
@@ -111,6 +112,7 @@ class ResearchService:
                 if job is None:
                     raise AnalysisNotFound(job_id)
                 self._jobs[job.id] = job
+            self._sync_deleted_graph_snapshot_locked(job)
             return job.model_copy(deep=True)
 
     def review_evidence_link(
@@ -214,6 +216,185 @@ class ResearchService:
                 )
                 for job in jobs
             ]
+
+    def _load_job_locked(self, job_id: UUID) -> AnalysisJob:
+        """Load a job while the caller holds ``self._lock``."""
+
+        job = self._jobs.get(job_id)
+        if job is None:
+            job = storage.get_analysis(str(job_id))
+            if job is None:
+                raise AnalysisNotFound(job_id)
+            self._jobs[job.id] = job
+        self._sync_deleted_graph_snapshot_locked(job)
+        return job
+
+    def _sync_deleted_graph_snapshot_locked(self, job: AnalysisJob) -> None:
+        """Downgrade a cached saved snapshot whose library row was removed."""
+
+        if job.result is None or job.result.graph_save_state != "saved":
+            return
+        saved_graph_id = job.result.saved_graph_id or job.result.graph.id
+        if storage.get_graph(saved_graph_id) is not None:
+            return
+        transient_graph = job.result.graph.model_copy(update={"save_state": "transient"})
+        job.result = job.result.model_copy(
+            update={
+                "graph": transient_graph,
+                "graph_save_state": "transient",
+                "saved_graph_id": None,
+            }
+        )
+        self._jobs[job.id] = job
+
+    def get_analysis_graph(self, job_id: UUID) -> ConceptGraph:
+        """Return the graph snapshot embedded in an analysis result.
+
+        This endpoint intentionally reads from the analysis document rather
+        than ``concept_graphs`` so transient graphs remain available after a
+        process restart and before the user elects to save them.
+        """
+
+        with self._lock:
+            job = self._load_job_locked(job_id)
+            if job.result is None:
+                raise AnalysisNotFound(job_id)
+            return job.result.graph.model_copy(deep=True)
+
+    def update_analysis_graph_metadata(
+        self,
+        job_id: UUID,
+        payload: GraphMetadataUpdate,
+    ) -> ConceptGraph:
+        """Edit metadata on a transient analysis graph with version checking."""
+
+        with self._lock:
+            job = self._load_job_locked(job_id)
+            if job.result is None:
+                raise AnalysisNotFound(job_id)
+            graph = job.result.graph
+            expected_version = payload.base_version or graph.version
+            if expected_version != graph.version:
+                raise GraphConflict(
+                    f"graph version changed: expected {expected_version}, current {graph.version}"
+                )
+            candidate = graph.model_copy(deep=True)
+            changes = payload.model_dump(exclude_unset=True, exclude={"base_version"})
+            if "root_id" in changes and changes["root_id"] not in {
+                node.id for node in candidate.nodes
+            }:
+                raise GraphConflict("root_id 必须指向图中的现有节点")
+            for key, value in changes.items():
+                setattr(candidate, key, value)
+            candidate.version += 1
+            candidate.updated_at = datetime.now(timezone.utc)
+            # Metadata edits in the analysis view never promote the graph.
+            candidate.save_state = "transient"
+            candidate.source_analysis_id = str(job_id)
+            candidate = ConceptGraph.model_validate(candidate.model_dump())
+            job.result = job.result.model_copy(
+                update={
+                    "graph": candidate,
+                    "graph_save_state": "transient",
+                    "saved_graph_id": None,
+                }
+            )
+            storage.save_analysis(job)
+            self._jobs[job.id] = job
+            return candidate.model_copy(deep=True)
+
+    def save_analysis_graph(
+        self,
+        job_id: UUID,
+        *,
+        expected_version: int | None = None,
+        name: str | None = None,
+    ) -> ConceptGraph:
+        """Promote an embedded analysis graph into the saved graph library.
+
+        The graph ID is stable across retries, so calling this method more than
+        once is idempotent and never creates duplicate graph rows.
+        """
+
+        with self._lock:
+            job = self._load_job_locked(job_id)
+            if job.result is None:
+                raise AnalysisNotFound(job_id)
+            graph = job.result.graph
+            if expected_version is not None and expected_version != graph.version:
+                raise GraphConflict(
+                    f"graph version changed: expected {expected_version}, current {graph.version}"
+                )
+
+            # A retry after the graph was saved (or after a user edited the
+            # saved copy through GraphPatch) must not overwrite those durable
+            # edits with the older analysis snapshot.  Reuse the existing row
+            # and refresh the analysis snapshot instead.
+            existing = storage.get_graph(graph.id)
+            if existing is not None:
+                if expected_version is not None and expected_version != existing.version:
+                    raise GraphConflict(
+                        f"graph version changed: expected {expected_version}, current {existing.version}"
+                    )
+                if name is not None and name != existing.name:
+                    existing = graph_service.update_metadata(
+                        existing.id,
+                        GraphMetadataUpdate(name=name, base_version=existing.version),
+                    )
+                job.result = job.result.model_copy(
+                    update={
+                        "graph": existing,
+                        "graph_save_state": "saved",
+                        "saved_graph_id": existing.id,
+                    }
+                )
+                storage.save_analysis(job)
+                self._jobs[job.id] = job
+                return existing.model_copy(deep=True)
+
+            candidate = graph.model_copy(deep=True)
+            if name is not None:
+                candidate.name = name
+            candidate.source_analysis_id = str(job_id)
+            candidate.save_state = "saved"
+            saved = graph_service.save(candidate)
+            job.result = job.result.model_copy(
+                update={
+                    "graph": saved,
+                    "graph_save_state": "saved",
+                    "saved_graph_id": saved.id,
+                }
+            )
+            storage.save_analysis(job)
+            self._jobs[job.id] = job
+            return saved.model_copy(deep=True)
+
+    def mark_saved_graph_deleted(self, graph_id: str) -> None:
+        """Refresh cached analysis snapshots after a library graph is deleted.
+
+        ``Storage.delete_graph`` updates durable analysis JSON in the same
+        transaction as the graph deletion.  A running process may still have
+        the old ``AnalysisJob`` in ``_jobs``, however; update those cached
+        objects immediately so the next GET does not briefly report a graph
+        that no longer exists in the saved gallery.
+        """
+
+        with self._lock:
+            for job_id, job in list(self._jobs.items()):
+                if job.result is None:
+                    continue
+                graph = job.result.graph
+                if graph.id != graph_id and job.result.saved_graph_id != graph_id:
+                    continue
+                transient_graph = graph.model_copy(update={"save_state": "transient"})
+                job.result = job.result.model_copy(
+                    update={
+                        "graph": transient_graph,
+                        "graph_save_state": "transient",
+                        "saved_graph_id": None,
+                    }
+                )
+                self._jobs[job_id] = job
 
     def clear(self) -> None:
         with self._lock:
@@ -587,6 +768,16 @@ class ResearchService:
                 project_id=payload.project_id,
                 graph_name=payload.graph_name,
             )
+            # Keep the generated graph inside the analysis snapshot only.  It
+            # becomes a durable graph-library row after the user confirms the
+            # save action through ``POST /analyses/{id}/graph/save``.
+            graph = graph.model_copy(
+                update={
+                    "source_analysis_id": str(job_id),
+                    "save_state": "transient",
+                    "source_scope": "metadata_abstract",
+                }
+            )
             evidence_ledger = _build_evidence_ledger(
                 str(job_id),
                 explanation,
@@ -596,7 +787,6 @@ class ResearchService:
             with self._lock:
                 if generation != self._generation:
                     return
-                graph_service.save(graph)
             innovation_candidates: list[InnovationCandidate] = []
             research_brief: ResearchBrief | None = None
             if payload.level == "research":
@@ -647,6 +837,8 @@ class ResearchService:
                 evidence=evidence,
                 explanation=explanation,
                 graph=graph,
+                graph_save_state="transient",
+                saved_graph_id=None,
                 innovation_candidates=innovation_candidates,
                 novelty_note=(
                     "在当前 Provider、关键词、时间和返回数量范围内未发现直接等价工作的候选，不能据此证明全球不存在相似研究。"

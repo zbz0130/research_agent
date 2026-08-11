@@ -46,8 +46,18 @@ class GraphService:
         self._lock = RLock()
 
     def save(self, graph: ConceptGraph) -> ConceptGraph:
+        """Persist a graph in the saved graph library.
+
+        Generated analysis graphs must not call this method until the user
+        confirms saving.  Keeping the promotion here (rather than relying on a
+        caller to set a flag correctly) prevents a durable row from being
+        accidentally labelled transient.
+        """
+
         with self._lock:
-            stored = ConceptGraph.model_validate(graph.model_dump())
+            stored = ConceptGraph.model_validate(
+                graph.model_copy(update={"save_state": "saved"}).model_dump()
+            )
             storage.save_graph(stored)
             self._graphs[stored.id] = stored.model_copy(deep=True)
             return stored.model_copy(deep=True)
@@ -70,6 +80,10 @@ class GraphService:
                 name=payload.name,
                 description=payload.description,
                 root_id=payload.root_id,
+                graph_kind=payload.graph_kind,
+                source_analysis_id=payload.source_analysis_id,
+                source_scope=payload.source_scope,
+                save_state="saved",
                 nodes=payload.nodes,
                 edges=payload.edges,
             )
@@ -238,6 +252,13 @@ class GraphService:
                 description="临时裁剪视图，不会修改或覆盖原概念图。",
                 root_id=graph.root_id,
                 version=graph.version,
+                graph_kind=graph.graph_kind,
+                source_analysis_id=graph.source_analysis_id,
+                source_scope=graph.source_scope,
+                save_state=graph.save_state,
+                generation_id=graph.generation_id,
+                warnings=list(graph.warnings),
+                layout_algorithm=graph.layout_algorithm,
                 nodes=nodes,
                 edges=edges,
                 created_at=graph.created_at,
@@ -279,6 +300,34 @@ class GraphService:
             self._graphs.clear()
             self._patches.clear()
             storage.clear_graphs()
+
+    def delete(self, graph_id: str, expected_version: int | None = None) -> None:
+        """Delete one saved graph and its cascaded patch history.
+
+        A read before the atomic delete lets the API distinguish a missing
+        graph (404) from an optimistic-concurrency mismatch (409).  The final
+        ``DELETE ... WHERE version`` remains the authoritative race guard.
+        """
+
+        with self._lock:
+            current = storage.get_graph(graph_id)
+            if current is None:
+                raise GraphNotFound(graph_id)
+            if expected_version is not None and expected_version != current.version:
+                raise GraphConflict(
+                    f"graph version changed: expected {expected_version}, current {current.version}"
+                )
+            if not storage.delete_graph(graph_id, expected_version):
+                latest = storage.get_graph(graph_id)
+                if latest is None:
+                    raise GraphNotFound(graph_id)
+                raise GraphConflict(
+                    f"graph version changed: expected {expected_version or current.version}, current {latest.version}"
+                )
+            self._graphs.pop(graph_id, None)
+            for patch_id, patch in list(self._patches.items()):
+                if patch.graph_id == graph_id:
+                    self._patches.pop(patch_id, None)
 
     def create_patch(self, graph_id: str, payload: GraphPatchCreate) -> GraphPatch:
         with self._lock:

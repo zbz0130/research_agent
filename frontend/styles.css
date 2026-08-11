@@ -127,6 +127,7 @@ select { width: 100%; margin-top: 7px; border: 1px solid #34465b; border-radius:
 .graph-gallery-column:hover { border-color: #6f9ac5; }
 .graph-gallery-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
 .graph-gallery-actions { display: flex; align-items: center; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+.graph-gallery-delete { padding: 6px 9px !important; font-size: 0.72rem; }
 .graph-gallery-open { padding: 6px 9px !important; font-size: 0.72rem; }
 .graph-gallery-heading h3 { color: #e4effb; line-height: 1.4; }
 .graph-gallery-description { margin: 8px 0 12px; color: #8fa3b8; font-size: 0.78rem; line-height: 1.5; }
@@ -274,6 +275,9 @@ button.secondary { padding: 8px 12px; color: #c3d6e9; background: #26384c; }
 .error-text { color: #ed9b9b; }
 /* Stage 1 research result panels */
 .graph-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-top: 14px; border-top: 1px solid #2a3a4e; padding-top: 12px; }
+.analysis-graph-save-actions { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 20px; border-top: 1px solid #2a3a4e; padding-top: 16px; }
+.analysis-graph-save-actions .settings-note { margin: 4px 0 0; }
+.analysis-graph-save-actions button { flex: 0 0 auto; }
 .graph-agent-form { margin-top: 14px; border-top: 1px solid #2a3a4e; padding-top: 14px; }
 .graph-agent-form textarea { min-height: 68px; resize: vertical; }
 .graph-meta-form { display: flex; align-items: flex-end; gap: 9px; margin-top: 4px; }
@@ -344,6 +348,16 @@ button.secondary { padding: 8px 12px; color: #c3d6e9; background: #26384c; }
 .experiment-review-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
 .danger-button { color: #e4b5b5 !important; background: #3a2931 !important; }
 .danger-button:hover { background: #52343d !important; }
+.action-sheet-dialog { width: min(460px, calc(100vw - 30px)); margin: auto; border: 1px solid #415b75; border-radius: 22px; padding: 0; color: #e7edf5; background: rgba(26, 36, 49, 0.98); box-shadow: 0 28px 90px rgba(0, 0, 0, 0.45); }
+.action-sheet-dialog::backdrop { background: rgba(4, 10, 17, 0.68); backdrop-filter: blur(8px); }
+.action-sheet-content { position: relative; display: grid; gap: 10px; padding: 28px; }
+.action-sheet-content h2 { margin: 0; color: #f0f6fc; line-height: 1.3; }
+.action-sheet-content > p:not(.eyebrow) { margin: 0; color: #aebed0; line-height: 1.65; }
+.dialog-close { position: absolute; top: 13px; right: 13px; width: 36px; height: 36px; padding: 0; border: 1px solid #3d5269; border-radius: 50%; color: #b9c8d8; background: rgba(48, 65, 84, 0.7); font-size: 1.35rem; font-weight: 500; line-height: 1; }
+.dialog-close:hover { color: #f3f7fb; background: #40566e; }
+.action-sheet-actions { display: grid; gap: 9px; margin-top: 10px; }
+.action-sheet-actions button { min-height: 44px; }
+.danger-dialog { border-color: rgba(196, 112, 121, 0.65); }
 .patch-card { margin-top: 18px; }
 .patch-list { display: grid; gap: 12px; }
 .patch-row { display: flex; justify-content: space-between; align-items: flex-start; gap: 18px; border: 1px solid #5a536b; border-radius: 12px; padding: 14px 16px; background: rgba(78, 64, 96, 0.18); }
@@ -381,6 +395,8 @@ button.secondary { padding: 8px 12px; color: #c3d6e9; background: #26384c; }
   .graph-meta-form { align-items: stretch; flex-direction: column; }
   .graph-heading-actions { align-items: flex-end; flex-direction: column; }
   .graph-picker { width: 100%; }
+  .analysis-graph-save-actions { align-items: stretch; flex-direction: column; }
+  .analysis-graph-save-actions button { width: 100%; }
   .settings-overview { grid-template-columns: 1fr; }
   .service-card-heading { gap: 10px; }
   .service-card-control { margin-left: 0; }

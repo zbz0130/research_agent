@@ -1777,3 +1777,20 @@ X、知乎、Reddit 适配器仍属后续。现有 community provider / demo 不
 - 真正创新点判断必须扩展全文、引用图、社区和跨来源检索。
 
 因此，这一版本可以作为概念分析和论文初筛的可靠第一版，也为后续概念树、概念图、社区检索、多智能体创新分析和创新性查重提供了较稳固的数据基础。
+
+---
+
+## 30. Phase 1：概念图生命周期（`codex/graph-lifecycle`）
+
+本阶段从 `main` 新建分支开发，目标限定为图快照生命周期，不提前实现 Cytoscape、Overview 多 Agent 或 Tauri 壳。
+
+- 分析完成后的概念图嵌入 `AnalysisResult`，默认 `save_state=transient`；不会自动写入已保存图库。
+- 新增分析图读取、元数据 PATCH、显式保存接口；保存使用版本号 CAS，重复保存复用同一图 ID。
+- 前端新增保存 Action Sheet，默认聚焦“保存概念图”；关闭或“暂不保存”只保留历史快照。
+- 新增整图删除接口；删除会级联 GraphPatch，并把关联历史快照回退为 `transient`，不删除分析、论文和证据。
+- SQLite `user_version` 迁移到 2，补充概念图生命周期字段、`overview_jobs` 预留表和临时图 Patch 预留表；旧图默认按已保存图兼容读取。
+- 临时图在本阶段只允许改名称/根节点；节点结构和 Agent Patch 控件会提示先保存，避免请求不存在的已保存图端点。
+- 新增 `PaperReadingSummary`、节点角色兼容推导和图视觉字段，为后续真实研究图预留数据契约。
+- 验证：`python -m pytest backend/tests -q`、`node --check frontend/app.js`、Python 编译检查和 `git diff --check` 通过；另有隔离 SQLite 生命周期端到端测试通过。
+
+本阶段仍明确未完成：真实圆形节点和连线、Cytoscape.js、研究方向 Overview、arXiv PDF 章节阅读、Tauri sidecar 和 iOS 风格桌面壳。
