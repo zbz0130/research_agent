@@ -4,7 +4,7 @@ from fastapi import FastAPI
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.requests import Request
 
@@ -42,13 +42,39 @@ async def redact_secret_validation_errors(
         )
     return await request_validation_exception_handler(request, exc)
 
-frontend_dir = Path(__file__).resolve().parents[2] / "frontend"
+frontend_source_dir = Path(__file__).resolve().parents[2] / "frontend"
+frontend_dist_dir = frontend_source_dir / "dist"
+frontend_dir = (
+    frontend_dist_dir
+    if (frontend_dist_dir / "index.html").exists()
+    else frontend_source_dir
+)
 # Keep the older /static URLs working for anyone who has bookmarked the first
 # version of the interface.  The new frontend uses relative asset URLs so the
-# exact same files can be served by FastAPI locally and as a static GitHub
-# Pages artifact under a repository subpath.
-app.mount("/static", StaticFiles(directory=frontend_dir), name="static")
+# source directory stays mounted for old local bookmarks even when FastAPI is
+# serving the Vite bundle from ``frontend/dist``.
+app.mount("/static", StaticFiles(directory=frontend_source_dir), name="static")
+# Keep legacy root asset URLs working for existing local bookmarks and simple
+# diagnostics while the HTML itself comes from the bundled Vite directory.
+def _make_legacy_frontend_endpoint(asset: Path):
+    """Bind one known asset without exposing its path as a query argument."""
+
+    def serve_legacy_frontend_asset() -> FileResponse:
+        return FileResponse(asset)
+
+    return serve_legacy_frontend_asset
+
+
+for legacy_asset in ("styles.css", "app.js", "runtime-config.js"):
+    source_asset = frontend_source_dir / legacy_asset
+    if source_asset.exists():
+        app.add_api_route(
+            f"/{legacy_asset}",
+            _make_legacy_frontend_endpoint(source_asset),
+            methods=["GET"],
+            include_in_schema=False,
+        )
 # This mount is intentionally registered after the API router: /api/v1/*
 # continues to be handled by FastAPI, while /, /app.js, /styles.css and
-# /runtime-config.js resolve relative to the frontend directory.
+# the Vite bundle resolves from ``frontend/dist`` after ``npm run build``.
 app.mount("/", StaticFiles(directory=frontend_dir, html=True), name="frontend")

@@ -20,6 +20,9 @@ data/
 artifacts/
 runs/
 *.sqlite3
+*.db
+*.db-wal
+*.db-shm
 
 # IDE/OS
 .idea/

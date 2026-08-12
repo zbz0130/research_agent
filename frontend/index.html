@@ -4,6 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="description" content="许愿机 WishForge：把模糊的研究想法梳理成有证据的理解。" />
+    <link rel="icon" href="data:," />
     <title>许愿机 / WishForge</title>
     <link rel="stylesheet" href="styles.css" />
   </head>
@@ -29,16 +30,20 @@
           <span class="nav-link-kicker">02</span>
           <span>概念图</span>
         </a>
-        <a class="nav-link" href="#innovations" data-route-link="innovations">
+        <a class="nav-link" href="#research-overview" data-route-link="research-overview">
           <span class="nav-link-kicker">03</span>
+          <span>研究方向图</span>
+        </a>
+        <a class="nav-link" href="#innovations" data-route-link="innovations">
+          <span class="nav-link-kicker">04</span>
           <span>创新与查重</span>
         </a>
         <a class="nav-link" href="#experiments" data-route-link="experiments">
-          <span class="nav-link-kicker">04</span>
+          <span class="nav-link-kicker">05</span>
           <span>实验方案</span>
         </a>
         <a class="nav-link" href="#settings" data-route-link="settings">
-          <span class="nav-link-kicker">05</span>
+          <span class="nav-link-kicker">06</span>
           <span>设置</span>
         </a>
       </nav>
@@ -113,6 +118,13 @@
                 <p id="analysis-graph-save-status" class="settings-note">本次分析生成的概念图暂时保留在分析历史中。</p>
               </div>
               <button id="save-analysis-graph" type="button">保存为概念图</button>
+            </div>
+            <div id="analysis-overview-actions" class="analysis-overview-actions hidden" aria-live="polite">
+              <div>
+                <p class="section-label">RESEARCH OVERVIEW</p>
+                <p class="settings-note">把本次论文整理成“主题 → 研究方向 → 细分方向 → 论文”的可交互图。</p>
+              </div>
+              <button id="create-overview" type="button">Overview / 研究方向图</button>
             </div>
           </article>
 
@@ -293,12 +305,12 @@
           <div class="card-heading">
             <div>
               <p class="eyebrow">MULTI-GRAPH CANVAS</p>
-              <h2>同时查看多棵概念树</h2>
+              <h2>同时查看多张概念图</h2>
             </div>
             <span class="tag tag-beta">局部视图</span>
           </div>
           <p class="settings-note">
-            选择两棵或更多概念图并排查看。填写节点 ID 后，每一列会保留这些节点及其层级祖先；这是临时视图，不会修改数据库中的原图。
+            选择两张或更多概念图并排查看。填写节点 ID 后，每个画布会保留这些节点及其层级祖先；这是临时视图，不会修改数据库中的原图。
           </p>
           <form id="graph-gallery-form" class="analysis-form">
             <label>
@@ -317,8 +329,96 @@
             </div>
           </form>
           <div id="graph-gallery" class="graph-gallery">
-            <p class="empty">选择概念图后，这里会并排显示它们的层级结构。</p>
+            <p class="empty">选择概念图后，这里会并排显示真实节点和连线。</p>
           </div>
+        </section>
+      </section>
+
+      <section class="app-view" data-view="research-overview" aria-labelledby="research-overview-title">
+        <header class="view-heading">
+          <div>
+            <p class="eyebrow">RESEARCH DIRECTION OVERVIEW</p>
+            <h2 id="research-overview-title">研究方向图</h2>
+            <p>从一个主题向下展开研究方向和论文证据。方向大小表示本次检索范围内的相对活跃度，论文颜色深浅表示相对新旧。</p>
+          </div>
+          <span id="overview-state-tag" class="tag tag-beta">等待生成</span>
+        </header>
+
+        <section class="card overview-history-card" aria-labelledby="overview-history-title">
+          <div class="overview-history-copy">
+            <div>
+              <p class="section-label">OVERVIEW HISTORY</p>
+              <h3 id="overview-history-title">历史研究方向图</h3>
+              <p id="overview-history-status" class="settings-note" role="status">正在读取历史任务…</p>
+            </div>
+            <div class="overview-history-controls">
+              <label for="overview-history-select" class="sr-only">选择历史研究方向图</label>
+              <select id="overview-history-select" aria-label="选择历史研究方向图" disabled>
+                <option value="">暂无历史任务</option>
+              </select>
+              <button id="overview-history-refresh" type="button" class="secondary">刷新历史</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="card overview-status-card">
+          <div class="overview-status-copy">
+            <div>
+              <p class="section-label">MULTI-AGENT PROGRESS</p>
+              <h3 id="overview-stage-title">先在工作台完成一次文献或研究分析</h3>
+              <p id="overview-status-message" class="settings-note">分析至少包含一篇有效论文后，点击 Overview 按钮开始生成。</p>
+            </div>
+            <div class="overview-progress-meta">
+              <span id="overview-progress-label">0%</span>
+              <span id="overview-counts">0 个方向 · 0 篇论文</span>
+            </div>
+          </div>
+          <div class="overview-progress-track" aria-hidden="true"><span id="overview-progress-bar"></span></div>
+          <div class="overview-status-actions">
+            <button id="overview-retry" type="button" class="secondary hidden">重新生成</button>
+            <button id="overview-save-later" type="button" class="secondary hidden">稍后保存</button>
+            <button id="overview-save" type="button" class="hidden">保存研究方向图</button>
+            <span id="overview-action-message" class="form-message" role="status"></span>
+          </div>
+        </section>
+
+        <section class="overview-workspace-grid">
+          <article class="card overview-canvas-card">
+            <div class="card-heading">
+              <div>
+                <p class="eyebrow">INTERACTIVE MAP</p>
+                <h2 id="overview-graph-title">方向与论文</h2>
+              </div>
+              <div class="graph-toolbar">
+                <button id="overview-fit" type="button" class="secondary" disabled>适应画布</button>
+                <button id="overview-toggle-edges" type="button" class="secondary" aria-pressed="true" disabled>隐藏低置信边</button>
+              </div>
+            </div>
+            <div id="overview-canvas" class="research-graph-canvas" aria-label="研究方向关系图">
+              <div class="graph-canvas-placeholder">
+                <span>⌁</span>
+                <p>生成后可缩放、平移和拖拽节点；点击节点可查看证据详情。</p>
+              </div>
+            </div>
+            <div id="overview-legend" class="overview-legend hidden">
+              <div class="legend-item">
+                <span class="legend-label">论文新旧</span>
+                <span class="recency-gradient" aria-hidden="true"></span>
+                <small>较早</small><small>较新</small>
+              </div>
+              <div class="legend-item heat-legend">
+                <span class="legend-label">方向活跃度</span>
+                <i class="heat-dot heat-dot-small"></i><i class="heat-dot heat-dot-medium"></i><i class="heat-dot heat-dot-large"></i>
+                <small>范围内较少</small><small>范围内较活跃</small>
+              </div>
+              <p id="overview-legend-note">热度只表示当前检索范围内的相对活跃度，不代表论文质量、正确性、创新性或全局影响力。</p>
+            </div>
+            <div id="overview-warnings" class="overview-warnings hidden"></div>
+          </article>
+
+          <aside id="overview-inspector" class="card graph-inspector" aria-live="polite">
+            <div class="graph-inspector-empty"><span>◎</span><p>点击图中的节点，在这里查看解释、论文证据和关系。</p></div>
+          </aside>
         </section>
       </section>
 
@@ -585,6 +685,18 @@
         </div>
       </form>
     </dialog>
+    <dialog id="overview-save-dialog" class="action-sheet-dialog" aria-labelledby="overview-save-dialog-title" aria-describedby="overview-save-dialog-description">
+      <form method="dialog" class="action-sheet-content">
+        <button type="button" class="dialog-close" data-dialog-close="overview-save" aria-label="关闭保存提示">×</button>
+        <p class="eyebrow">SAVE RESEARCH MAP</p>
+        <h2 id="overview-save-dialog-title">保存这张研究方向图？</h2>
+        <p id="overview-save-dialog-description">保存后会进入统一图库；暂不保存也不会删除 Overview 任务，之后仍可回来查看和保存。</p>
+        <div class="action-sheet-actions">
+          <button id="overview-dialog-confirm" type="button" autofocus>保存研究方向图</button>
+          <button id="overview-dialog-later" type="button" class="secondary">暂不保存</button>
+        </div>
+      </form>
+    </dialog>
     <dialog id="graph-delete-dialog" class="action-sheet-dialog danger-dialog" aria-labelledby="graph-delete-dialog-title" aria-describedby="graph-delete-dialog-description">
       <form method="dialog" class="action-sheet-content">
         <button type="button" class="dialog-close" data-dialog-close="graph-delete" aria-label="关闭删除提示">×</button>
@@ -597,7 +709,7 @@
         </div>
       </form>
     </dialog>
-    <script src="runtime-config.js" defer></script>
-    <script src="app.js" defer></script>
+    <!-- runtime-config.js is imported by the module entrypoint; it contains no secrets. -->
+    <script type="module" src="./src/main.js"></script>
   </body>
 </html>

@@ -1,4 +1,6 @@
-# GitHub Pages 前端部署
+# GitHub Pages 前端部署（历史文档）
+
+> WishForge 已决定改为 Windows Tauri 桌面 App；GitHub Pages 不再是产品部署目标。本页只保留旧部署方案用于追溯，不应继续用于承载 API Key 或发布正式产品。
 
 GitHub Pages 只能承载静态前端，**不会运行 FastAPI、SQLite、论文检索或模型调用**。因此发布后的许愿机由两部分组成：
 

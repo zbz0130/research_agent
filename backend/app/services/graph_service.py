@@ -12,6 +12,7 @@ from app.research_schemas import (
     GraphCreate,
     ConceptNode,
     GraphMetadataUpdate,
+    GraphLayoutUpdate,
     GraphOperation,
     GraphPatch,
     GraphPatchCreate,
@@ -104,6 +105,12 @@ class GraphService:
             graphs = storage.list_graphs(str(project_id) if project_id else None)
             self._graphs = {graph.id: graph.model_copy(deep=True) for graph in graphs}
             return [graph.model_copy(deep=True) for graph in graphs]
+
+    def invalidate(self, graph_id: str) -> None:
+        """Drop only process-local cache entries after an external CAS write."""
+
+        with self._lock:
+            self._graphs.pop(graph_id, None)
 
     def list_patches(self, graph_id: str) -> list[GraphPatch]:
         with self._lock:
@@ -295,6 +302,37 @@ class GraphService:
             self._graphs[graph_id] = validated.model_copy(deep=True)
             return validated.model_copy(deep=True)
 
+    def update_layout(self, graph_id: str, payload: GraphLayoutUpdate) -> ConceptGraph:
+        """Persist user-arranged coordinates with optimistic concurrency."""
+
+        with self._lock:
+            graph = self.get(graph_id)
+            if payload.expected_version != graph.version:
+                raise GraphConflict(
+                    f"graph version changed: expected {payload.expected_version}, current {graph.version}"
+                )
+            by_id = {node.id: node for node in graph.nodes}
+            unknown = [item.node_id for item in payload.positions if item.node_id not in by_id]
+            if unknown:
+                raise GraphConflict(f"layout contains unknown node_id: {unknown[0]}")
+            candidate = graph.model_copy(deep=True)
+            candidate_by_id = {node.id: node for node in candidate.nodes}
+            for item in payload.positions:
+                node = candidate_by_id[item.node_id]
+                node.visual.x = item.x
+                node.visual.y = item.y
+            if payload.layout_algorithm is not None:
+                candidate.layout_algorithm = payload.layout_algorithm
+            candidate.version += 1
+            candidate.updated_at = datetime.now(timezone.utc)
+            validated = ConceptGraph.model_validate(candidate.model_dump())
+            if not storage.update_graph_if_version(validated, graph.version):
+                raise GraphConflict(
+                    f"graph version changed: expected {graph.version}, current version is newer"
+                )
+            self._graphs[graph_id] = validated.model_copy(deep=True)
+            return validated.model_copy(deep=True)
+
     def clear(self) -> None:
         with self._lock:
             self._graphs.clear()
@@ -414,6 +452,7 @@ class GraphService:
         candidate.version += 1
         candidate.updated_at = datetime.now(timezone.utc)
         validated = ConceptGraph.model_validate(candidate.model_dump())
+        _ensure_patch_does_not_add_disconnected_nodes(graph, validated)
         graph.nodes = validated.nodes
         graph.edges = validated.edges
         graph.version = validated.version
@@ -476,6 +515,99 @@ class GraphService:
             if not edge_id or edge_id not in edges:
                 raise GraphConflict("unknown edge")
             del edges[edge_id]
+
+    def apply_operations_to_snapshot(
+        self,
+        graph: ConceptGraph,
+        operations: list[GraphOperation],
+        *,
+        expected_version: int,
+    ) -> ConceptGraph:
+        """Apply the canonical patch engine to a non-repository graph copy."""
+
+        with self._lock:
+            if graph.version != expected_version:
+                raise GraphConflict(
+                    f"graph version changed: expected {expected_version}, current {graph.version}"
+                )
+            candidate = graph.model_copy(deep=True)
+            nodes = {node.id: node for node in candidate.nodes}
+            edges = {edge.id: edge for edge in candidate.edges}
+            for operation in operations:
+                self._apply_operation_locked(candidate, nodes, edges, operation)
+            candidate.nodes = list(nodes.values())
+            candidate.edges = list(edges.values())
+            candidate.version += 1
+            candidate.updated_at = datetime.now(timezone.utc)
+            candidate.save_state = "transient"
+            validated = ConceptGraph.model_validate(candidate.model_dump())
+            _ensure_patch_does_not_add_disconnected_nodes(graph, validated)
+            return validated
+
+
+def _ensure_graph_connected(graph: ConceptGraph) -> None:
+    """Reject graph edits that leave semantic nodes isolated from the root.
+
+    Concept graphs are rendered as relationship maps, so a node with no path
+    to the root is not merely a layout oddity: it has lost the context that
+    gives the node meaning.  Edges are treated as undirected for this
+    connectivity invariant because relations such as ``uses`` may point
+    either toward or away from the root depending on their semantics.
+
+    This check runs after the full patch is applied.  A user or Agent can
+    therefore add a node and its edge atomically, or replace one edge with
+    another in the same reviewed patch, without encountering a false
+    intermediate failure.
+    """
+
+    missing = _disconnected_node_ids(graph)
+    if missing:
+        raise GraphConflict(
+            "concept graph cannot contain nodes disconnected from the root: "
+            + ", ".join(sorted(missing)[:5])
+        )
+
+
+def _disconnected_node_ids(graph: ConceptGraph) -> set[str]:
+    """Return node IDs outside the root's undirected component."""
+
+    if len(graph.nodes) <= 1:
+        return set()
+    adjacent: dict[str, set[str]] = {node.id: set() for node in graph.nodes}
+    for edge in graph.edges:
+        adjacent[edge.source].add(edge.target)
+        adjacent[edge.target].add(edge.source)
+    reachable = {graph.root_id}
+    frontier = [graph.root_id]
+    while frontier:
+        current = frontier.pop()
+        for neighbor in adjacent[current] - reachable:
+            reachable.add(neighbor)
+            frontier.append(neighbor)
+    return {node.id for node in graph.nodes if node.id not in reachable}
+
+
+def _ensure_patch_does_not_add_disconnected_nodes(
+    original: ConceptGraph,
+    candidate: ConceptGraph,
+) -> None:
+    """Preserve legacy snapshots while forbidding newly disconnected nodes.
+
+    Very old imported snapshots may already contain isolated nodes.  They
+    remain readable and can still receive explanatory text edits or repairs,
+    but a Patch cannot increase the disconnected set.  A fully connected
+    graph therefore keeps the strict invariant, while a legacy graph can be
+    repaired incrementally instead of becoming completely uneditable.
+    """
+
+    before = _disconnected_node_ids(original)
+    after = _disconnected_node_ids(candidate)
+    newly_disconnected = after - before
+    if newly_disconnected:
+        raise GraphConflict(
+            "concept graph cannot contain nodes disconnected from the root: "
+            + ", ".join(sorted(newly_disconnected)[:5])
+        )
 
 def _compare_relation(source: ConceptNode, target: ConceptNode) -> tuple[str, int]:
     """Return a simple, explainable priority for a cross-graph pair."""

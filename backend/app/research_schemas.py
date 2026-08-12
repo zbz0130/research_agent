@@ -10,6 +10,42 @@ from app.evidence_schemas import EvidenceLedger
 
 AnalysisLevel = Literal["quick", "literature", "research"]
 AnalysisStatus = Literal["queued", "running", "completed", "failed"]
+OverviewStatus = Literal[
+    "queued",
+    "running",
+    "partial",
+    "succeeded",
+    "failed",
+    "interrupted",
+]
+OverviewStage = Literal[
+    "direction_planning",
+    "direction_research",
+    "direction_expansion",
+    "paper_reading",
+    "direction_validation",
+    "graph_synthesis",
+    "statistics_layout",
+    "completed",
+]
+OverviewAgentRole = Literal[
+    "topic_taxonomy_planner",
+    "direction_research_coordinator",
+    "direction_research_worker",
+    "paper_reading",
+    "direction_validation",
+    "overview_synthesis",
+]
+OverviewAgentRunStatus = Literal["succeeded", "partial", "failed", "skipped"]
+OverviewAgentExecutionMode = Literal[
+    "model",
+    "deterministic_rule",
+    "deterministic_rule_fallback",
+    "provider_search",
+    "retained_analysis",
+    "document_parser",
+    "validation",
+]
 Audience = Literal["beginner", "student", "researcher"]
 SourceKind = Literal["academic", "official", "community", "demo"]
 EvidenceType = Literal["definition", "mechanism", "result", "limitation", "future_work", "context"]
@@ -262,8 +298,49 @@ class PaperReadingSummary(BaseModel):
     summary_level: Literal["abstract_only", "arxiv_sections"] = "abstract_only"
     source_sections: list[str] = Field(default_factory=list, max_length=20)
     evidence_ids: list[str] = Field(default_factory=list, max_length=30)
+    section_evidence: list[EvidenceCard] = Field(default_factory=list, max_length=10)
     confidence: Confidence = "low"
     warnings: list[str] = Field(default_factory=list, max_length=20)
+
+
+class OverviewDirectionAudit(BaseModel):
+    """Secret-free, durable audit record for one direction research attempt.
+
+    A record describes the exact bounded search scope and the adjudication made
+    from it.  ``accepted_count`` is the number retained after direction-boundary
+    filtering; ``duplicate_count`` records accepted papers already present in
+    the Overview so callers can distinguish "nothing new" from "no evidence".
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    run_id: str = Field(default_factory=lambda: str(uuid4()), min_length=1, max_length=200)
+    operation: Literal["initial", "expand", "retry"] = "initial"
+    direction_key: str = Field(min_length=1, max_length=200)
+    direction_node_id: str | None = Field(default=None, max_length=200)
+    parent_node_id: str | None = Field(default=None, max_length=200)
+    label: str = Field(min_length=1, max_length=500)
+    definition: str = Field(default="", max_length=2000)
+    boundary: str = Field(default="", max_length=2000)
+    depth: int = Field(default=1, ge=1, le=3)
+    provider: str = Field(default="unavailable", min_length=1, max_length=200)
+    query_scope: Literal["external_provider", "retained_analysis", "unavailable"] = (
+        "unavailable"
+    )
+    queries: list[str] = Field(default_factory=list, max_length=12)
+    match_terms: list[str] = Field(default_factory=list, max_length=80)
+    seed_paper_ids: list[str] = Field(default_factory=list, max_length=80)
+    returned_count: int = Field(default=0, ge=0)
+    accepted_count: int = Field(default=0, ge=0)
+    rejected_count: int = Field(default=0, ge=0)
+    truncated_count: int = Field(default=0, ge=0)
+    duplicate_count: int = Field(default=0, ge=0)
+    accepted_paper_ids: list[str] = Field(default_factory=list, max_length=80)
+    decision: Literal["split", "keep", "merge", "discard"] = "discard"
+    decision_reason: str = Field(default="", max_length=2000)
+    merge_target: str | None = Field(default=None, max_length=200)
+    error: str | None = Field(default=None, max_length=2000)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class ResearchGapCandidate(BaseModel):
@@ -442,6 +519,43 @@ class ConceptGraph(BaseModel):
         if any(edge.source not in node_id_set or edge.target not in node_id_set for edge in self.edges):
             raise ValueError("概念图中的边必须连接现有节点")
         return self
+
+
+class GraphLayoutPosition(BaseModel):
+    """One renderer position saved independently from graph semantics."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    node_id: str = Field(min_length=1, max_length=200)
+    x: float
+    y: float
+
+
+class GraphLayoutUpdate(BaseModel):
+    """CAS-protected layout update produced by the interactive canvas."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    expected_version: int = Field(ge=1)
+    positions: list[GraphLayoutPosition] = Field(min_length=1, max_length=500)
+    layout_algorithm: str | None = Field(default=None, min_length=1, max_length=100)
+
+    @model_validator(mode="after")
+    def unique_nodes(self) -> "GraphLayoutUpdate":
+        node_ids = [item.node_id for item in self.positions]
+        if len(node_ids) != len(set(node_ids)):
+            raise ValueError("positions 不能包含重复 node_id")
+        return self
+
+
+class GraphNodeDetail(BaseModel):
+    """Evidence-aware inspector payload for a saved graph node."""
+
+    node: ConceptNode
+    papers: list[PaperRecord] = Field(default_factory=list)
+    evidence: list[EvidenceCard] = Field(default_factory=list)
+    related_edges: list[ConceptEdge] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list, max_length=30)
 
 
 class GraphMetadataUpdate(BaseModel):
@@ -990,6 +1104,140 @@ class AnalysisGraphSaveResponse(BaseModel):
     graph: ConceptGraph
     saved_graph_id: str
     graph_save_state: GraphSaveState = "saved"
+
+
+class OverviewCreate(BaseModel):
+    """Bounded request for a research-direction Overview job.
+
+    The first implementation works from the papers already retained by an
+    analysis.  These limits are persisted with the job so a later provider-
+    backed worker can reproduce the same scope instead of silently widening a
+    user's literature search.
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    max_directions: int = Field(default=8, ge=1, le=8)
+    max_depth: int = Field(default=3, ge=2, le=3)
+    papers_per_direction: int = Field(default=8, ge=1, le=8)
+    max_total_papers: int = Field(default=80, ge=1, le=80)
+    force_regenerate: bool = False
+
+
+class OverviewExpandRequest(BaseModel):
+    """Request a bounded, evidence-preserving expansion of one direction."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    node_id: str = Field(min_length=1, max_length=200)
+    expected_version: int | None = Field(default=None, ge=1)
+
+
+class OverviewRetryDirectionRequest(BaseModel):
+    """Retry one failed direction without regenerating successful peers."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    expected_version: int | None = Field(default=None, ge=1)
+
+
+class OverviewSaveRequest(BaseModel):
+    """Promote an Overview result into the saved graph library."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    expected_version: int | None = Field(default=None, ge=1)
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+
+
+class OverviewMetricLegend(BaseModel):
+    """Human-readable meaning of normalized graph visual scores."""
+
+    heat_label: str = "当前检索范围内的相对活跃度"
+    heat_note: str = "热度只表示当前检索范围内的相对活跃度，不代表论文质量、正确性或全局影响力。"
+    heat_sources: list[str] = Field(default_factory=list, max_length=10)
+    recency_label: str = "本次论文集合内的相对新旧程度"
+    recency_note: str = "年份缺失的论文使用中性分数，不能据此判断其发表时间。"
+
+
+class OverviewAgentRun(BaseModel):
+    """Secret-free execution audit for one bounded Overview responsibility.
+
+    The record deliberately excludes prompts, response bodies, base URLs,
+    headers and API keys.  A failed model attempt and its deterministic
+    fallback are stored as separate records so the fallback can never be
+    mistaken for a successful model call.
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    id: str = Field(default_factory=lambda: str(uuid4()), min_length=1, max_length=200)
+    role: OverviewAgentRole
+    status: OverviewAgentRunStatus
+    execution_mode: OverviewAgentExecutionMode
+    provider: str = Field(min_length=1, max_length=200)
+    model: str | None = Field(default=None, max_length=300)
+    operation: Literal["initial", "expand", "retry"] = "initial"
+    direction_key: str | None = Field(default=None, max_length=200)
+    input_paper_count: int = Field(default=0, ge=0, le=80)
+    output_paper_count: int = Field(default=0, ge=0, le=80)
+    query_count: int = Field(default=0, ge=0, le=100)
+    started_at: datetime
+    completed_at: datetime
+    duration_ms: int = Field(ge=0)
+    summary: str = Field(default="", max_length=2000)
+    warnings: list[str] = Field(default_factory=list, max_length=20)
+    error_type: str | None = Field(default=None, max_length=200)
+
+    @model_validator(mode="after")
+    def validate_timing_and_model_scope(self) -> "OverviewAgentRun":
+        if self.completed_at < self.started_at:
+            raise ValueError("AgentRun 完成时间不能早于开始时间")
+        if self.execution_mode != "model" and self.model is not None:
+            raise ValueError("只有真实模型调用记录可以填写 model")
+        return self
+
+
+class OverviewResult(BaseModel):
+    """Transient or saved research-direction graph produced by one job."""
+
+    graph: ConceptGraph
+    papers: list[PaperRecord] = Field(default_factory=list, max_length=80)
+    paper_readings: list[PaperReadingSummary] = Field(default_factory=list, max_length=80)
+    evidence: list[EvidenceCard] = Field(default_factory=list, max_length=1200)
+    direction_audits: list[OverviewDirectionAudit] = Field(default_factory=list, max_length=200)
+    agent_runs: list[OverviewAgentRun] = Field(default_factory=list, max_length=300)
+    legend: OverviewMetricLegend = Field(default_factory=OverviewMetricLegend)
+    warnings: list[str] = Field(default_factory=list, max_length=40)
+    direction_count: int = Field(default=0, ge=0, le=200)
+    paper_count: int = Field(default=0, ge=0, le=80)
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class OverviewJob(BaseModel):
+    """Durable asynchronous state for a research-direction Overview."""
+
+    id: UUID = Field(default_factory=uuid4)
+    analysis_id: UUID
+    status: OverviewStatus = "queued"
+    stage: OverviewStage = "direction_planning"
+    progress: int = Field(default=0, ge=0, le=100)
+    message: str = "等待生成研究方向图"
+    request: OverviewCreate = Field(default_factory=OverviewCreate)
+    result: OverviewResult | None = None
+    save_state: GraphSaveState = "transient"
+    saved_graph_id: str | None = Field(default=None, max_length=200)
+    error: str | None = Field(default=None, max_length=4000)
+    version: int = Field(default=1, ge=1)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class OverviewSaveResponse(BaseModel):
+    overview_id: UUID
+    graph: ConceptGraph
+    saved_graph_id: str
+    save_state: GraphSaveState = "saved"
 
 
 class GraphPatch(BaseModel):

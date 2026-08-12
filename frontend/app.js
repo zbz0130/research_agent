@@ -69,6 +69,32 @@ const graphGalleryEl = document.querySelector("#graph-gallery");
 const analysisGraphSaveActionsEl = document.querySelector("#analysis-graph-save-actions");
 const analysisGraphSaveStatusEl = document.querySelector("#analysis-graph-save-status");
 const saveAnalysisGraphButton = document.querySelector("#save-analysis-graph");
+const analysisOverviewActionsEl = document.querySelector("#analysis-overview-actions");
+const createOverviewButton = document.querySelector("#create-overview");
+const overviewStateTagEl = document.querySelector("#overview-state-tag");
+const overviewStageTitleEl = document.querySelector("#overview-stage-title");
+const overviewStatusMessageEl = document.querySelector("#overview-status-message");
+const overviewProgressLabelEl = document.querySelector("#overview-progress-label");
+const overviewCountsEl = document.querySelector("#overview-counts");
+const overviewProgressBarEl = document.querySelector("#overview-progress-bar");
+const overviewRetryButton = document.querySelector("#overview-retry");
+const overviewSaveLaterButton = document.querySelector("#overview-save-later");
+const overviewSaveButton = document.querySelector("#overview-save");
+const overviewActionMessageEl = document.querySelector("#overview-action-message");
+const overviewGraphTitleEl = document.querySelector("#overview-graph-title");
+const overviewCanvasEl = document.querySelector("#overview-canvas");
+const overviewInspectorEl = document.querySelector("#overview-inspector");
+const overviewFitButton = document.querySelector("#overview-fit");
+const overviewToggleEdgesButton = document.querySelector("#overview-toggle-edges");
+const overviewLegendEl = document.querySelector("#overview-legend");
+const overviewLegendNoteEl = document.querySelector("#overview-legend-note");
+const overviewWarningsEl = document.querySelector("#overview-warnings");
+const overviewHistorySelectEl = document.querySelector("#overview-history-select");
+const overviewHistoryRefreshButton = document.querySelector("#overview-history-refresh");
+const overviewHistoryStatusEl = document.querySelector("#overview-history-status");
+const overviewSaveDialog = document.querySelector("#overview-save-dialog");
+const overviewDialogConfirmButton = document.querySelector("#overview-dialog-confirm");
+const overviewDialogLaterButton = document.querySelector("#overview-dialog-later");
 const deleteCurrentGraphButton = document.querySelector("#delete-current-graph");
 const graphSaveDialog = document.querySelector("#graph-save-dialog");
 const saveGraphDialogConfirmButton = document.querySelector("#save-graph-dialog-confirm");
@@ -95,6 +121,7 @@ const API_BASE_STORAGE_KEY = "wishforge.api_base_url";
 const routes = {
   workspace: { title: "研究工作台" },
   "concept-graphs": { title: "概念图" },
+  "research-overview": { title: "研究方向图" },
   innovations: { title: "创新与查重" },
   experiments: { title: "实验方案" },
   settings: { title: "设置" },
@@ -190,6 +217,20 @@ function renderRoute(route = currentRoute()) {
     }
   });
   document.title = `${routes[activeRoute].title} · 许愿机 / WishForge`;
+  if (activeRoute === "research-overview") {
+    if (!state.overviewHistoryLoaded && !state.overviewHistoryLoading) {
+      loadOverviewHistory({ autoOpen: true }).catch(() => {});
+    }
+    window.requestAnimationFrame(() => {
+      state.overviewRenderer?.resize();
+      state.overviewRenderer?.fit();
+    });
+  } else if (activeRoute === "concept-graphs") {
+    window.requestAnimationFrame(() => {
+      state.conceptGraphRenderer?.resize();
+      state.conceptGraphRenderer?.fit();
+    });
+  }
 }
 
 function navigateTo(route, selector = "") {
@@ -220,6 +261,21 @@ const state = {
   pendingPatches: new Map(),
   experimentPlan: null,
   ideaCheck: null,
+  conceptGraphRenderer: null,
+  conceptGraphSelectedNodeId: null,
+  overviewId: null,
+  overviewAnalysisId: null,
+  overviewJob: null,
+  overviewGraph: null,
+  overviewRenderer: null,
+  overviewPollTimer: null,
+  overviewSavePromptedForId: null,
+  overviewSelectedNodeId: null,
+  overviewLowConfidenceVisible: true,
+  overviewJobs: [],
+  overviewHistoryLoaded: false,
+  overviewHistoryLoading: false,
+  graphGalleryRenderers: new Map(),
 };
 
 function escapeHtml(value) {
@@ -273,18 +329,13 @@ function isSavedGraph(graph = state.graph) {
 
 function renderGraphLifecycleControls(graph = state.graph) {
   const transient = Boolean(graph && graphSaveState(graph, state.analysisResult) === "transient");
-  // A transient graph is a readable analysis snapshot.  Its metadata can be
-  // renamed before saving, but structural/Agent patches target the durable
-  // graph repository and are therefore intentionally disabled until the user
-  // confirms saving.  This avoids exposing controls that would otherwise
-  // return a misleading 404.
-  nodeForm?.classList.toggle("hidden", transient || !graph);
-  graphActionsEl?.classList.toggle("hidden", transient || !graph);
-  graphAgentForm?.classList.toggle("hidden", transient || !graph);
+  nodeForm?.classList.toggle("hidden", !graph);
+  graphActionsEl?.classList.toggle("hidden", !graph);
+  graphAgentForm?.classList.toggle("hidden", !graph);
   graphLifecycleNoteEl?.classList.toggle("hidden", !transient);
   if (graphLifecycleNoteEl) {
     graphLifecycleNoteEl.textContent = transient
-      ? "这是分析历史中的临时概念图。保存后才能编辑节点、生成 Agent 修改提案或更新节点解释；名称和根节点可以先调整。"
+      ? "这是分析历史中的临时概念图：可直接编辑并审核 Agent 提案；只有确认保存后才会进入图库。"
       : "";
   }
 }
@@ -336,10 +387,12 @@ function showDialog(dialog) {
   if (!dialog) return;
   if (typeof dialog.showModal === "function") {
     if (!dialog.open) dialog.showModal();
+    window.requestAnimationFrame(() => dialog.querySelector("[autofocus]")?.focus());
     return;
   }
   dialog.setAttribute("open", "");
   dialog.classList.add("is-open");
+  window.requestAnimationFrame(() => dialog.querySelector("[autofocus]")?.focus());
 }
 
 function closeDialog(dialog) {
@@ -430,6 +483,8 @@ function resetGraphViewAfterDeletion() {
   state.graphId = null;
   state.graph = null;
   state.pendingPatches.clear();
+  state.conceptGraphRenderer?.destroy();
+  state.conceptGraphRenderer = null;
   graphVersionEl.textContent = "v—";
   graphPickerEl.classList.add("hidden");
   graphPickerEl.innerHTML = "";
@@ -446,6 +501,8 @@ function resetGraphViewAfterDeletion() {
 }
 
 function removeGalleryGraphCard(graphId) {
+  state.graphGalleryRenderers.get(String(graphId))?.destroy();
+  state.graphGalleryRenderers.delete(String(graphId));
   [...graphGalleryEl.querySelectorAll("[data-gallery-graph-id]")].forEach((card) => {
     if (card.dataset.galleryGraphId === graphId) card.remove();
   });
@@ -875,17 +932,25 @@ function setAnalysisMessage(text, kind = "") {
 }
 
 function resetAnalysisView() {
+  stopOverviewPolling();
+  state.overviewId = null;
+  state.overviewJob = null;
   state.analysisId = null;
   state.analysisResult = null;
+  state.overviewAnalysisId = null;
   state.graphId = null;
   state.graph = null;
   state.graphs = [];
   state.analysisGraphSaveState = null;
-  state.graphSavePromptedForAnalysis = null;
   state.graphSaveDialogAction = null;
   state.pendingGraphDeletion = null;
   state.pendingPatches.clear();
+  destroyGraphGalleryRenderers();
+  state.conceptGraphRenderer?.destroy();
+  state.conceptGraphRenderer = null;
+  state.overviewSavePromptedForId = null;
   closeDialog(graphSaveDialog);
+  closeDialog(overviewSaveDialog);
   closeDialog(graphDeleteDialog);
   analysisProviderEl.textContent = "分析中…";
   paperCountEl.textContent = "0 篇";
@@ -908,6 +973,8 @@ function resetAnalysisView() {
   graphNameInput.value = "";
   graphRootInput.innerHTML = "";
   analysisGraphSaveActionsEl?.classList.add("hidden");
+  analysisOverviewActionsEl?.classList.add("hidden");
+  if (createOverviewButton) createOverviewButton.disabled = false;
   saveAnalysisGraphButton && (saveAnalysisGraphButton.disabled = false);
   deleteCurrentGraphButton?.classList.add("hidden");
   innovationCardEl.classList.add("hidden");
@@ -926,6 +993,8 @@ function resetAnalysisView() {
   renderPatches();
   graphGalleryEl.innerHTML = '<p class="empty">正在读取概念图列表…</p>';
   setGraphGalleryMessage("", "");
+  resetOverviewView();
+  renderOverviewHistory();
 }
 
 function renderExplanation(result) {
@@ -1684,23 +1753,50 @@ ideaCheckForm.addEventListener("submit", async (event) => {
   }
 });
 
-function graphDepths(graph) {
-  const parentByNode = {};
-  graph.edges.filter((edge) => ["is_a", "part_of"].includes(edge.relation)).forEach((edge) => {
-    parentByNode[edge.target] = edge.source;
-  });
-  const depths = {};
-  const depthOf = (nodeId, seen = new Set()) => {
-    if (nodeId === graph.root_id || seen.has(nodeId)) return 0;
-    // Non-hierarchical relations still belong below the root in the compact
-    // first-version renderer. They are shown as relations, not mistaken for
-    // additional roots.
-    if (!parentByNode[nodeId]) return 1;
-    seen.add(nodeId);
-    return 1 + depthOf(parentByNode[nodeId], seen);
-  };
-  graph.nodes.forEach((node) => { depths[node.id] = depthOf(node.id); });
-  return depths;
+function renderGraphInspector(node, relatedEdges = []) {
+  const inspector = document.querySelector("#concept-graph-inspector");
+  if (!inspector || !window.WishForgeGraph?.inspectorMarkup) return;
+  state.conceptGraphSelectedNodeId = node?.id || null;
+  const requestedGraphId = state.graphId;
+  const requestedNodeId = node?.id || null;
+  const evidenceById = new Map((state.analysisResult?.evidence || []).map((item) => [item.id, item]));
+  const enriched = node ? {
+    ...node,
+    evidence_cards: (node.evidence_ids || []).map((id) => evidenceById.get(id)).filter(Boolean),
+  } : node;
+  inspector.innerHTML = window.WishForgeGraph.inspectorMarkup(enriched, relatedEdges)
+    + (node ? `
+      <div class="graph-inspector-actions">
+        ${node.editable ? `<button type="button" class="secondary node-edit" data-node-id="${escapeHtml(node.id)}">编辑节点</button>` : ""}
+        <button type="button" class="secondary node-explain" data-node-explain="${escapeHtml(node.id)}">生成 AI 解释提案</button>
+      </div>
+    ` : "");
+  inspector.classList.remove("hidden");
+  if (node && isSavedGraph(state.graph)) {
+    apiFetch(`/api/v1/graphs/${encodeURIComponent(state.graphId)}/nodes/${encodeURIComponent(node.id)}`)
+      .then(async (response) => (response.ok ? response.json() : null))
+      .then((detail) => {
+        if (!detail
+          || state.graphId !== requestedGraphId
+          || state.conceptGraphSelectedNodeId !== requestedNodeId) return;
+        const currentInspector = document.querySelector("#concept-graph-inspector");
+        if (!currentInspector) return;
+        const detailedNode = {
+          ...detail.node,
+          evidence_cards: detail.evidence || [],
+          source_papers: detail.papers || [],
+          inspector_warnings: detail.warnings || [],
+        };
+        currentInspector.innerHTML = window.WishForgeGraph.inspectorMarkup(
+          detailedNode, detail.related_edges || relatedEdges,
+        ) + `
+          <div class="graph-inspector-actions">
+            ${detailedNode.editable ? `<button type="button" class="secondary node-edit" data-node-id="${escapeHtml(detailedNode.id)}">编辑节点</button>` : ""}
+            <button type="button" class="secondary node-explain" data-node-explain="${escapeHtml(detailedNode.id)}">生成 AI 解释提案</button>
+          </div>`;
+      })
+      .catch(() => {});
+  }
 }
 
 function renderGraph(graph) {
@@ -1719,30 +1815,112 @@ function renderGraph(graph) {
     .map((node) => `<option value="${escapeHtml(node.id)}">${escapeHtml(node.label)}</option>`)
     .join("");
   graphRootInput.value = graph.root_id;
-  const depths = graphDepths(graph);
-  const relationsByTarget = {};
-  graph.edges.forEach((edge) => {
-    const relations = relationsByTarget[edge.target] || [];
-    relations.push(edge.relation);
-    relationsByTarget[edge.target] = relations;
-  });
-  const nodes = [...graph.nodes].sort((a, b) => (depths[a.id] - depths[b.id]) || a.label.localeCompare(b.label));
-  graphEl.innerHTML = nodes.map((node) => `
-    <div class="graph-node node-${escapeHtml(node.node_type)}" style="--depth:${Math.min(depths[node.id], 4)}">
-      <div class="node-content">
-        <div>
-          <span class="node-type">${escapeHtml(node.node_type)}</span>
-          <h3>${escapeHtml(node.label)}</h3>
-          <p>${escapeHtml(node.summary || "暂无说明")}</p>
-        </div>
-        <div class="node-actions">
-          ${saved && node.editable ? `<button type="button" class="node-edit" data-node-id="${escapeHtml(node.id)}">编辑</button>` : ""}
-          ${saved ? `<button type="button" class="node-explain" data-node-explain="${escapeHtml(node.id)}">AI解释</button>` : ""}
-        </div>
+  if (!window.WishForgeGraph?.createGraphRenderer) {
+    graphEl.innerHTML = '<p class="error-text">图形渲染模块未加载，请通过 Vite 开发服务器或构建后的桌面资源打开应用。</p>';
+    return;
+  }
+  const inspectorId = "concept-graph-inspector";
+  let canvas = graphEl.querySelector(".concept-graph-canvas");
+  let inspector = graphEl.querySelector(`#${inspectorId}`);
+  if (!canvas || !inspector) {
+    state.conceptGraphRenderer?.destroy();
+    state.conceptGraphRenderer = null;
+    graphEl.className = "interactive-graph-shell";
+    graphEl.innerHTML = `
+      <div class="graph-toolbar concept-graph-toolbar">
+        <label class="graph-filter-control">
+          <span class="sr-only">搜索节点</span>
+          <input type="search" data-concept-graph-search placeholder="搜索概念、方法或论文" autocomplete="off" />
+        </label>
+        <label class="graph-filter-control graph-role-control">
+          <span class="sr-only">按节点类型筛选</span>
+          <select data-concept-graph-role aria-label="按节点类型筛选">
+            <option value="">全部节点</option>
+            <option value="root">根节点</option>
+            <option value="concept">概念</option>
+            <option value="method">方法</option>
+            <option value="problem">问题</option>
+            <option value="direction">研究方向</option>
+            <option value="paper">论文</option>
+            <option value="idea">想法</option>
+            <option value="note">注释</option>
+          </select>
+        </label>
+        <button type="button" class="secondary" data-concept-graph-fit>适应画布</button>
+        <button type="button" class="secondary" data-concept-graph-save-layout ${saved ? "" : "disabled"}>保存布局</button>
+        <button type="button" class="secondary" data-concept-graph-low-confidence aria-pressed="true">隐藏低置信边</button>
+        <span class="settings-note">滚轮缩放 · 空白处拖动 · 节点可拖拽</span>
       </div>
-      ${relationsByTarget[node.id] ? `<small class="node-relation">${escapeHtml(relationsByTarget[node.id].join(" · "))}</small>` : ""}
-    </div>
-  `).join("");
+      <div class="concept-graph-layout">
+        <div class="concept-graph-canvas" aria-label="概念关系图"></div>
+        <aside id="${inspectorId}" class="graph-inspector compact-inspector">
+          <div class="graph-inspector-empty"><span>◎</span><p>点击圆形节点查看解释、证据与关系。</p></div>
+        </aside>
+      </div>
+    `;
+    canvas = graphEl.querySelector(".concept-graph-canvas");
+    inspector = graphEl.querySelector(`#${inspectorId}`);
+    state.conceptGraphRenderer = window.WishForgeGraph.createGraphRenderer(canvas, {
+      graph,
+      kind: graph.graph_kind || "concept_network",
+      onNodeSelect: renderGraphInspector,
+    });
+    const applyGraphFilter = () => {
+      const query = graphEl.querySelector("[data-concept-graph-search]")?.value || "";
+      const role = graphEl.querySelector("[data-concept-graph-role]")?.value || "";
+      state.conceptGraphRenderer?.filter({ query, roles: role ? [role] : [] });
+    };
+    graphEl.querySelector("[data-concept-graph-search]")?.addEventListener("input", applyGraphFilter);
+    graphEl.querySelector("[data-concept-graph-search]")?.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      const role = graphEl.querySelector("[data-concept-graph-role]")?.value || "";
+      const count = state.conceptGraphRenderer?.focusMatches({
+        query: event.currentTarget.value,
+        roles: role ? [role] : [],
+      }) || 0;
+      setGraphMessage(count ? `找到 ${count} 个匹配节点。` : "没有找到匹配节点。", count ? "" : "error-text");
+    });
+    graphEl.querySelector("[data-concept-graph-role]")?.addEventListener("change", applyGraphFilter);
+    graphEl.querySelector("[data-concept-graph-fit]")?.addEventListener("click", () => state.conceptGraphRenderer?.fit());
+    graphEl.querySelector("[data-concept-graph-save-layout]")?.addEventListener("click", async (event) => {
+      if (!isSavedGraph(state.graph)) return;
+      const button = event.currentTarget;
+      button.disabled = true;
+      try {
+        const response = await apiFetch(`/api/v1/graphs/${encodeURIComponent(state.graphId)}/layout`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            expected_version: state.graph.version,
+            positions: state.conceptGraphRenderer.savePositions().map((item) => ({
+              node_id: item.id, x: item.x, y: item.y,
+            })),
+            layout_algorithm: "preset",
+          }),
+        });
+        if (!response.ok) throw new Error(await response.text());
+        renderGraph(await response.json());
+        setGraphMessage("布局已保存；重新打开图时会恢复节点位置。", "");
+      } catch (error) {
+        setGraphMessage(`布局保存失败：${error.message}`, "error-text");
+      } finally {
+        button.disabled = false;
+      }
+    });
+    graphEl.querySelector("[data-concept-graph-low-confidence]")?.addEventListener("click", (event) => {
+      const button = event.currentTarget;
+      const visible = button.getAttribute("aria-pressed") !== "true";
+      button.setAttribute("aria-pressed", String(visible));
+      button.textContent = visible ? "隐藏低置信边" : "显示低置信边";
+      state.conceptGraphRenderer?.setLowConfidenceVisible(visible);
+    });
+  } else {
+    state.conceptGraphSelectedNodeId = null;
+    state.conceptGraphRenderer?.update(graph, { kind: graph.graph_kind || "concept_network" });
+    inspector.innerHTML = '<div class="graph-inspector-empty"><span>◎</span><p>点击圆形节点查看解释、证据与关系。</p></div>';
+  }
+  window.requestAnimationFrame(() => state.conceptGraphRenderer?.fit());
 }
 
 function setGraphMessage(text, kind = "") {
@@ -1764,7 +1942,13 @@ async function refreshGraph() {
   if (!graphResponse.ok) throw new Error("graph request failed");
   renderGraph(await graphResponse.json());
   if (transientAnalysis) {
-    state.pendingPatches.clear();
+    const patchesResponse = await apiFetch(
+      `/api/v1/analyses/${encodeURIComponent(state.analysisId)}/graph/patches`,
+    );
+    const patches = patchesResponse.ok ? await patchesResponse.json() : [];
+    state.pendingPatches = new Map(
+      patches.filter((patch) => patch.status === "proposed").map((patch) => [patch.id, patch]),
+    );
     renderPatches();
     await loadGraphPicker(null);
     return;
@@ -1792,6 +1976,7 @@ async function loadGraphPicker(selectedId = state.graphId) {
     [...graphGalleryPickerEl.selectedOptions].map((option) => option.value),
   );
   if (!graphs.length) {
+    destroyGraphGalleryRenderers();
     graphPickerEl.classList.add("hidden");
     graphComparePickerEl.innerHTML = '<option disabled>完成分析后这里会出现概念图</option>';
     graphGalleryPickerEl.innerHTML = '<option disabled>完成分析后这里会出现概念图</option>';
@@ -1895,32 +2080,8 @@ function setGraphGalleryMessage(text, kind = "") {
   graphGalleryMessageEl.className = `form-message ${kind}`;
 }
 
-function renderGraphNodesMarkup(graph, compact = false) {
-  const depths = graphDepths(graph);
-  const relationsByTarget = {};
-  graph.edges.forEach((edge) => {
-    const relations = relationsByTarget[edge.target] || [];
-    relations.push(edge.relation);
-    relationsByTarget[edge.target] = relations;
-  });
-  const nodes = [...graph.nodes].sort(
-    (a, b) => (depths[a.id] - depths[b.id]) || a.label.localeCompare(b.label),
-  );
-  return nodes.map((node) => `
-    <div class="graph-node gallery-node node-${escapeHtml(node.node_type)}" style="--depth:${Math.min(depths[node.id], compact ? 3 : 4)}">
-      <div class="node-content">
-        <div>
-          <span class="node-type">${escapeHtml(node.node_type)}</span>
-          <h3>${escapeHtml(node.label)}</h3>
-          <p>${escapeHtml(node.summary || "暂无说明")}</p>
-        </div>
-      </div>
-      ${relationsByTarget[node.id] ? `<small class="node-relation">${escapeHtml(relationsByTarget[node.id].join(" · "))}</small>` : ""}
-    </div>
-  `).join("");
-}
-
 function renderGraphGallery(graphs, warnings = []) {
+  destroyGraphGalleryRenderers();
   if (!graphs.length) {
     graphGalleryEl.innerHTML = '<p class="empty">没有可显示的概念图。</p>';
     return;
@@ -1942,11 +2103,27 @@ function renderGraphGallery(graphs, warnings = []) {
             </div>
           </div>
           <p class="graph-gallery-description">${escapeHtml(graph.description || "暂无描述")}</p>
-          <div class="graph-gallery-tree">${renderGraphNodesMarkup(graph, true)}</div>
+          <div class="graph-gallery-real-canvas" data-gallery-canvas="${escapeHtml(graph.id)}" aria-label="${escapeHtml(graph.name)}关系图"></div>
         </article>
       `).join("")}
     </div>
   `;
+  graphs.forEach((graph) => {
+    const container = graphGalleryEl.querySelector(`[data-gallery-canvas="${CSS.escape(String(graph.id))}"]`);
+    if (!container || !window.WishForgeGraph?.createGraphRenderer) return;
+    const renderer = window.WishForgeGraph.createGraphRenderer(container, {
+      graph,
+      kind: graph.graph_kind || "concept_network",
+      onNodeSelect: () => {},
+    });
+    state.graphGalleryRenderers.set(String(graph.id), renderer);
+    window.requestAnimationFrame(() => renderer.fit());
+  });
+}
+
+function destroyGraphGalleryRenderers() {
+  state.graphGalleryRenderers.forEach((renderer) => renderer.destroy());
+  state.graphGalleryRenderers.clear();
 }
 
 async function loadGalleryGraph(graphId, nodeIds) {
@@ -1965,7 +2142,7 @@ graphGalleryForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const graphIds = [...graphGalleryPickerEl.selectedOptions].map((option) => option.value);
   if (!graphIds.length) {
-    setGraphGalleryMessage("请至少选择一棵概念图。", "error-text");
+    setGraphGalleryMessage("请至少选择一张概念图。", "error-text");
     return;
   }
   const nodeIds = graphGalleryNodesInput.value.split(",").map((value) => value.trim()).filter(Boolean);
@@ -1984,7 +2161,7 @@ graphGalleryForm.addEventListener("submit", async (event) => {
     });
     if (!graphs.length) throw new Error(warnings[warnings.length - 1] || "没有可显示的概念图");
     renderGraphGallery(graphs, warnings);
-    setGraphGalleryMessage(`已显示 ${graphs.length} 棵概念图。`, "");
+    setGraphGalleryMessage(`已显示 ${graphs.length} 张概念图。`, "");
   } catch (error) {
     setGraphGalleryMessage(`多图视图加载失败：${error.message}`, "error-text");
   } finally {
@@ -2069,10 +2246,11 @@ graphDeleteDialog?.addEventListener("click", (event) => {
 
 async function applyUserPatch(operations, reason) {
   if (!state.graphId) return;
-  if (!isSavedGraph(state.graph)) {
-    throw new Error("临时概念图尚未保存。请先保存概念图，再编辑节点结构。");
-  }
-  const response = await apiFetch(`/api/v1/graphs/${encodeURIComponent(state.graphId)}/patches`, {
+  const transient = isTransientAnalysisGraph();
+  const endpoint = transient
+    ? `/api/v1/analyses/${encodeURIComponent(state.analysisId)}/graph/patches`
+    : `/api/v1/graphs/${encodeURIComponent(state.graphId)}/patches`;
+  const response = await apiFetch(endpoint, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -2128,11 +2306,12 @@ function describeOperation(operation) {
 
 async function reviewPatch(patchId, action) {
   if (!state.graphId) return;
-  if (!isSavedGraph(state.graph)) {
-    throw new Error("临时概念图尚未保存，不能审核结构修改提案。");
-  }
+  const transient = isTransientAnalysisGraph();
+  const prefix = transient
+    ? `/api/v1/analyses/${encodeURIComponent(state.analysisId)}/graph`
+    : `/api/v1/graphs/${encodeURIComponent(state.graphId)}`;
   const response = await apiFetch(
-    `/api/v1/graphs/${encodeURIComponent(state.graphId)}/patches/${encodeURIComponent(patchId)}/${action}`,
+    `${prefix}/patches/${encodeURIComponent(patchId)}/${action}`,
     { method: "POST" },
   );
   if (!response.ok) {
@@ -2157,10 +2336,6 @@ patchesEl.addEventListener("click", async (event) => {
 
 async function proposeAgentPatch() {
   if (!state.graph || !state.graphId) return;
-  if (!isSavedGraph(state.graph)) {
-    setGraphMessage("临时概念图需要先保存，才能生成 Agent 修改提案。", "error-text");
-    return;
-  }
   const hasAttention = state.graph.nodes.some((node) => /attention|注意力/i.test(node.label));
   const label = hasAttention ? "FlashAttention" : "待验证的跨领域方法";
   if (state.graph.nodes.some((node) => node.label === label)) {
@@ -2169,7 +2344,10 @@ async function proposeAgentPatch() {
   }
   const nodeId = `agent-${Date.now()}`;
   const edgeId = `agent-edge-${Date.now()}`;
-  const response = await apiFetch(`/api/v1/graphs/${encodeURIComponent(state.graphId)}/patches`, {
+  const endpoint = isTransientAnalysisGraph()
+    ? `/api/v1/analyses/${encodeURIComponent(state.analysisId)}/graph/patches`
+    : `/api/v1/graphs/${encodeURIComponent(state.graphId)}/patches`;
+  const response = await apiFetch(endpoint, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -2212,11 +2390,6 @@ agentProposeButton.addEventListener("click", () => {
 graphAgentForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   if (!state.graphId || !state.graph) return;
-  if (!isSavedGraph(state.graph)) {
-    graphAgentMessageEl.textContent = "请先保存临时概念图，再生成 Agent 修改提案。";
-    graphAgentMessageEl.className = "form-message error-text";
-    return;
-  }
   const request = graphAgentRequestInput.value.trim();
   if (!request) {
     graphAgentMessageEl.textContent = "请先写下想怎样修改概念图。";
@@ -2227,7 +2400,10 @@ graphAgentForm.addEventListener("submit", async (event) => {
   graphAgentMessageEl.textContent = "正在把自然语言请求转换成受限提案…";
   graphAgentMessageEl.className = "form-message";
   try {
-    const response = await apiFetch(`/api/v1/graphs/${encodeURIComponent(state.graphId)}/agent-patch`, {
+    const endpoint = isTransientAnalysisGraph()
+      ? `/api/v1/analyses/${encodeURIComponent(state.analysisId)}/graph/agent-patch`
+      : `/api/v1/graphs/${encodeURIComponent(state.graphId)}/agent-patch`;
+    const response = await apiFetch(endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ request, base_version: state.graph.version, max_operations: 4 }),
@@ -2280,14 +2456,13 @@ graphMetaForm.addEventListener("submit", async (event) => {
 graphEl.addEventListener("click", async (event) => {
   const explainButton = event.target.closest("[data-node-explain]");
   if (explainButton && state.graph) {
-    if (!isSavedGraph(state.graph)) {
-      setGraphMessage("请先保存临时概念图，再生成节点解释提案。", "error-text");
-      return;
-    }
     const nodeId = explainButton.dataset.nodeExplain;
     try {
+      const prefix = isTransientAnalysisGraph()
+        ? `/api/v1/analyses/${encodeURIComponent(state.analysisId)}/graph`
+        : `/api/v1/graphs/${encodeURIComponent(state.graphId)}`;
       const response = await apiFetch(
-        `/api/v1/graphs/${encodeURIComponent(state.graphId)}/nodes/${encodeURIComponent(nodeId)}/explanation-patch`,
+        `${prefix}/nodes/${encodeURIComponent(nodeId)}/explanation-patch`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -2342,6 +2517,565 @@ nodeForm.addEventListener("submit", async (event) => {
   }
 });
 
+const overviewStageLabels = {
+  direction_planning: "规划一级研究方向",
+  direction_research: "并行调研各研究方向",
+  direction_expansion: "判断方向是否需要继续细分",
+  paper_reading: "阅读论文摘要与可用章节",
+  direction_validation: "核对论文归属与证据",
+  graph_synthesis: "合成研究方向图",
+  statistics_layout: "计算活跃度、新旧程度与布局",
+  completed: "研究方向图已生成",
+};
+
+function setOverviewActionMessage(text, kind = "") {
+  if (!overviewActionMessageEl) return;
+  overviewActionMessageEl.textContent = text;
+  overviewActionMessageEl.className = `form-message ${kind}`;
+}
+
+function overviewHistoryLabel(job) {
+  const graph = overviewResult(job)?.graph;
+  const title = graph?.name || `分析 ${String(job?.analysis_id || "").slice(0, 8) || "未知"}`;
+  const status = {
+    queued: "排队中",
+    running: "生成中",
+    partial: "部分完成",
+    succeeded: "已完成",
+    failed: "失败",
+    interrupted: "已中断",
+  }[job?.status] || job?.status || "未知状态";
+  const timestamp = Date.parse(job?.updated_at || job?.created_at || "");
+  const updated = Number.isFinite(timestamp)
+    ? new Intl.DateTimeFormat("zh-CN", {
+      month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit",
+    }).format(new Date(timestamp))
+    : "时间未知";
+  return `${title} · ${status} · ${updated}`;
+}
+
+function renderOverviewHistory() {
+  if (!overviewHistorySelectEl) return;
+  const jobs = state.overviewJobs || [];
+  if (!jobs.length) {
+    overviewHistorySelectEl.innerHTML = '<option value="">暂无历史任务</option>';
+    overviewHistorySelectEl.disabled = true;
+    if (overviewHistoryStatusEl) overviewHistoryStatusEl.textContent = "暂无可恢复的研究方向图任务。";
+    return;
+  }
+  overviewHistorySelectEl.innerHTML = `
+    <option value="">选择一个历史任务</option>
+    ${jobs.map((job) => `
+    <option value="${escapeHtml(job.id)}">${escapeHtml(overviewHistoryLabel(job))}</option>
+    `).join("")}
+  `;
+  overviewHistorySelectEl.disabled = false;
+  overviewHistorySelectEl.value = jobs.some((job) => String(job.id) === String(state.overviewId))
+    ? String(state.overviewId)
+    : "";
+  if (overviewHistoryStatusEl) {
+    overviewHistoryStatusEl.textContent = `${jobs.length} 个历史任务；选择后可恢复图、进度和保存状态。`;
+  }
+}
+
+function stopOverviewPolling() {
+  if (state.overviewPollTimer) window.clearTimeout(state.overviewPollTimer);
+  state.overviewPollTimer = null;
+}
+
+async function openOverviewJob(jobOrId, { promptSave = false } = {}) {
+  const requestedId = String(typeof jobOrId === "object" ? jobOrId?.id : jobOrId || "");
+  if (!requestedId) return null;
+  stopOverviewPolling();
+  const response = typeof jobOrId === "object"
+    ? null
+    : await apiFetch(`/api/v1/overviews/${encodeURIComponent(requestedId)}`);
+  if (response && !response.ok) throw new Error(await response.text());
+  const job = response ? await response.json() : jobOrId;
+  if (!job?.id || String(job.id) !== requestedId) throw new Error("Overview 历史任务响应无效");
+  state.overviewId = requestedId;
+  state.overviewJob = job;
+  state.overviewAnalysisId = String(job.analysis_id || "") || null;
+  state.overviewSelectedNodeId = null;
+  state.overviewSavePromptedForId = promptSave ? null : requestedId;
+  renderOverviewHistory();
+  renderOverviewStatus(job);
+  const result = overviewResult(job);
+  if (result?.graph) {
+    state.overviewRenderer?.destroy();
+    state.overviewRenderer = null;
+    state.overviewLowConfidenceVisible = true;
+    if (overviewToggleEdgesButton) {
+      overviewToggleEdgesButton.setAttribute("aria-pressed", "true");
+      overviewToggleEdgesButton.textContent = "隐藏低置信边";
+    }
+    renderOverviewGraph(result);
+  } else {
+    state.overviewGraph = null;
+    state.overviewRenderer?.destroy();
+    state.overviewRenderer = null;
+    resetOverviewView({ preserveJobStatus: true });
+    renderOverviewStatus(job);
+  }
+  if (["queued", "running"].includes(job.status)) {
+    await pollOverview(requestedId);
+  } else if (promptSave) {
+    maybePromptOverviewSave(job);
+  }
+  return job;
+}
+
+async function loadOverviewHistory({ autoOpen = false } = {}) {
+  if (state.overviewHistoryLoading) return state.overviewJobs;
+  state.overviewHistoryLoading = true;
+  overviewHistoryRefreshButton && (overviewHistoryRefreshButton.disabled = true);
+  if (overviewHistoryStatusEl) overviewHistoryStatusEl.textContent = "正在读取历史任务…";
+  try {
+    const response = await apiFetch("/api/v1/overviews");
+    if (!response.ok) throw new Error(await response.text());
+    const payload = await response.json();
+    const jobs = Array.isArray(payload) ? payload : Array.isArray(payload?.items) ? payload.items : [];
+    state.overviewJobs = jobs;
+    state.overviewHistoryLoaded = true;
+    renderOverviewHistory();
+    if (autoOpen && !state.overviewId && jobs.length) {
+      await openOverviewJob(jobs[0], { promptSave: false });
+    }
+    return jobs;
+  } catch (error) {
+    state.overviewHistoryLoaded = false;
+    if (overviewHistoryStatusEl) overviewHistoryStatusEl.textContent = `历史任务读取失败：${error.message}`;
+    throw error;
+  } finally {
+    state.overviewHistoryLoading = false;
+    if (overviewHistoryRefreshButton) overviewHistoryRefreshButton.disabled = false;
+  }
+}
+
+function resetOverviewView({ preserveJobStatus = false } = {}) {
+  if (!preserveJobStatus) {
+    state.overviewId = null;
+    state.overviewJob = null;
+  }
+  state.overviewGraph = null;
+  state.overviewSelectedNodeId = null;
+  state.overviewLowConfidenceVisible = true;
+  state.overviewRenderer?.destroy();
+  state.overviewRenderer = null;
+  if (overviewStateTagEl) {
+    overviewStateTagEl.textContent = "等待生成";
+    overviewStateTagEl.className = "tag tag-beta";
+  }
+  if (overviewStageTitleEl) overviewStageTitleEl.textContent = "先在工作台完成一次文献或研究分析";
+  if (overviewStatusMessageEl) overviewStatusMessageEl.textContent = "分析至少包含一篇有效论文后，点击 Overview 按钮开始生成。";
+  if (overviewProgressLabelEl) overviewProgressLabelEl.textContent = "0%";
+  if (overviewCountsEl) overviewCountsEl.textContent = "0 个方向 · 0 篇论文";
+  if (overviewProgressBarEl) overviewProgressBarEl.style.width = "0%";
+  overviewRetryButton?.classList.add("hidden");
+  overviewSaveLaterButton?.classList.add("hidden");
+  overviewSaveButton?.classList.add("hidden");
+  if (overviewFitButton) overviewFitButton.disabled = true;
+  if (overviewToggleEdgesButton) overviewToggleEdgesButton.disabled = true;
+  if (overviewToggleEdgesButton) {
+    overviewToggleEdgesButton.setAttribute("aria-pressed", "true");
+    overviewToggleEdgesButton.textContent = "隐藏低置信边";
+  }
+  overviewLegendEl?.classList.add("hidden");
+  overviewWarningsEl?.classList.add("hidden");
+  if (overviewWarningsEl) overviewWarningsEl.innerHTML = "";
+  if (overviewCanvasEl && !state.overviewRenderer) {
+    overviewCanvasEl.innerHTML = '<div class="graph-canvas-placeholder"><span>⌁</span><p>生成后可缩放、平移和拖拽节点；点击节点可查看证据详情。</p></div>';
+  }
+  if (overviewInspectorEl) overviewInspectorEl.innerHTML = window.WishForgeGraph?.inspectorMarkup?.(null) || '<p class="empty">点击节点查看详情。</p>';
+  setOverviewActionMessage("", "");
+}
+
+function overviewResult(job = state.overviewJob) {
+  if (!job || typeof job !== "object") return null;
+  if (job.result?.graph) return job.result;
+  if (job.graph?.nodes) return { graph: job.graph, warnings: job.warnings || [], legend: job.legend || {} };
+  return null;
+}
+
+function renderOverviewStatus(job) {
+  const result = overviewResult(job);
+  const progress = Math.min(100, Math.max(0, Number(job?.progress) || 0));
+  const status = job?.status || "queued";
+  const stage = job?.stage || "direction_planning";
+  const statusLabels = {
+    queued: "排队中",
+    running: "生成中",
+    partial: "部分完成",
+    succeeded: "已完成",
+    failed: "失败",
+    interrupted: "已中断",
+  };
+  if (overviewStateTagEl) {
+    overviewStateTagEl.textContent = statusLabels[status] || status;
+    overviewStateTagEl.className = `tag ${["failed", "interrupted"].includes(status) ? "tag-missing" : ["succeeded", "partial"].includes(status) ? "tag-configured" : "tag-beta"}`;
+  }
+  if (overviewStageTitleEl) overviewStageTitleEl.textContent = overviewStageLabels[stage] || "正在生成研究方向图";
+  if (overviewStatusMessageEl) {
+    overviewStatusMessageEl.textContent = job?.error
+      ? `生成未完成：${job.error}`
+      : job?.message || "多 Agent 正在整理研究方向和论文证据。";
+  }
+  if (overviewProgressLabelEl) overviewProgressLabelEl.textContent = `${progress}%`;
+  if (overviewProgressBarEl) overviewProgressBarEl.style.width = `${progress}%`;
+  if (overviewCountsEl) {
+    overviewCountsEl.textContent = `${Number(result?.direction_count) || 0} 个方向 · ${Number(result?.paper_count) || 0} 篇论文`;
+  }
+  const canRegenerate = ["failed", "interrupted", "partial"].includes(status);
+  overviewRetryButton?.classList.toggle("hidden", !canRegenerate);
+  if (overviewRetryButton) overviewRetryButton.textContent = status === "partial" ? "重新生成全部方向" : "重新生成";
+  const hasGraph = Boolean(result?.graph?.nodes?.length);
+  const saved = job?.save_state === "saved" || Boolean(job?.saved_graph_id);
+  overviewSaveButton?.classList.toggle("hidden", !hasGraph || saved);
+  overviewSaveLaterButton?.classList.toggle("hidden", !hasGraph || saved);
+  if (saved && overviewSaveButton) overviewSaveButton.classList.add("hidden");
+}
+
+function renderOverviewWarnings(warnings = []) {
+  if (!overviewWarningsEl) return;
+  const unique = [...new Set(warnings.filter(Boolean))];
+  overviewWarningsEl.classList.toggle("hidden", !unique.length);
+  const failedAudits = (overviewResult()?.direction_audits || []).filter((audit) => audit.error);
+  overviewWarningsEl.classList.toggle("hidden", !unique.length && !failedAudits.length);
+  overviewWarningsEl.innerHTML = (!unique.length && !failedAudits.length) ? "" : `
+    ${unique.length ? `<div class="warning-box"><strong>范围与证据提示</strong><ul>${unique.map((warning) => `<li>${escapeHtml(friendlyAnalysisWarning(warning))}</li>`).join("")}</ul></div>` : ""}
+    ${failedAudits.length ? `<div class="warning-box"><strong>失败方向</strong><ul>${failedAudits.map((audit) => `
+      <li>
+        <span>${escapeHtml(audit.label)}：${escapeHtml(audit.error)}</span>
+        <button type="button" class="secondary overview-retry-direction" data-overview-retry-direction="${escapeHtml(audit.direction_key)}">只重试这个方向</button>
+      </li>
+    `).join("")}</ul></div>` : ""}
+  `;
+  overviewWarningsEl.querySelectorAll("[data-overview-retry-direction]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      if (!state.overviewId || !state.overviewGraph) return;
+      button.disabled = true;
+      try {
+        const directionKey = button.dataset.overviewRetryDirection;
+        const response = await apiFetch(
+          `/api/v1/overviews/${encodeURIComponent(state.overviewId)}/directions/${encodeURIComponent(directionKey)}/retry`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ expected_version: state.overviewGraph.version }),
+          },
+        );
+        if (!response.ok) throw new Error(await response.text());
+        state.overviewJob = await response.json();
+        renderOverviewStatus(state.overviewJob);
+        renderOverviewGraph(overviewResult());
+        setOverviewActionMessage("该失败方向已单独重试，其他成功方向保持不变。", "");
+      } catch (error) {
+        setOverviewActionMessage(`方向重试失败：${error.message}`, "error-text");
+      } finally {
+        button.disabled = false;
+      }
+    });
+  });
+}
+
+function renderOverviewInspector(node, relatedEdges = []) {
+  if (!overviewInspectorEl || !window.WishForgeGraph?.inspectorMarkup) return;
+  state.overviewSelectedNodeId = node?.id || null;
+  const result = overviewResult();
+  const evidenceById = new Map([
+    ...(state.analysisResult?.evidence || []),
+    ...(result?.evidence || []),
+  ].map((item) => [item.id, item]));
+  const enriched = node ? {
+    ...node,
+    evidence_cards: (node.evidence_ids || []).map((id) => evidenceById.get(id)).filter(Boolean),
+  } : node;
+  overviewInspectorEl.innerHTML = window.WishForgeGraph.inspectorMarkup(enriched, relatedEdges, {
+    allowExpand: (node?.role || node?.node_type) === "direction"
+      && ["succeeded", "partial"].includes(state.overviewJob?.status),
+  });
+  const expandButton = overviewInspectorEl.querySelector("[data-overview-expand-node]");
+  if (expandButton && node?.id) {
+    expandButton.addEventListener("click", () => expandOverviewDirection(node.id));
+  }
+  const requestedOverviewId = state.overviewId;
+  const requestedNodeId = node?.id || null;
+  if (node?.id && state.overviewId) {
+    apiFetch(`/api/v1/overviews/${encodeURIComponent(state.overviewId)}/nodes/${encodeURIComponent(node.id)}`)
+      .then(async (response) => (response.ok ? response.json() : null))
+      .then((detail) => {
+        if (!detail
+          || state.overviewId !== requestedOverviewId
+          || state.overviewSelectedNodeId !== requestedNodeId) return;
+        const detailedNode = {
+          ...detail.node,
+          evidence_cards: detail.evidence || [],
+          source_papers: detail.papers || [],
+          inspector_warnings: detail.warnings || [],
+        };
+        overviewInspectorEl.innerHTML = window.WishForgeGraph.inspectorMarkup(
+          detailedNode,
+          detail.related_edges || relatedEdges,
+          {
+            allowExpand: (detailedNode.role || detailedNode.node_type) === "direction"
+              && ["succeeded", "partial"].includes(state.overviewJob?.status),
+          },
+        );
+        overviewInspectorEl.querySelector("[data-overview-expand-node]")?.addEventListener(
+          "click",
+          () => expandOverviewDirection(detailedNode.id),
+        );
+      })
+      .catch(() => {});
+  }
+}
+
+function renderOverviewGraph(result) {
+  const graph = result?.graph;
+  if (!graph?.nodes?.length || !window.WishForgeGraph?.createGraphRenderer) return;
+  state.overviewGraph = graph;
+  if (overviewGraphTitleEl) overviewGraphTitleEl.textContent = graph.name || "研究方向与论文";
+  if (!state.overviewRenderer) {
+    overviewCanvasEl.innerHTML = "";
+    state.overviewRenderer = window.WishForgeGraph.createGraphRenderer(overviewCanvasEl, {
+      graph,
+      kind: "research_direction",
+      onNodeSelect: renderOverviewInspector,
+    });
+  } else {
+    state.overviewRenderer.update(graph, { kind: "research_direction" });
+  }
+  state.overviewRenderer.setLowConfidenceVisible(state.overviewLowConfidenceVisible);
+  if (typeof window !== "undefined") {
+    window.WishForgeSmoke = Object.freeze({
+      overviewNodePositions: () => state.overviewRenderer?.visibleNodeScreenPositions?.() || [],
+    });
+  }
+  if (state.overviewSelectedNodeId) {
+    const selectedNode = graph.nodes.find((node) => node.id === state.overviewSelectedNodeId);
+    if (selectedNode) state.overviewRenderer.selectNode(selectedNode.id);
+    else renderOverviewInspector(null);
+  }
+  if (overviewFitButton) overviewFitButton.disabled = false;
+  if (overviewToggleEdgesButton) overviewToggleEdgesButton.disabled = false;
+  overviewLegendEl?.classList.remove("hidden");
+  const legend = result.legend || {};
+  if (overviewLegendNoteEl) {
+    overviewLegendNoteEl.textContent = [legend.heat_note, legend.recency_note]
+      .filter(Boolean)
+      .join(" ") || "热度只表示当前检索范围内的相对活跃度，不代表论文质量、正确性、创新性或全局影响力。";
+  }
+  renderOverviewWarnings([...(graph.warnings || []), ...(result.warnings || [])]);
+  window.requestAnimationFrame(() => state.overviewRenderer?.fit());
+}
+
+function maybePromptOverviewSave(job) {
+  if (!["succeeded", "partial"].includes(job?.status) || !overviewResult(job)?.graph) return;
+  if (job.save_state === "saved" || state.overviewSavePromptedForId === String(job.id)) return;
+  state.overviewSavePromptedForId = String(job.id);
+  window.requestAnimationFrame(() => showDialog(overviewSaveDialog));
+}
+
+async function pollOverview(id) {
+  if (!id || String(id) !== String(state.overviewId)) return;
+  if (state.overviewPollTimer) window.clearTimeout(state.overviewPollTimer);
+  const response = await apiFetch(`/api/v1/overviews/${encodeURIComponent(id)}`);
+  if (!response.ok) throw new Error(await response.text());
+  const job = await response.json();
+  if (String(id) !== String(state.overviewId)) return;
+  state.overviewJob = job;
+  const historyIndex = state.overviewJobs.findIndex((item) => String(item.id) === String(job.id));
+  if (historyIndex >= 0) state.overviewJobs.splice(historyIndex, 1, job);
+  else state.overviewJobs.unshift(job);
+  renderOverviewHistory();
+  renderOverviewStatus(job);
+  const result = overviewResult(job);
+  if (result?.graph) renderOverviewGraph(result);
+  if (["succeeded", "partial", "failed", "interrupted"].includes(job.status)) {
+    state.overviewPollTimer = null;
+    maybePromptOverviewSave(job);
+    return;
+  }
+  state.overviewPollTimer = window.setTimeout(() => {
+    pollOverview(id).catch((error) => {
+      setOverviewActionMessage(`无法读取 Overview 进度：${error.message}`, "error-text");
+      overviewRetryButton?.classList.remove("hidden");
+    });
+  }, 900);
+}
+
+async function createOverview({ force = false } = {}) {
+  const usesRestoredHistory = Boolean(state.overviewJob && state.overviewAnalysisId);
+  const analysisId = usesRestoredHistory ? state.overviewAnalysisId : state.analysisId;
+  if (!analysisId) {
+    navigateTo("workspace");
+    setAnalysisMessage("请先完成一次文献解释或研究线索分析。", "error-text");
+    return;
+  }
+  const canCreate = usesRestoredHistory || (
+    Boolean(state.analysisResult)
+    &&
+    ["literature", "research"].includes(state.analysisResult.level)
+    && (state.analysisResult.papers || []).length > 0
+  );
+  if (!canCreate) {
+    setAnalysisMessage("研究方向图需要文献解释或研究线索结果，并且至少包含一篇论文。", "error-text");
+    return;
+  }
+  if (state.overviewId && !force) {
+    navigateTo("research-overview");
+    window.requestAnimationFrame(() => state.overviewRenderer?.fit());
+    return;
+  }
+  createOverviewButton && (createOverviewButton.disabled = true);
+  overviewRetryButton && (overviewRetryButton.disabled = true);
+  setOverviewActionMessage("正在创建 Overview 任务…", "");
+  try {
+    const response = await apiFetch(`/api/v1/analyses/${encodeURIComponent(analysisId)}/overview`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ force_regenerate: force }),
+    });
+    if (!response.ok) throw new Error(await response.text());
+    const job = await response.json();
+    state.overviewId = String(job.id);
+    state.overviewAnalysisId = String(job.analysis_id || analysisId);
+    state.overviewJob = job;
+    const historyIndex = state.overviewJobs.findIndex((item) => String(item.id) === String(job.id));
+    if (historyIndex >= 0) state.overviewJobs.splice(historyIndex, 1, job);
+    else state.overviewJobs.unshift(job);
+    state.overviewHistoryLoaded = true;
+    renderOverviewHistory();
+    state.overviewSavePromptedForId = null;
+    if (createOverviewButton) createOverviewButton.textContent = "打开研究方向图";
+    navigateTo("research-overview");
+    renderOverviewStatus(job);
+    const result = overviewResult(job);
+    if (result?.graph) renderOverviewGraph(result);
+    await pollOverview(state.overviewId);
+  } catch (error) {
+    setOverviewActionMessage(`研究方向图创建失败：${error.message}`, "error-text");
+    setAnalysisMessage(`研究方向图创建失败：${error.message}`, "error-text");
+    overviewRetryButton?.classList.remove("hidden");
+  } finally {
+    if (createOverviewButton) createOverviewButton.disabled = false;
+    if (overviewRetryButton) overviewRetryButton.disabled = false;
+  }
+}
+
+async function expandOverviewDirection(nodeId) {
+  if (!state.overviewId || !state.overviewJob || !nodeId) return;
+  const button = overviewInspectorEl?.querySelector("[data-overview-expand-node]");
+  if (button) button.disabled = true;
+  setOverviewActionMessage("正在调研并展开所选方向…", "");
+  try {
+    const response = await apiFetch(`/api/v1/overviews/${encodeURIComponent(state.overviewId)}/expand`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        node_id: nodeId,
+        expected_version: overviewResult()?.graph?.version,
+      }),
+    });
+    if (!response.ok) throw new Error(await response.text());
+    const job = await response.json();
+    state.overviewJob = job;
+    renderOverviewStatus(job);
+    const result = overviewResult(job);
+    if (result?.graph) renderOverviewGraph(result);
+    setOverviewActionMessage("方向已更新；请检查新增的子方向与论文。", "");
+  } catch (error) {
+    setOverviewActionMessage(`方向展开失败：${error.message}`, "error-text");
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+async function saveOverview() {
+  if (!state.overviewId || !state.overviewJob || !overviewResult()?.graph) return null;
+  overviewSaveButton && (overviewSaveButton.disabled = true);
+  overviewDialogConfirmButton && (overviewDialogConfirmButton.disabled = true);
+  setOverviewActionMessage("正在保存研究方向图…", "");
+  try {
+    const graph = overviewResult().graph;
+    const response = await apiFetch(`/api/v1/overviews/${encodeURIComponent(state.overviewId)}/save`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ expected_version: graph.version, name: graph.name || undefined }),
+    });
+    if (!response.ok) throw new Error(await response.text());
+    const payload = await response.json();
+    state.overviewJob.save_state = payload.save_state || "saved";
+    state.overviewJob.saved_graph_id = payload.saved_graph_id || payload.graph?.id || state.overviewJob.saved_graph_id;
+    if (payload.graph) {
+      state.overviewJob.result = { ...overviewResult(), graph: payload.graph };
+      renderOverviewGraph(state.overviewJob.result);
+    }
+    const historyIndex = state.overviewJobs.findIndex((item) => String(item.id) === String(state.overviewJob.id));
+    if (historyIndex >= 0) state.overviewJobs.splice(historyIndex, 1, state.overviewJob);
+    renderOverviewHistory();
+    renderOverviewStatus(state.overviewJob);
+    await loadGraphPicker(state.overviewJob.saved_graph_id || null);
+    closeDialog(overviewSaveDialog);
+    setOverviewActionMessage("研究方向图已保存到统一图库。", "");
+    return payload;
+  } finally {
+    if (overviewSaveButton) overviewSaveButton.disabled = false;
+    if (overviewDialogConfirmButton) overviewDialogConfirmButton.disabled = false;
+  }
+}
+
+createOverviewButton?.addEventListener("click", () => createOverview());
+overviewRetryButton?.addEventListener("click", () => createOverview({ force: true }));
+overviewFitButton?.addEventListener("click", () => state.overviewRenderer?.fit());
+overviewToggleEdgesButton?.addEventListener("click", () => {
+  state.overviewLowConfidenceVisible = !state.overviewLowConfidenceVisible;
+  overviewToggleEdgesButton.setAttribute("aria-pressed", String(state.overviewLowConfidenceVisible));
+  overviewToggleEdgesButton.textContent = state.overviewLowConfidenceVisible ? "隐藏低置信边" : "显示低置信边";
+  state.overviewRenderer?.setLowConfidenceVisible(state.overviewLowConfidenceVisible);
+});
+overviewHistorySelectEl?.addEventListener("change", () => {
+  const overviewId = overviewHistorySelectEl.value;
+  if (!overviewId || String(overviewId) === String(state.overviewId)) return;
+  overviewHistorySelectEl.disabled = true;
+  setOverviewActionMessage("正在恢复历史研究方向图…", "");
+  openOverviewJob(overviewId, { promptSave: false })
+    .then(() => setOverviewActionMessage("历史研究方向图已恢复。", ""))
+    .catch((error) => setOverviewActionMessage(`历史任务恢复失败：${error.message}`, "error-text"))
+    .finally(() => { overviewHistorySelectEl.disabled = false; });
+});
+overviewHistoryRefreshButton?.addEventListener("click", () => {
+  loadOverviewHistory({ autoOpen: !state.overviewId })
+    .catch((error) => setOverviewActionMessage(`历史任务刷新失败：${error.message}`, "error-text"));
+});
+overviewSaveButton?.addEventListener("click", () => showDialog(overviewSaveDialog));
+overviewSaveLaterButton?.addEventListener("click", () => {
+  closeDialog(overviewSaveDialog);
+  setOverviewActionMessage("研究方向图暂不保存；Overview 任务仍可继续查看。", "");
+});
+overviewDialogConfirmButton?.addEventListener("click", () => saveOverview().catch((error) => {
+  setOverviewActionMessage(`保存失败：${error.message}`, "error-text");
+}));
+overviewDialogLaterButton?.addEventListener("click", () => {
+  closeDialog(overviewSaveDialog);
+  setOverviewActionMessage("研究方向图暂不保存；之后仍可点击保存。", "");
+});
+document.querySelector('[data-dialog-close="overview-save"]')?.addEventListener("click", () => {
+  closeDialog(overviewSaveDialog);
+  setOverviewActionMessage("研究方向图暂不保存；之后仍可点击保存。", "");
+});
+overviewSaveDialog?.addEventListener("cancel", (event) => {
+  event.preventDefault();
+  closeDialog(overviewSaveDialog);
+  setOverviewActionMessage("研究方向图暂不保存；之后仍可点击保存。", "");
+});
+overviewSaveDialog?.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" || event.defaultPrevented) return;
+  if (event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLInputElement) return;
+  event.preventDefault();
+  overviewDialogConfirmButton?.click();
+});
+
 async function pollAnalysis(id) {
   const response = await apiFetch(`/api/v1/analyses/${encodeURIComponent(id)}`);
   if (!response.ok) throw new Error("analysis request failed");
@@ -2386,6 +3120,15 @@ function renderAnalysis(result) {
   state.pendingPatches.clear();
   renderPatches();
   renderAnalysisGraphSaveControls();
+  const canCreateOverview = ["literature", "research"].includes(result.level)
+    && (result.papers || []).some((paper) => paper?.id && paper?.title);
+  analysisOverviewActionsEl?.classList.toggle("hidden", !canCreateOverview);
+  if (createOverviewButton) {
+    createOverviewButton.disabled = false;
+    createOverviewButton.textContent = state.overviewId
+      ? "打开研究方向图"
+      : "Overview / 研究方向图";
+  }
   const shouldPrompt = ["literature", "research"].includes(result.level)
     && isTransientAnalysisGraph(result)
     && state.graphSavePromptedForAnalysis !== state.analysisId;
@@ -2457,6 +3200,9 @@ routeLinks.forEach((link) => {
 
 renderApiBaseConfiguration();
 renderRoute();
+if (currentRoute() !== "research-overview") {
+  loadOverviewHistory({ autoOpen: false }).catch(() => {});
+}
 loadHealth();
 loadProjects();
 loadApiKeys();

@@ -11,12 +11,19 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from threading import RLock
 
 from app.config import Settings
 from app.experiment_schemas import ExperimentPlan
-from app.research_schemas import AnalysisJob, ConceptGraph, GraphPatch, IdeaCheckResult
+from app.research_schemas import (
+    AnalysisJob,
+    ConceptGraph,
+    GraphPatch,
+    IdeaCheckResult,
+    OverviewJob,
+)
 from app.schemas import Project
 
 
@@ -691,6 +698,278 @@ class Storage:
             return [GraphPatch.model_validate_json(row["payload"]) for row in rows]
 
         return self._run(read)
+
+    # ----- transient analysis graph patches ---------------------------
+    def save_analysis_patch(self, analysis_id: str, patch: GraphPatch) -> GraphPatch:
+        """Persist a proposal for the graph embedded in an analysis snapshot."""
+
+        self._run(
+            lambda connection: connection.execute(
+                """
+                INSERT INTO analysis_graph_patches(
+                    id, analysis_id, payload, created_at, status, base_version
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,
+                    status=excluded.status, base_version=excluded.base_version
+                """,
+                (
+                    patch.id,
+                    analysis_id,
+                    patch.model_dump_json(),
+                    patch.created_at.isoformat(),
+                    patch.status,
+                    patch.base_version,
+                ),
+            )
+        )
+        return patch.model_copy(deep=True)
+
+    def get_analysis_patch(self, analysis_id: str, patch_id: str) -> GraphPatch | None:
+        def read(connection: sqlite3.Connection) -> GraphPatch | None:
+            row = connection.execute(
+                """
+                SELECT payload FROM analysis_graph_patches
+                WHERE analysis_id = ? AND id = ?
+                """,
+                (analysis_id, patch_id),
+            ).fetchone()
+            return GraphPatch.model_validate_json(row["payload"]) if row else None
+
+        return self._run(read)
+
+    def list_analysis_patches(self, analysis_id: str) -> list[GraphPatch]:
+        def read(connection: sqlite3.Connection) -> list[GraphPatch]:
+            rows = connection.execute(
+                """
+                SELECT payload FROM analysis_graph_patches
+                WHERE analysis_id = ? ORDER BY created_at ASC
+                """,
+                (analysis_id,),
+            ).fetchall()
+            return [GraphPatch.model_validate_json(row["payload"]) for row in rows]
+
+        return self._run(read)
+
+    def update_analysis_and_patch_if_graph_version(
+        self,
+        job: AnalysisJob,
+        patch: GraphPatch,
+        expected_graph_version: int,
+    ) -> bool:
+        """Atomically mutate an embedded graph and record its reviewed patch."""
+
+        def write(connection: sqlite3.Connection) -> bool:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT payload FROM analysis_jobs WHERE id = ?", (str(job.id),)
+            ).fetchone()
+            if row is None:
+                connection.rollback()
+                return False
+            current = AnalysisJob.model_validate_json(row["payload"])
+            if current.result is None or current.result.graph.version != expected_graph_version:
+                connection.rollback()
+                return False
+            connection.execute(
+                "UPDATE analysis_jobs SET payload = ?, status = ? WHERE id = ?",
+                (job.model_dump_json(), job.status, str(job.id)),
+            )
+            connection.execute(
+                """
+                INSERT INTO analysis_graph_patches(
+                    id, analysis_id, payload, created_at, status, base_version
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,
+                    status=excluded.status, base_version=excluded.base_version
+                """,
+                (
+                    patch.id,
+                    str(job.id),
+                    patch.model_dump_json(),
+                    patch.created_at.isoformat(),
+                    patch.status,
+                    patch.base_version,
+                ),
+            )
+            return True
+
+        return bool(self._run(write))
+
+    # ----- research-direction overview jobs --------------------------
+    def save_overview(self, job: OverviewJob) -> OverviewJob:
+        """Persist one complete Overview job document.
+
+        ``result_payload`` deliberately duplicates the result portion for
+        forward-compatible workers that may later stream partial graph
+        snapshots.  ``payload`` remains authoritative in this version.
+        """
+
+        self._run(
+            lambda connection: connection.execute(
+                """
+                INSERT INTO overview_jobs(
+                    id, analysis_id, status, stage, progress, payload,
+                    result_payload, save_state, error, created_at, updated_at,
+                    version
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    analysis_id=excluded.analysis_id,
+                    status=excluded.status,
+                    stage=excluded.stage,
+                    progress=excluded.progress,
+                    payload=excluded.payload,
+                    result_payload=excluded.result_payload,
+                    save_state=excluded.save_state,
+                    error=excluded.error,
+                    updated_at=excluded.updated_at,
+                    version=excluded.version
+                """,
+                (
+                    str(job.id),
+                    str(job.analysis_id),
+                    job.status,
+                    job.stage,
+                    job.progress,
+                    job.model_dump_json(),
+                    job.result.model_dump_json() if job.result is not None else None,
+                    job.save_state,
+                    job.error,
+                    job.created_at.isoformat(),
+                    job.updated_at.isoformat(),
+                    job.version,
+                ),
+            )
+        )
+        return job.model_copy(deep=True)
+
+    def get_overview(self, overview_id: str) -> OverviewJob | None:
+        def read(connection: sqlite3.Connection) -> OverviewJob | None:
+            row = connection.execute(
+                "SELECT payload FROM overview_jobs WHERE id = ?", (overview_id,)
+            ).fetchone()
+            return OverviewJob.model_validate_json(row["payload"]) if row else None
+
+        return self._run(read)
+
+    def list_overviews(self, analysis_id: str | None = None) -> list[OverviewJob]:
+        def read(connection: sqlite3.Connection) -> list[OverviewJob]:
+            if analysis_id is None:
+                rows = connection.execute(
+                    "SELECT payload FROM overview_jobs ORDER BY updated_at DESC"
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    """
+                    SELECT payload FROM overview_jobs
+                    WHERE analysis_id = ? ORDER BY updated_at DESC
+                    """,
+                    (analysis_id,),
+                ).fetchall()
+            return [OverviewJob.model_validate_json(row["payload"]) for row in rows]
+
+        return self._run(read)
+
+    def mark_overview_graph_deleted(self, graph_id: str) -> list[str]:
+        """Return Overview snapshots for a deleted library graph to transient.
+
+        The Overview job is the durable history copy, just as ``analysis_jobs``
+        is for a normal concept graph.  Removing the saved library row must not
+        erase that history or leave it claiming that the graph is still saved.
+        """
+
+        def update(connection: sqlite3.Connection) -> list[str]:
+            rows = connection.execute(
+                "SELECT id, payload FROM overview_jobs"
+            ).fetchall()
+            changed: list[str] = []
+            for row in rows:
+                job = OverviewJob.model_validate_json(row["payload"])
+                graph = job.result.graph if job.result is not None else None
+                if job.saved_graph_id != graph_id and (graph is None or graph.id != graph_id):
+                    continue
+                if job.result is not None:
+                    transient_graph = job.result.graph.model_copy(
+                        update={"save_state": "transient"}
+                    )
+                    result = job.result.model_copy(update={"graph": transient_graph})
+                else:
+                    result = None
+                job = job.model_copy(
+                    update={
+                        "result": result,
+                        "save_state": "transient",
+                        "saved_graph_id": None,
+                        "updated_at": datetime.now(timezone.utc),
+                        "version": job.version + 1,
+                    }
+                )
+                connection.execute(
+                    """
+                    UPDATE overview_jobs SET status = ?, stage = ?, progress = ?,
+                        payload = ?, result_payload = ?, save_state = ?, error = ?,
+                        updated_at = ?, version = ? WHERE id = ?
+                    """,
+                    (
+                        job.status,
+                        job.stage,
+                        job.progress,
+                        job.model_dump_json(),
+                        job.result.model_dump_json() if job.result else None,
+                        job.save_state,
+                        job.error,
+                        job.updated_at.isoformat(),
+                        job.version,
+                        str(job.id),
+                    ),
+                )
+                changed.append(str(job.id))
+            return changed
+
+        return self._run(update)
+
+    def mark_unfinished_overviews_interrupted(self) -> int:
+        """Make process-restart semantics explicit for abandoned workers."""
+
+        def update(connection: sqlite3.Connection) -> int:
+            rows = connection.execute(
+                """
+                SELECT id, payload FROM overview_jobs
+                WHERE status IN ('queued', 'running')
+                """
+            ).fetchall()
+            changed = 0
+            for row in rows:
+                job = OverviewJob.model_validate_json(row["payload"])
+                job = job.model_copy(
+                    update={
+                        "status": "interrupted",
+                        "message": "应用上次退出时任务尚未完成，可重新生成。",
+                        "updated_at": datetime.now(timezone.utc),
+                    }
+                )
+                connection.execute(
+                    """
+                    UPDATE overview_jobs SET status = ?, stage = ?, progress = ?,
+                        payload = ?, result_payload = ?, save_state = ?, error = ?,
+                        updated_at = ?, version = ? WHERE id = ?
+                    """,
+                    (
+                        job.status,
+                        job.stage,
+                        job.progress,
+                        job.model_dump_json(),
+                        job.result.model_dump_json() if job.result else None,
+                        job.save_state,
+                        job.error,
+                        job.updated_at.isoformat(),
+                        job.version,
+                        str(job.id),
+                    ),
+                )
+                changed += 1
+            return changed
+
+        return int(self._run(update))
 
     @staticmethod
     def _decode_graph(row: sqlite3.Row) -> ConceptGraph:
