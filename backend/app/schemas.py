@@ -60,6 +60,82 @@ class RuntimeProviderSettings(BaseModel):
     explanation_base_url: str
     demo_mode: bool
     storage: Literal["environment", "runtime_memory"] = "environment"
+    # The legacy explanation_* fields above remain for clients from the first
+    # release.  ``slots`` is the canonical, purpose-separated view used by
+    # the desktop settings screen.
+    slots: list["ProviderRuntimeSlot"] = Field(default_factory=list)
+
+
+ProviderSlotId = Literal[
+    "paper_search",
+    "community_search",
+    "explanation_model",
+    "experiment_runner",
+]
+
+
+class ProviderRuntimeSlot(BaseModel):
+    """Public non-secret configuration for one provider responsibility."""
+
+    id: ProviderSlotId
+    label: str
+    provider: str
+    base_url: str | None = None
+    model: str | None = None
+    enabled: bool = True
+    credential_required: bool = True
+    credential_configured: bool = False
+    storage: Literal["environment", "runtime_memory"] = "environment"
+
+
+class ProviderRuntimeSlotUpdate(BaseModel):
+    """Patch one provider slot without accepting credentials."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    provider: str | None = Field(default=None, min_length=1, max_length=100)
+    base_url: str | None = Field(default=None, max_length=500)
+    model: str | None = Field(default=None, max_length=200)
+    enabled: bool | None = None
+
+    @model_validator(mode="after")
+    def validate_values(self) -> "ProviderRuntimeSlotUpdate":
+        values = self.model_dump(exclude_unset=True)
+        if not values:
+            raise ValueError("至少需要提供一个 Provider 设置")
+        if "base_url" in values and values["base_url"]:
+            parsed = urlparse(values["base_url"])
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                raise ValueError("Base URL 必须是完整的 http:// 或 https:// 地址")
+            if parsed.query or parsed.fragment:
+                raise ValueError("Base URL 不应包含 query 或 fragment")
+        return self
+
+
+class ProviderConnectionTestRequest(BaseModel):
+    """Optional bounded network probe for a provider connection."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    probe: bool = False
+
+
+class ProviderConnectionTestResponse(BaseModel):
+    slot: ProviderSlotId
+    provider: str
+    enabled: bool
+    ok: bool
+    status: Literal[
+        "ready",
+        "disabled",
+        "missing_credential",
+        "unsupported",
+        "reachable",
+        "unreachable",
+        "invalid_configuration",
+    ]
+    message: str
+    latency_ms: int | None = None
 
 
 class RuntimeProviderSettingsUpdate(BaseModel):

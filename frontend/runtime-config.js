@@ -8,6 +8,7 @@
  */
 window.WISHFORGE_RUNTIME_CONFIG = Object.freeze({
   apiBaseUrl: "",
+  desktop: false,
 });
 
 // Keep the concise alias for integrations that only need the API root.

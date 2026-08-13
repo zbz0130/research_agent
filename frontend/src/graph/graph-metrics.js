@@ -60,8 +60,12 @@ export function nodeAppearance(node, graph) {
     const diameter = Number.isFinite(backendRadius)
       ? clamp(backendRadius * 2, 34, 70)
       : 34 + (16 * recency);
-    width = Math.max(112, diameter * 2.45);
-    height = Math.max(48, diameter);
+    // Keep every paper as a true circular leaf.  The inspector carries the
+    // complete title and the "problem / method / how" explanation, while the
+    // canvas intentionally uses a compact label to preserve Connected-Papers
+    // style visual scanning instead of reverting to stacked text cards.
+    width = clamp(diameter, 42, 74);
+    height = width;
     background = node?.year == null
       ? "#718096"
       : mixColor([184, 213, 246], [31, 78, 196], recency);

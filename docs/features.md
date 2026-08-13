@@ -44,7 +44,7 @@ WishForge 是一个面向科研人员的研究工作台。当前第一版的主�
 | Agent GraphPatch | 已实现（受限版） | 概念图页 / API | 自然语言只转换成有界提案，必须人工批准或拒绝 |
 | 实验方案草案 | 已实现（不执行） | 实验页 / API | 生成并审阅方案，但不会运行代码或实验 |
 | API Key 分槽位 | 已实现 | 设置页 / `.env` | 论文、社区、解释模型和实验用途分开配置 |
-| 运行时模型代理 | `main` 已实现 | 设置页 / `/settings/runtime` | Provider、模型和 Base URL 只覆盖当前 API 进程 |
+| 运行时模型代理 | `main` 已实现 | 设置页 / `/settings/runtime` | 保留旧的解释模型兼容字段；新增四个用途槽位的 Provider、模型、Base URL、启用状态和安全连接测试（`/settings/providers/{slot}`）。密钥仍由独立凭据接口处理 |
 
 ## 3. 概念分析模式
 
@@ -337,20 +337,22 @@ arXiv Provider 默认不需要论文 Key。解释模型使用 OpenAI-compatible 
 常用的非密钥配置包括：
 
 - `WISHFORGE_PAPER_PROVIDER`：默认 `arxiv`，也可选择已实现的其他 Provider；
+- `WISHFORGE_PAPER_BASE_URL`、`WISHFORGE_PAPER_MODEL`、`WISHFORGE_PAPER_ENABLED`；
 - `WISHFORGE_COMMUNITY_PROVIDER`：当前默认 `demo`；
+- `WISHFORGE_COMMUNITY_BASE_URL`、`WISHFORGE_COMMUNITY_MODEL`、`WISHFORGE_COMMUNITY_ENABLED`；
 - `WISHFORGE_EXPLANATION_PROVIDER`、`WISHFORGE_EXPLANATION_MODEL`；
-- `WISHFORGE_EXPLANATION_BASE_URL`、`WISHFORGE_EXPLANATION_TIMEOUT_SECONDS`；
-- `WISHFORGE_EXPERIMENT_PROVIDER`、`WISHFORGE_DEMO_MODE`；
+- `WISHFORGE_EXPLANATION_BASE_URL`、`WISHFORGE_EXPLANATION_TIMEOUT_SECONDS`、`WISHFORGE_EXPLANATION_ENABLED`；
+- `WISHFORGE_EXPERIMENT_PROVIDER`、`WISHFORGE_EXPERIMENT_BASE_URL`、`WISHFORGE_EXPERIMENT_MODEL`、`WISHFORGE_EXPERIMENT_ENABLED`；
+- `WISHFORGE_DEMO_MODE`；
 - `WISHFORGE_STORAGE_PATH`、`WISHFORGE_CORS_ORIGINS`。
 
 `.env` 固定从仓库根目录加载，不依赖启动时的当前目录。
 
-网页上的 Key：
+网页上的 Key（桌面版由 Windows Credential Manager 持久保存；浏览器开发模式仅进程内）：
 
 - 只返回已配置状态和掩码；
-- 当前版本只保存在 API 进程内存；
-- 重启后清除；
-- 不写入 SQLite、日志或响应正文；
+- 不写入前端构建产物、SQLite 或普通日志；
+- 不写入 SQLite、日志或响应正文（浏览器模式的值只存于当前进程）；
 - 当前没有登录和权限系统，只适合本机或受保护内网。
 
 ### 10.2 运行时解释模型代理
@@ -362,7 +364,7 @@ GET   /api/v1/settings/runtime
 PATCH /api/v1/settings/runtime
 ```
 
-可以配置：
+兼容接口可以配置：
 
 - explanation provider；
 - 模型名称；
@@ -376,6 +378,15 @@ https://proxy.example.com/v1
 ```
 
 后端会请求 `/chat/completions`。该接口不接收 API Key；Key 仍然通过独立的 `/settings/api-keys` 配置。网页修改只覆盖当前进程，长期部署请写入后端 `.env` 或 Secret Manager。
+
+桌面设置页还可以按以下四个用途分别 PATCH 非敏感配置：
+
+```text
+PATCH /api/v1/settings/providers/{paper_search|community_search|explanation_model|experiment_runner}
+POST  /api/v1/settings/providers/{slot}/test
+```
+
+每个槽位都返回 `provider`、`base_url`、`model`、`enabled` 和掩码后的凭据状态。连接测试默认只验证格式；明确传入 `{"probe": true}` 时才对 Base URL 做 3 秒、无凭据的 HTTP 连通性探测，不会启动论文检索、模型调用或实验。
 
 这两个 runtime endpoint 已随 `df9411c` 合入 `main`。开发分支在合并前曾不包含它们，因此如果单独检出旧的功能分支提交，需要以 `main` 的合并结果为准。
 

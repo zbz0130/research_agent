@@ -40,6 +40,10 @@ from app.schemas import (
     HealthResponse,
     Project,
     ProjectCreate,
+    ProviderConnectionTestRequest,
+    ProviderConnectionTestResponse,
+    ProviderRuntimeSlotUpdate,
+    ProviderSlotId,
     RuntimeProviderSettings,
     RuntimeProviderSettingsUpdate,
 )
@@ -61,7 +65,9 @@ from app.services.research_providers import ProviderUnavailable
 from app.services.settings_service import (
     api_key_status as build_api_key_status,
     runtime_provider_status,
+    test_provider_connection,
     update_api_keys,
+    update_provider_slot,
     update_runtime_provider_settings,
 )
 from app.services.experiment_service import experiment_service
@@ -112,6 +118,40 @@ def update_runtime_settings(
     """Change model provider, model name, proxy URL, or demo mode in memory."""
 
     return update_runtime_provider_settings(settings, payload)
+
+
+@router.patch(
+    "/settings/providers/{slot_id}",
+    response_model=RuntimeProviderSettings,
+    tags=["settings"],
+)
+def update_provider_settings(
+    slot_id: ProviderSlotId,
+    payload: ProviderRuntimeSlotUpdate,
+    settings: Settings = Depends(get_settings),
+) -> RuntimeProviderSettings:
+    """Update one purpose-specific provider's non-secret runtime settings."""
+
+    return update_provider_slot(settings, slot_id, payload)
+
+
+@router.post(
+    "/settings/providers/{slot_id}/test",
+    response_model=ProviderConnectionTestResponse,
+    tags=["settings"],
+)
+def test_provider_settings_connection(
+    slot_id: ProviderSlotId,
+    payload: ProviderConnectionTestRequest,
+    settings: Settings = Depends(get_settings),
+) -> ProviderConnectionTestResponse:
+    """Safely validate a provider without exposing or transmitting its key.
+
+    ``probe`` is opt-in and only checks bare HTTP reachability for an explicit
+    Base URL; it never performs a paper search, model completion or experiment.
+    """
+
+    return test_provider_connection(settings, slot_id, probe=payload.probe)
 
 
 @router.get("/projects", response_model=list[Project], tags=["projects"])
@@ -387,11 +427,12 @@ def get_overview_node_detail(overview_id: UUID, node_id: str) -> GraphNodeDetail
 def expand_overview(
     overview_id: UUID,
     payload: OverviewExpandRequest,
+    settings: Settings = Depends(get_settings),
 ) -> OverviewJob:
     """Refine one direction without widening the persisted paper scope."""
 
     try:
-        return overview_service.expand(overview_id, payload)
+        return overview_service.expand(overview_id, payload, settings=settings)
     except OverviewNotFound as exc:
         raise HTTPException(status_code=404, detail="研究方向图任务不存在") from exc
     except GraphConflict as exc:
@@ -407,6 +448,7 @@ def retry_overview_direction(
     overview_id: UUID,
     direction_key: str,
     payload: OverviewRetryDirectionRequest | None = None,
+    settings: Settings = Depends(get_settings),
 ) -> OverviewJob:
     """Retry one failed direction without regenerating successful peers."""
 
@@ -415,6 +457,7 @@ def retry_overview_direction(
             overview_id,
             direction_key,
             payload or OverviewRetryDirectionRequest(),
+            settings=settings,
         )
     except OverviewNotFound as exc:
         raise HTTPException(status_code=404, detail="研究方向图任务或方向不存在") from exc

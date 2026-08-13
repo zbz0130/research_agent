@@ -1,4 +1,5 @@
 import "../runtime-config.js";
+import { desktopBridgeReady } from "./desktop-bridge.js";
 import { createGraphRenderer } from "./graph/graph-renderer.js";
 import { inspectorMarkup } from "./graph/graph-inspector.js";
 import { nodeAppearance, scoreLegendStops } from "./graph/graph-metrics.js";
@@ -21,5 +22,10 @@ window.WishForgeGraph = Object.freeze({
   nodeAppearance,
   scoreLegendStops,
 });
+
+// The desktop bridge resolves the ephemeral localhost sidecar address before
+// application requests begin. In a normal browser it resolves to a no-op
+// bridge, so Vite/FastAPI development keeps exactly the same fallback.
+await desktopBridgeReady;
 
 await import("../app.js");

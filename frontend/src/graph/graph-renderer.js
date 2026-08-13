@@ -16,7 +16,7 @@ function graphElements(graph) {
       group: "nodes",
       data: {
         id: String(node.id),
-        label: compactNodeLabel(node.label, appearance.role === "paper" ? 42 : 26),
+        label: compactNodeLabel(node.label, appearance.role === "paper" ? 18 : 26),
         fullLabel: node.label,
         role: appearance.role,
         width: appearance.width,
@@ -150,7 +150,7 @@ export function createGraphRenderer(cytoscape, container, options = {}) {
         style: {
           shape: "ellipse",
           "font-size": 10,
-          "text-max-width": 104,
+          "text-max-width": 58,
         },
       },
       {

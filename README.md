@@ -225,7 +225,41 @@ docker compose up --build
 
 ## 产品运行方式
 
-GitHub Pages 不再作为产品部署目标。当前阶段使用 Vite + 本地 FastAPI 验证真实图和研究方向 Overview；下一阶段会把同一套 Web 技术嵌入 Tauri Windows 桌面 App，并由 Tauri 启动本地 Python sidecar。历史 Pages 文档仅供追溯，不应按它发布当前产品。
+GitHub Pages 不再作为产品部署目标。当前产品同时支持浏览器开发模式和 Tauri Windows 桌面 App。桌面 App 启动时会自动拉起本地 Python sidecar，不需要单独启动 FastAPI。
+
+### Windows 桌面开发模式
+
+最简单的方式是双击仓库根目录中的 `启动 WishForge.bat`。它会自动设置项目环境、检查前端依赖并启动桌面 App。
+
+也可以在 PowerShell 中执行：
+
+```powershell
+cd D:\C++\search_agent
+.\start-wishforge.ps1
+```
+
+请在 Windows PowerShell（不是 WSL）中执行：
+
+```powershell
+cd D:\C++\search_agent
+\.venv\Scripts\Activate.ps1
+pip install -r backend\requirements.txt
+pip install pyinstaller
+cd frontend
+npm install
+npm.cmd run tauri:dev
+```
+
+如果 PowerShell 禁止执行 `npm.ps1`，使用上面的 `npm.cmd` 即可。首次启动会打开 WishForge 桌面窗口；关闭窗口会同时停止本地 sidecar。
+
+生成可安装版本：
+
+```powershell
+cd D:\C++\search_agent\frontend
+npm.cmd run tauri:build
+```
+
+安装包会出现在 `src-tauri\target\release\bundle\msi` 和 `src-tauri\target\release\bundle\nsis`。
 
 ## 当前阶段验收标准
 

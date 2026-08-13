@@ -128,6 +128,11 @@ class DemoCommunityProvider:
 
 
 def _community_provider(settings: Settings) -> CommunityProvider:
+    if not getattr(settings, "community_enabled", True):
+        raise ProviderUnavailable(
+            "社区检索 Provider 已在设置中关闭。",
+            provider=getattr(settings, "community_provider", "unknown"),
+        )
     provider = getattr(settings, "community_provider", "demo")
     if provider == "demo":
         return DemoCommunityProvider()

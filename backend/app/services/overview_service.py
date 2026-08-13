@@ -195,7 +195,7 @@ class OverviewService:
 
         storage.mark_overview_graph_deleted(graph_id)
 
-    def expand(self, overview_id: UUID, payload: OverviewExpandRequest) -> OverviewJob:
+    def expand(self, overview_id: UUID, payload: OverviewExpandRequest, *, settings=None) -> OverviewJob:
         with self._lock:
             job = storage.get_overview(str(overview_id))
             if job is None or job.result is None:
@@ -226,7 +226,7 @@ class OverviewService:
             external_papers: list[PaperRecord] = []
             expansion_runs: list[OverviewAgentRun] = []
             if latest_audit is not None:
-                coordinator = self._coordinator_for(job.id, latest_audit.provider)
+                coordinator = self._coordinator_for(job.id, latest_audit.provider, settings=settings)
                 if coordinator is not None:
                     research_started_at = _utcnow()
                     research_started_perf = time.perf_counter()
@@ -469,6 +469,8 @@ class OverviewService:
         overview_id: UUID,
         direction_key: str,
         payload: OverviewRetryDirectionRequest,
+        *,
+        settings=None,
     ) -> OverviewJob:
         """Retry only the latest failed attempt for ``direction_key``."""
 
@@ -495,7 +497,7 @@ class OverviewService:
                 raise GraphConflict("该方向没有可重试的失败记录")
             analysis = self._eligible_analysis(job.analysis_id)
             assert analysis.result is not None
-            coordinator = self._coordinator_for(job.id, failed.provider)
+            coordinator = self._coordinator_for(job.id, failed.provider, settings=settings)
             if coordinator is None:
                 retry_started_at = _utcnow()
                 retry_started_perf = time.perf_counter()
@@ -706,11 +708,20 @@ class OverviewService:
         self,
         overview_id: UUID,
         provider_name: str,
+        settings=None,
     ) -> DirectionResearchCoordinator | None:
         coordinator = self._coordinators.get(overview_id)
         if coordinator is not None:
             return coordinator
-        provider = build_search_provider(provider_name)
+        runtime_settings = settings or get_settings()
+        try:
+            # Keep the provider factory monkeypatch-friendly for integrations
+            # written against the original one-argument hook.
+            provider = build_search_provider(provider_name, settings=runtime_settings)
+        except TypeError as exc:
+            if "unexpected keyword argument 'settings'" not in str(exc):
+                raise
+            provider = build_search_provider(provider_name)
         if provider is None:
             return None
         coordinator = DirectionResearchCoordinator(
@@ -938,7 +949,12 @@ class OverviewService:
                 progress=20,
                 message=f"正在并行调研 {len(plans)} 个候选方向（共享 Provider，最多并发 4）",
             )
-            provider = build_search_provider(analysis.result.provider)
+            try:
+                provider = build_search_provider(analysis.result.provider, settings=settings)
+            except TypeError as exc:
+                if "unexpected keyword argument 'settings'" not in str(exc):
+                    raise
+                provider = build_search_provider(analysis.result.provider)
             if provider is None:
                 research_started_at = _utcnow()
                 research_started_perf = time.perf_counter()

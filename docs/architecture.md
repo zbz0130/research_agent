@@ -61,7 +61,8 @@ FastAPI API (/api/v1)
 - `WISHFORGE_COMMUNITY_API_KEY` 只交给社区 Provider（当前研究模式仍使用明确标记的 Demo provider）；
 - `WISHFORGE_EXPLANATION_API_KEY` 只交给解释模型 Provider；
 - `WISHFORGE_EXPERIMENT_API_KEY` 预留给未来执行器，本阶段不会使用；
-- 网页 `PATCH /api/v1/settings/api-keys` 写入的四个槽位只覆盖当前进程内的 `Settings`，重启后回到 `.env`；本地第一版不把明文密钥写进 SQLite；
+- 网页 `PATCH /api/v1/settings/api-keys` 写入的四个槽位只覆盖当前进程内的 `Settings`；桌面 Tauri 先把密钥写入 Windows Credential Manager，再注入 sidecar 环境，永远不进入 SQLite、构建资源或普通日志；
+- 非敏感 Provider 路由按四个职责分离，可通过 `PATCH /api/v1/settings/providers/{slot}` 配置 Provider、Base URL、模型和启用状态；`POST /api/v1/settings/providers/{slot}/test` 默认只做格式检查，显式 probe 才做无凭据、限时连通性探测；
 - 当前没有登录、租户隔离或权限系统，密钥配置接口只适合本机/受保护内网；公网部署前必须加认证、审计和 Secret Manager；
 - 外部论文或网页内容是“不可信输入”，不能改变系统提示词、工具权限或 API Key；
 - 论文全文只应来自开放来源或用户合法提供的文件。本阶段默认通过 arXiv 处理元数据和摘要，不声称已阅读 PDF 全文。
@@ -74,6 +75,10 @@ FastAPI API (/api/v1)
 | GET | `/api/v1/health` | 健康检查 |
 | GET | `/api/v1/settings/api-keys` | 获取各用途密钥的配置状态和掩码 |
 | PATCH | `/api/v1/settings/api-keys` | 在当前进程设置/清除各用途密钥（只返回掩码） |
+| GET | `/api/v1/settings/runtime` | 获取兼容的解释模型配置及四个 Provider 槽位的非敏感配置 |
+| PATCH | `/api/v1/settings/runtime` | 更新兼容的解释模型路由 |
+| PATCH | `/api/v1/settings/providers/{slot}` | 更新单个用途的 Provider、Base URL、模型或启用状态 |
+| POST | `/api/v1/settings/providers/{slot}/test` | 返回脱敏的配置状态；可选无凭据连通性探测 |
 | GET | `/api/v1/projects` | 获取研究项目 |
 | POST | `/api/v1/projects` | 创建草稿项目 |
 | POST | `/api/v1/analyses` | 创建异步概念分析任务，返回 `202` 和任务 ID |

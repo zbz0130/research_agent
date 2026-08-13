@@ -225,10 +225,14 @@ class ArxivSearchProvider:
         timeout: float = 30.0,
         minimum_interval_seconds: float = 3.0,
         *,
+        endpoint: str | None = None,
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.timeout = timeout
+        # An explicit proxy endpoint is optional; retaining the class default
+        # keeps existing callers and tests deterministic.
+        self.endpoint = (endpoint or self.endpoint).rstrip("/")
         self.minimum_interval_seconds = max(0.0, minimum_interval_seconds)
         self._sleep = sleep
         self._clock = clock
@@ -358,6 +362,7 @@ class SemanticScholarProvider:
         api_key: str | None = None,
         timeout: float = 20.0,
         *,
+        endpoint: str | None = None,
         max_retries: int = _DEFAULT_MAX_RETRIES,
         retry_backoff_seconds: float = _DEFAULT_BACKOFF_SECONDS,
         max_retry_wait_seconds: float = _DEFAULT_MAX_RETRY_WAIT_SECONDS,
@@ -371,6 +376,7 @@ class SemanticScholarProvider:
             raise ValueError("max_retry_wait_seconds 不能小于 0")
         self.api_key = api_key
         self.timeout = timeout
+        self.endpoint = (endpoint or "https://api.semanticscholar.org/graph/v1/paper/search").rstrip("/")
         self.max_retries = max_retries
         self.retry_backoff_seconds = retry_backoff_seconds
         self.max_retry_wait_seconds = max_retry_wait_seconds
@@ -394,7 +400,7 @@ class SemanticScholarProvider:
         for retry_index in range(self.max_retries + 1):
             try:
                 response = httpx.get(
-                    "https://api.semanticscholar.org/graph/v1/paper/search",
+                    self.endpoint,
                     params=params,
                     headers=headers,
                     timeout=self.timeout,

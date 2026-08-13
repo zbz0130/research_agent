@@ -114,6 +114,9 @@ const modelNameInput = document.querySelector("#explanation-model");
 const modelBaseUrlInput = document.querySelector("#explanation-base-url");
 const modelSettingsStatusEl = document.querySelector("#model-settings-status");
 const modelSettingsMessageEl = document.querySelector("#model-settings-message");
+const desktopRuntimeStatusEl = document.querySelector("#desktop-runtime-status");
+const providerRuntimeSlotsEl = document.querySelector("#provider-runtime-slots");
+const providerRuntimeMessageEl = document.querySelector("#provider-runtime-message");
 const routeLinks = [...document.querySelectorAll("[data-route-link]")];
 const appViews = [...document.querySelectorAll("[data-view]")];
 
@@ -149,9 +152,17 @@ function readStoredApiBaseUrl() {
 }
 
 function resolveApiBaseUrl() {
+  const runtimeConfig = window.WISHFORGE_RUNTIME_CONFIG || {};
+  // The desktop shell owns the loopback sidecar URL. Ignore stale browser
+  // preferences in that environment so requests cannot escape the App.
+  if (runtimeConfig.desktop) {
+    const sidecar = normalizeApiBaseUrl(runtimeConfig.apiBaseUrl || window.WISHFORGE_API_BASE_URL);
+    return sidecar
+      ? { value: sidecar, source: "桌面 sidecar" }
+      : { value: "", source: "桌面 sidecar（等待启动）" };
+  }
   const stored = normalizeApiBaseUrl(readStoredApiBaseUrl());
   if (stored) return { value: stored, source: "浏览器保存" };
-  const runtimeConfig = window.WISHFORGE_RUNTIME_CONFIG || {};
   const deployed = normalizeApiBaseUrl(runtimeConfig.apiBaseUrl || window.WISHFORGE_API_BASE_URL);
   if (deployed) return { value: deployed, source: "页面配置" };
   return { value: "", source: "当前页面同源" };
@@ -176,10 +187,27 @@ function setApiBaseMessage(text, kind = "") {
 
 function renderApiBaseConfiguration() {
   apiBaseInput.value = apiBaseConfiguration.value;
+  const desktop = Boolean(window.WishForgeDesktop?.isDesktop || window.WISHFORGE_RUNTIME_CONFIG?.desktop);
+  apiBaseInput.readOnly = desktop;
+  apiBaseInput.setAttribute("aria-readonly", String(desktop));
+  apiBaseInput.title = desktop ? "桌面 App 自动使用本地 sidecar 地址" : "";
+  apiBaseForm.classList.toggle("is-desktop-managed", desktop);
   apiBaseStatusEl.textContent = apiBaseConfiguration.value
     ? `${apiBaseConfiguration.source} · 已设置`
     : "当前页面同源";
   apiBaseStatusEl.className = `tag ${apiBaseConfiguration.value ? "tag-configured" : "tag-missing"}`;
+}
+
+function renderDesktopRuntimeStatus() {
+  if (!desktopRuntimeStatusEl) return;
+  const desktop = Boolean(window.WishForgeDesktop?.isDesktop || window.WISHFORGE_RUNTIME_CONFIG?.desktop);
+  desktopRuntimeStatusEl.className = `desktop-runtime-status ${desktop ? "is-desktop" : "is-browser"}`;
+  if (desktop) {
+    const runtime = window.WISHFORGE_RUNTIME_CONFIG || {};
+    desktopRuntimeStatusEl.innerHTML = `<span class="desktop-runtime-dot" aria-hidden="true"></span><div><strong>桌面 App 已连接</strong><span>本地 FastAPI sidecar · ${escapeHtml(runtime.apiBaseUrl || "正在分配地址")}</span></div>`;
+  } else {
+    desktopRuntimeStatusEl.innerHTML = '<span class="desktop-runtime-dot" aria-hidden="true"></span><div><strong>浏览器开发模式</strong><span>使用当前页面或设置中的本地后端地址</span></div>';
+  }
 }
 
 function setStoredApiBaseUrl(value) {
@@ -658,6 +686,10 @@ async function loadHealth() {
 
 apiBaseForm.addEventListener("submit", (event) => {
   event.preventDefault();
+  if (window.WishForgeDesktop?.isDesktop || window.WISHFORGE_RUNTIME_CONFIG?.desktop) {
+    setApiBaseMessage("桌面 App 会自动管理本地 sidecar 地址，无需手动修改。", "");
+    return;
+  }
   const rawValue = apiBaseInput.value.trim();
   const normalized = normalizeApiBaseUrl(rawValue);
   if (rawValue && !normalized) {
@@ -682,6 +714,10 @@ apiBaseForm.addEventListener("submit", (event) => {
 });
 
 resetApiBaseButton.addEventListener("click", () => {
+  if (window.WishForgeDesktop?.isDesktop || window.WISHFORGE_RUNTIME_CONFIG?.desktop) {
+    setApiBaseMessage("桌面 App 会自动管理本地 sidecar 地址。", "");
+    return;
+  }
   const stored = setStoredApiBaseUrl("");
   apiBaseConfiguration = resolveApiBaseUrl();
   renderApiBaseConfiguration();
@@ -781,7 +817,29 @@ async function loadApiKeys() {
     const response = await apiFetch("/api/v1/settings/api-keys");
     if (!response.ok) throw new Error("settings request failed");
     const data = await response.json();
-    renderApiKeys(data.slots);
+    let slots = Array.isArray(data.slots) ? data.slots : [];
+    // The desktop shell only returns status/masking information from Windows
+    // Credential Manager. Secret values never travel back into this page.
+    if (window.WishForgeDesktop?.isDesktop) {
+      const statuses = await Promise.all(slots.map(async (slot) => {
+        try {
+          return await window.WishForgeDesktop.getCredentialStatus(slot.id);
+        } catch (error) {
+          return null;
+        }
+      }));
+      slots = slots.map((slot, index) => {
+        const status = statuses[index];
+        return status ? {
+          ...slot,
+          configured: Boolean(status.configured),
+          masked: status.masked || slot.masked || null,
+          storage: "windows_credential_manager",
+        } : slot;
+      });
+      data.storage = "windows_credential_manager";
+    }
+    renderApiKeys(slots);
     apiKeyForm.dataset.storage = data.storage || "environment";
   } catch (error) {
     apiKeysEl.innerHTML = '<p class="empty error-text">配置状态读取失败，请确认 API 正在运行。</p>';
@@ -802,11 +860,117 @@ function renderModelSettings(settings) {
   modelSettingsStatusEl.className = `tag ${settings.storage === "runtime_memory" ? "tag-configured" : "tag-missing"}`;
 }
 
+const providerSlotDetails = {
+  paper_search: { icon: "⌕", hint: "用于 arXiv、Semantic Scholar 等学术资料检索。" },
+  community_search: { icon: "◌", hint: "用于 X、知乎、Reddit 等探索性讨论信号。" },
+  explanation_model: { icon: "✦", hint: "用于概念解释、论文节点摘要和研究简报。" },
+  experiment_runner: { icon: "▣", hint: "预留给实验执行器；当前只生成方案，不执行代码。" },
+};
+
+function setProviderRuntimeMessage(text, kind = "") {
+  if (!providerRuntimeMessageEl) return;
+  providerRuntimeMessageEl.textContent = text;
+  providerRuntimeMessageEl.className = `form-message ${kind}`;
+}
+
+function renderProviderRuntimeSlots(slots) {
+  if (!providerRuntimeSlotsEl) return;
+  if (!Array.isArray(slots) || !slots.length) {
+    providerRuntimeSlotsEl.innerHTML = '<p class="empty">后端尚未返回用途配置。</p>';
+    return;
+  }
+  providerRuntimeSlotsEl.innerHTML = slots.map((slot) => {
+    const detail = providerSlotDetails[slot.id] || { icon: "•", hint: "独立 Provider 配置。" };
+    const credentialNote = slot.credential_required === false
+      ? "公共或本地 Provider，无需 API Key"
+      : slot.credential_configured ? "API Key 已配置（密钥单独存储）" : "需要配置对应用途的 API Key";
+    return `
+      <article class="provider-runtime-slot" data-provider-slot="${escapeHtml(slot.id)}">
+        <div class="provider-runtime-slot-heading">
+          <span class="service-card-icon" aria-hidden="true">${escapeHtml(detail.icon)}</span>
+          <div><h3>${escapeHtml(slot.label)}</h3><p>${escapeHtml(detail.hint)}</p></div>
+          <span class="tag ${slot.enabled ? "tag-configured" : "tag-missing"}">${slot.enabled ? "已启用" : "已关闭"}</span>
+        </div>
+        <div class="provider-runtime-form-grid">
+          <label>Provider<input data-provider-field="provider" value="${escapeHtml(slot.provider || "")}" maxlength="100" /></label>
+          <label>模型名称<input data-provider-field="model" value="${escapeHtml(slot.model || "")}" maxlength="200" placeholder="可留空" /></label>
+          <label class="provider-base-url-field">Base URL<input data-provider-field="base_url" value="${escapeHtml(slot.base_url || "")}" type="url" placeholder="https://…/v1" /></label>
+        </div>
+        <div class="provider-runtime-slot-actions">
+          <label class="provider-enabled-toggle"><input data-provider-field="enabled" type="checkbox" ${slot.enabled ? "checked" : ""} /> 启用此用途</label>
+          <span class="settings-note">${escapeHtml(credentialNote)}</span>
+          <button type="button" data-provider-action="test" class="secondary">测试连接</button>
+          <button type="button" data-provider-action="save">保存此配置</button>
+          <span class="provider-slot-message form-message" role="status"></span>
+        </div>
+      </article>`;
+  }).join("");
+}
+
+async function updateProviderRuntimeSlot(slotId, payload) {
+  const response = await apiFetch(`/api/v1/settings/providers/${encodeURIComponent(slotId)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) throw new Error(await response.text());
+  return response.json();
+}
+
+function providerSlotPayload(card) {
+  const field = (name) => card.querySelector(`[data-provider-field="${name}"]`);
+  return {
+    provider: field("provider")?.value.trim() || "",
+    model: field("model")?.value.trim() || null,
+    base_url: field("base_url")?.value.trim() || null,
+    enabled: Boolean(field("enabled")?.checked),
+  };
+}
+
+async function testProviderRuntimeSlot(slotId) {
+  const response = await apiFetch(`/api/v1/settings/providers/${encodeURIComponent(slotId)}/test`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ probe: false }),
+  });
+  if (!response.ok) throw new Error(await response.text());
+  return response.json();
+}
+
+providerRuntimeSlotsEl?.addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-provider-action]");
+  if (!button) return;
+  const card = button.closest("[data-provider-slot]");
+  if (!card) return;
+  const slotId = card.dataset.providerSlot;
+  const message = card.querySelector(".provider-slot-message");
+  const setMessage = (text, kind = "") => {
+    if (message) { message.textContent = text; message.className = `provider-slot-message form-message ${kind}`; }
+  };
+  button.disabled = true;
+  try {
+    if (button.dataset.providerAction === "save") {
+      const data = await updateProviderRuntimeSlot(slotId, providerSlotPayload(card));
+      renderProviderRuntimeSlots(data.slots);
+      setProviderRuntimeMessage("用途配置已保存；没有提交任何 API Key。", "");
+    } else {
+      const result = await testProviderRuntimeSlot(slotId);
+      setMessage(`${result.ok ? "配置可用" : "需要处理"}：${result.message}`, result.ok ? "" : "error-text");
+    }
+  } catch (error) {
+    setMessage(`操作失败：${error.message}`, "error-text");
+  } finally {
+    button.disabled = false;
+  }
+});
+
 async function loadModelSettings() {
   try {
     const response = await apiFetch("/api/v1/settings/runtime");
     if (!response.ok) throw new Error("runtime settings request failed");
-    renderModelSettings(await response.json());
+    const data = await response.json();
+    renderModelSettings(data);
+    renderProviderRuntimeSlots(data.slots);
   } catch (error) {
     modelSettingsStatusEl.textContent = "后端不可用";
     modelSettingsStatusEl.className = "tag tag-missing";
@@ -827,6 +991,17 @@ modelSettingsForm.addEventListener("submit", async (event) => {
   saveButton.disabled = true;
   setModelSettingsMessage("正在保存模型路由…");
   try {
+    // Persist non-secret routing preferences alongside the desktop app. The
+    // sidecar request below remains necessary so this running session takes
+    // effect immediately; the secret itself is still handled separately by
+    // Windows Credential Manager.
+    if (window.WishForgeDesktop?.isDesktop) {
+      await window.WishForgeDesktop.saveRuntimeSettings({
+        provider,
+        model,
+        baseUrl,
+      });
+    }
     const response = await apiFetch("/api/v1/settings/runtime", {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
@@ -841,7 +1016,9 @@ modelSettingsForm.addEventListener("submit", async (event) => {
       throw new Error(detail || "runtime settings update failed");
     }
     renderModelSettings(await response.json());
-    setModelSettingsMessage("模型路由已保存；后续分析会使用当前进程配置。", "");
+    setModelSettingsMessage(window.WishForgeDesktop?.isDesktop
+      ? "模型路由已保存到桌面 App，并已同步到当前 sidecar。"
+      : "模型路由已保存；后续分析会使用当前进程配置。", "");
   } catch (error) {
     setModelSettingsMessage(`保存失败：${error.message}`, "error-text");
   } finally {
@@ -871,12 +1048,23 @@ apiKeyForm.addEventListener("submit", async (event) => {
     return;
   }
   saveApiKeysButton.disabled = true;
-  setApiKeyMessage("正在更新当前进程配置…");
+  setApiKeyMessage(window.WishForgeDesktop?.isDesktop
+    ? "正在保存到系统凭据库并更新 sidecar…"
+    : "正在更新当前进程配置…");
   try {
+    if (window.WishForgeDesktop?.isDesktop) {
+      for (const [slot, value] of Object.entries(payload)) {
+        await window.WishForgeDesktop.setCredential(slot, value);
+      }
+    }
     const data = await updateApiKeys(payload);
-    renderApiKeys(data.slots);
-    apiKeyForm.dataset.storage = data.storage || "runtime_memory";
-    setApiKeyMessage("已保存。密钥只保存在当前 API 进程内，响应中不会返回明文。", "");
+    await loadApiKeys();
+    apiKeyForm.dataset.storage = window.WishForgeDesktop?.isDesktop
+      ? "windows_credential_manager"
+      : (data.storage || "runtime_memory");
+    setApiKeyMessage(window.WishForgeDesktop?.isDesktop
+      ? "已保存到 Windows Credential Manager，并同步到本次 sidecar 会话。"
+      : "已保存。密钥只保存在当前 API 进程内，响应中不会返回明文。", "");
   } catch (error) {
     setApiKeyMessage(`保存失败：${error.message}`, "error-text");
   } finally {
@@ -889,12 +1077,21 @@ apiKeysEl.addEventListener("click", async (event) => {
   if (!clearButton) return;
   const slot = clearButton.dataset.apiKeyClear;
   clearButton.disabled = true;
-  setApiKeyMessage("正在清除当前进程中的该密钥…");
+  setApiKeyMessage(window.WishForgeDesktop?.isDesktop
+    ? "正在从系统凭据库和 sidecar 会话中清除…"
+    : "正在清除当前进程中的该密钥…");
   try {
+    if (window.WishForgeDesktop?.isDesktop) {
+      await window.WishForgeDesktop.setCredential(slot, "");
+    }
     const data = await updateApiKeys({ [slot]: "" });
-    renderApiKeys(data.slots);
-    apiKeyForm.dataset.storage = data.storage || "runtime_memory";
-    setApiKeyMessage("已清除该用途的当前进程密钥。", "");
+    await loadApiKeys();
+    apiKeyForm.dataset.storage = window.WishForgeDesktop?.isDesktop
+      ? "windows_credential_manager"
+      : (data.storage || "runtime_memory");
+    setApiKeyMessage(window.WishForgeDesktop?.isDesktop
+      ? "已从 Windows Credential Manager 和当前 sidecar 会话清除。"
+      : "已清除该用途的当前进程密钥。", "");
   } catch (error) {
     setApiKeyMessage(`清除失败：${error.message}`, "error-text");
   }
@@ -3199,6 +3396,7 @@ routeLinks.forEach((link) => {
 });
 
 renderApiBaseConfiguration();
+renderDesktopRuntimeStatus();
 renderRoute();
 if (currentRoute() !== "research-overview") {
   loadOverviewHistory({ autoOpen: false }).catch(() => {});

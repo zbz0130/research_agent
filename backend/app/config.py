@@ -1,3 +1,4 @@
+import os
 from functools import lru_cache
 from pathlib import Path
 
@@ -6,6 +7,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+ENV_FILE = None if os.getenv("WISHFORGE_DESKTOP_SIDECAR") == "1" else PROJECT_ROOT / ".env"
 
 
 class Settings(BaseSettings):
@@ -21,12 +23,22 @@ class Settings(BaseSettings):
     # Providers are deliberately separated by responsibility. A paper-search
     # credential must never be accidentally used by the experiment runner.
     paper_provider: str = "arxiv"
+    paper_base_url: str | None = None
+    paper_model: str | None = None
+    paper_enabled: bool = True
     # Community sources (X/知乎/Reddit) are deliberately separate from
     # academic search.  The first version ships a demo provider; production
     # connectors can be configured later without reusing paper credentials.
     community_provider: str = "demo"
+    community_base_url: str | None = None
+    community_model: str | None = None
+    community_enabled: bool = True
     explanation_provider: str = "openai"
+    explanation_enabled: bool = True
     experiment_provider: str = "local"
+    experiment_base_url: str | None = None
+    experiment_model: str | None = None
+    experiment_enabled: bool = False
     explanation_model: str = "gpt-4.1-mini"
     explanation_base_url: str = "https://api.openai.com/v1"
     explanation_timeout_seconds: float = 90.0
@@ -49,7 +61,7 @@ class Settings(BaseSettings):
         # Resolve from the repository root instead of the process working
         # directory, so starting Uvicorn from ``backend`` still loads the
         # same local configuration file.
-        env_file=PROJECT_ROOT / ".env",
+        env_file=ENV_FILE,
         env_prefix="WISHFORGE_",
         env_ignore_empty=True,
         extra="ignore",

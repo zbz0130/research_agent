@@ -543,10 +543,12 @@
           <div>
             <p class="eyebrow">CONNECTION SETTINGS</p>
             <h2 id="settings-title">服务连接与 API Key</h2>
-            <p>每种能力使用独立凭据：论文检索、社区信号、解释模型和实验执行不会共享同一把 Key。</p>
+            <p>每种能力使用独立凭据：论文检索、社区信号、解释模型和实验执行不会共享同一把 Key。桌面 App 会把密钥交给系统凭据库管理。</p>
           </div>
           <button id="refresh-settings" class="secondary" type="button">刷新状态</button>
         </header>
+
+        <div id="desktop-runtime-status" class="desktop-runtime-status" role="status" aria-live="polite"></div>
 
         <section class="settings-overview" aria-label="API Key 使用说明">
           <article class="settings-overview-card">
@@ -559,8 +561,8 @@
           <article class="settings-overview-card">
             <span class="settings-overview-icon" aria-hidden="true">◌</span>
             <div>
-              <h3>默认只在本机进程保存</h3>
-              <p>网页从不回显明文 Key；重启 API 后网页输入会清除，持久配置请使用本地 <code>.env</code> 或 Secret Manager。</p>
+              <h3>系统凭据库保护</h3>
+              <p>桌面版使用 Windows Credential Manager 持久保存密钥；页面只显示“已配置”和脱敏尾号。</p>
             </div>
           </article>
           <article class="settings-overview-card">
@@ -581,7 +583,7 @@
             <span id="api-base-status" class="tag">正在读取</span>
           </div>
           <p class="settings-note">
-            本地运行时可以留空，默认访问当前页面同源的后端。部署到 GitHub Pages 时，请填入你自己部署的 HTTPS 后端地址，例如 <code>https://api.example.com</code>。
+            浏览器开发模式可以留空，默认访问当前页面同源的后端。桌面 App 会自动连接随应用启动的本地 FastAPI sidecar。
           </p>
           <form id="api-base-form" class="api-base-form">
             <label>
@@ -595,7 +597,7 @@
             </div>
           </form>
           <p class="settings-security-note">
-            <strong>GitHub Pages 安全提示：</strong>不要把任何服务 API Key 写进 Pages 配置、URL、仓库或前端源码。若在下方填写密钥，它会被发送到所选后端；仅在你信任且已启用 HTTPS / 身份认证的后端上使用，生产密钥优先放在后端 Secret Manager 或 <code>.env</code>。
+            <strong>安全提示：</strong>不要把任何服务 API Key 写进仓库、URL 或前端构建资源。桌面版保存时会先写入 Windows Credential Manager，再同步给当前 sidecar；浏览器开发模式仅在当前后端进程内暂存。
           </p>
         </section>
 
@@ -608,7 +610,7 @@
             <span id="model-settings-status" class="tag">正在读取</span>
           </div>
           <p class="settings-note">
-            这里配置的是“WishForge 后端 → 模型服务”的地址，不是 GitHub Pages 的后端地址。
+            这里配置的是“WishForge sidecar → 模型服务”的地址。
             代理需要提供 OpenAI 兼容的 <code>/chat/completions</code> 接口；请填写到 <code>/v1</code> 这一层，系统会自动补上接口路径。
           </p>
           <form id="model-settings-form" class="analysis-form">
@@ -640,6 +642,23 @@
             <code>WISHFORGE_EXPLANATION_MODEL</code> ·
             <code>WISHFORGE_EXPLANATION_BASE_URL</code>。网页修改只保存在当前后端进程，长期部署请改后端环境变量。
           </p>
+        </section>
+
+        <section class="card provider-runtime-card">
+          <div class="card-heading settings-card-heading">
+            <div>
+              <p class="eyebrow">PURPOSE-SPECIFIC ROUTING</p>
+              <h2>四类服务分别配置</h2>
+            </div>
+            <span class="tag">Provider · 代理 · 模型 · 开关</span>
+          </div>
+          <p class="settings-note">
+            这里的设置按用途分别生效：论文检索、社区检索、解释模型和实验执行互不共用路由。保存后立即影响当前 sidecar；桌面 App 重启后会从应用数据目录恢复非敏感配置。
+          </p>
+          <div id="provider-runtime-slots" class="provider-runtime-slots" aria-live="polite">
+            <p class="empty">正在读取四类服务配置…</p>
+          </div>
+          <p id="provider-runtime-message" class="form-message" role="status"></p>
         </section>
 
         <section class="card settings-card">

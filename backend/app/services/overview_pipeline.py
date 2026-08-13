@@ -716,7 +716,7 @@ class DirectionResearchCoordinator:
         )
 
 
-def build_search_provider(provider_name: str) -> SearchProvider | None:
+def build_search_provider(provider_name: str, settings=None) -> SearchProvider | None:
     """Recreate the analysis search provider without crossing API-key scopes.
 
     Overview jobs are created after the original HTTP request has returned, so
@@ -734,11 +734,33 @@ def build_search_provider(provider_name: str) -> SearchProvider | None:
         # The shared coordinator owns the start-rate limiter.  Disable the
         # provider's second interval so concurrent workers do not race on its
         # unprotected timestamp or sleep twice.
-        return ArxivSearchProvider(minimum_interval_seconds=0.0)
+        return ArxivSearchProvider(
+            minimum_interval_seconds=0.0,
+            endpoint=getattr(settings, "paper_base_url", None) if settings is not None else None,
+        )
     if "search=demo" in normalized or normalized == "demo":
         from app.services.research_providers import DemoSearchProvider
 
         return DemoSearchProvider()
+    if "search=semantic_scholar" in normalized or normalized == "semantic_scholar":
+        # The Overview worker may safely reuse the live paper key captured by
+        # the request. It remains scoped to paper_search and is never copied
+        # into the durable job payload.
+        from app.services.research_providers import SemanticScholarProvider
+
+        api_key = None
+        if settings is not None and getattr(settings, "paper_api_key", None):
+            api_key = settings.paper_api_key.get_secret_value()
+        # A Semantic Scholar overview cannot safely issue anonymous requests:
+        # the public quota is very small and the old contract intentionally
+        # fell back to retained analysis papers when the paper key was absent.
+        # Keep that boundary even when a live Settings object is available.
+        if not api_key:
+            return None
+        return SemanticScholarProvider(
+            api_key=api_key,
+            endpoint=getattr(settings, "paper_base_url", None) if settings is not None else None,
+        )
     return None
 
 
