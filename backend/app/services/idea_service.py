@@ -173,13 +173,18 @@ class IdeaCheckService:
 
     @staticmethod
     def _provider(settings: Settings) -> SearchProvider:
+        if not getattr(settings, "paper_enabled", True):
+            raise ProviderUnavailable("论文检索 Provider 已在设置中关闭。", provider=settings.paper_provider)
         if settings.paper_provider == "demo":
             return DemoSearchProvider()
         if settings.paper_provider == "arxiv":
-            return ArxivSearchProvider()
+            return ArxivSearchProvider(endpoint=getattr(settings, "paper_base_url", None))
         if settings.paper_provider == "semantic_scholar":
             api_key = settings.paper_api_key.get_secret_value() if settings.paper_api_key else None
-            return SemanticScholarProvider(api_key=api_key)
+            return SemanticScholarProvider(
+                api_key=api_key,
+                endpoint=getattr(settings, "paper_base_url", None),
+            )
         raise ProviderUnavailable(f"未支持的论文检索 Provider：{settings.paper_provider}")
 
 

@@ -135,6 +135,24 @@ def test_ambiguous_request_is_saved_as_a_transparent_note() -> None:
     assert any("未识别" in warning for warning in patch["warnings"])
 
 
+def test_add_node_with_one_operation_budget_falls_back_to_connected_note() -> None:
+    graph = _seed_graph()
+    response = client.post(
+        f"/api/v1/graphs/{graph.id}/agent-patch",
+        json={
+            "request": "在根节点下新增 FlashAttention 方法节点",
+            "target_node_id": graph.root_id,
+            "max_operations": 1,
+        },
+    )
+    assert response.status_code == 200, response.text
+    patch = response.json()
+    assert len(patch["operations"]) == 1
+    assert patch["operations"][0]["op"] == "update_node"
+    assert patch["operations"][0]["node_id"] == graph.root_id
+    assert any("同时建立一条关系边" in warning for warning in patch["warnings"])
+
+
 def test_agent_patch_request_is_strictly_bounded() -> None:
     graph = _seed_graph()
     too_many = client.post(

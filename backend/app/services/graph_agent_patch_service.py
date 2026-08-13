@@ -83,6 +83,33 @@ class GraphAgentPatchService:
         # persists this as ``status=proposed`` without mutating the graph.
         return graph_service.create_patch(graph_id, patch_payload)
 
+    def translate_for_graph(
+        self,
+        graph: ConceptGraph,
+        payload: GraphAgentPatchCreate,
+    ) -> GraphPatchCreate:
+        """Translate against an embedded/transient graph without persisting it."""
+
+        request = payload.request.strip()
+        if len(request) < 3 or len(request) > MAX_REQUEST_CHARS:
+            raise GraphConflict("Agent 修改请求长度必须在 3 到 2000 个字符之间")
+        expected_version = payload.base_version or graph.version
+        if expected_version != graph.version:
+            raise GraphConflict(
+                f"graph version changed: expected {expected_version}, current {graph.version}"
+            )
+        target = self._resolve_target(graph, request, payload.target_node_id)
+        translation = self._translate(graph, target, request, payload.max_operations)
+        return GraphPatchCreate(
+            actor="agent",
+            base_version=expected_version,
+            operations=translation.operations,
+            reason=translation.reason,
+            translation_mode="heuristic",
+            source_request=request,
+            warnings=translation.warnings[:MAX_WARNING_COUNT],
+        )
+
     @staticmethod
     def _resolve_target(
         graph: ConceptGraph,
@@ -200,6 +227,12 @@ class GraphAgentPatchService:
         node_id = _unique_node_id(graph, label, request)
         node_type = _infer_node_type(label, request)
         summary = _candidate_summary(label, request)
+        if max_operations < 2:
+            warnings.append(
+                "新增节点需要同时建立一条关系边；当前操作预算只有 1，"
+                "已改为在目标节点保存待核验备注。"
+            )
+            return GraphAgentPatchService._fallback_note(target, request, warnings)
         operations = [
             GraphOperation(
                 op="add_node",
@@ -213,22 +246,19 @@ class GraphAgentPatchService:
                 ),
             )
         ]
-        if max_operations >= 2:
-            edge_id = _stable_edge_id(target.id, node_id)
-            operations.append(
-                GraphOperation(
-                    op="add_edge",
-                    edge=ConceptEdge(
-                        id=edge_id,
-                        source=target.id,
-                        target=node_id,
-                        relation="is_a" if node_type in {"method", "problem", "concept"} else "related_to",
-                        evidence_ids=[],
-                    ),
-                )
+        edge_id = _stable_edge_id(target.id, node_id)
+        operations.append(
+            GraphOperation(
+                op="add_edge",
+                edge=ConceptEdge(
+                    id=edge_id,
+                    source=target.id,
+                    target=node_id,
+                    relation="is_a" if node_type in {"method", "problem", "concept"} else "related_to",
+                    evidence_ids=[],
+                ),
             )
-        else:
-            warnings.append("调用方将 max_operations 限制为 1，因此只提议新增节点，未自动添加父子边。")
+        )
         return _Translation(
             operations=operations,
             reason=(

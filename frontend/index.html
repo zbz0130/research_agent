@@ -4,6 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="description" content="许愿机 WishForge：把模糊的研究想法梳理成有证据的理解。" />
+    <link rel="icon" href="data:," />
     <title>许愿机 / WishForge</title>
     <link rel="stylesheet" href="styles.css" />
   </head>
@@ -29,16 +30,20 @@
           <span class="nav-link-kicker">02</span>
           <span>概念图</span>
         </a>
-        <a class="nav-link" href="#innovations" data-route-link="innovations">
+        <a class="nav-link" href="#research-overview" data-route-link="research-overview">
           <span class="nav-link-kicker">03</span>
+          <span>研究方向图</span>
+        </a>
+        <a class="nav-link" href="#innovations" data-route-link="innovations">
+          <span class="nav-link-kicker">04</span>
           <span>创新与查重</span>
         </a>
         <a class="nav-link" href="#experiments" data-route-link="experiments">
-          <span class="nav-link-kicker">04</span>
+          <span class="nav-link-kicker">05</span>
           <span>实验方案</span>
         </a>
         <a class="nav-link" href="#settings" data-route-link="settings">
-          <span class="nav-link-kicker">05</span>
+          <span class="nav-link-kicker">06</span>
           <span>设置</span>
         </a>
       </nav>
@@ -106,6 +111,20 @@
             </div>
             <div id="explanation" class="result-placeholder">
               输入一个概念后，这里会显示一句话定义、直觉类比、技术机制、演变过程和限制。
+            </div>
+            <div id="analysis-graph-save-actions" class="analysis-graph-save-actions hidden" aria-live="polite">
+              <div>
+                <p class="section-label">概念图快照</p>
+                <p id="analysis-graph-save-status" class="settings-note">本次分析生成的概念图暂时保留在分析历史中。</p>
+              </div>
+              <button id="save-analysis-graph" type="button">保存为概念图</button>
+            </div>
+            <div id="analysis-overview-actions" class="analysis-overview-actions hidden" aria-live="polite">
+              <div>
+                <p class="section-label">RESEARCH OVERVIEW</p>
+                <p class="settings-note">把本次论文整理成“主题 → 研究方向 → 细分方向 → 论文”的可交互图。</p>
+              </div>
+              <button id="create-overview" type="button">Overview / 研究方向图</button>
             </div>
           </article>
 
@@ -191,9 +210,11 @@
             <div class="graph-heading-actions">
               <select id="graph-picker" class="graph-picker hidden" aria-label="选择概念图"></select>
               <span id="graph-version" class="tag">v—</span>
+              <button id="delete-current-graph" type="button" class="secondary danger-button hidden" aria-label="删除当前概念图">删除整图</button>
             </div>
           </div>
           <div id="graph" class="graph-placeholder">在工作台完成分析后会生成概念关系图。</div>
+          <p id="graph-lifecycle-note" class="settings-note hidden" role="status"></p>
           <form id="graph-meta-form" class="graph-meta-form hidden">
             <label>
               概念图名称
@@ -284,12 +305,12 @@
           <div class="card-heading">
             <div>
               <p class="eyebrow">MULTI-GRAPH CANVAS</p>
-              <h2>同时查看多棵概念树</h2>
+              <h2>同时查看多张概念图</h2>
             </div>
             <span class="tag tag-beta">局部视图</span>
           </div>
           <p class="settings-note">
-            选择两棵或更多概念图并排查看。填写节点 ID 后，每一列会保留这些节点及其层级祖先；这是临时视图，不会修改数据库中的原图。
+            选择两张或更多概念图并排查看。填写节点 ID 后，每个画布会保留这些节点及其层级祖先；这是临时视图，不会修改数据库中的原图。
           </p>
           <form id="graph-gallery-form" class="analysis-form">
             <label>
@@ -308,8 +329,96 @@
             </div>
           </form>
           <div id="graph-gallery" class="graph-gallery">
-            <p class="empty">选择概念图后，这里会并排显示它们的层级结构。</p>
+            <p class="empty">选择概念图后，这里会并排显示真实节点和连线。</p>
           </div>
+        </section>
+      </section>
+
+      <section class="app-view" data-view="research-overview" aria-labelledby="research-overview-title">
+        <header class="view-heading">
+          <div>
+            <p class="eyebrow">RESEARCH DIRECTION OVERVIEW</p>
+            <h2 id="research-overview-title">研究方向图</h2>
+            <p>从一个主题向下展开研究方向和论文证据。方向大小表示本次检索范围内的相对活跃度，论文颜色深浅表示相对新旧。</p>
+          </div>
+          <span id="overview-state-tag" class="tag tag-beta">等待生成</span>
+        </header>
+
+        <section class="card overview-history-card" aria-labelledby="overview-history-title">
+          <div class="overview-history-copy">
+            <div>
+              <p class="section-label">OVERVIEW HISTORY</p>
+              <h3 id="overview-history-title">历史研究方向图</h3>
+              <p id="overview-history-status" class="settings-note" role="status">正在读取历史任务…</p>
+            </div>
+            <div class="overview-history-controls">
+              <label for="overview-history-select" class="sr-only">选择历史研究方向图</label>
+              <select id="overview-history-select" aria-label="选择历史研究方向图" disabled>
+                <option value="">暂无历史任务</option>
+              </select>
+              <button id="overview-history-refresh" type="button" class="secondary">刷新历史</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="card overview-status-card">
+          <div class="overview-status-copy">
+            <div>
+              <p class="section-label">MULTI-AGENT PROGRESS</p>
+              <h3 id="overview-stage-title">先在工作台完成一次文献或研究分析</h3>
+              <p id="overview-status-message" class="settings-note">分析至少包含一篇有效论文后，点击 Overview 按钮开始生成。</p>
+            </div>
+            <div class="overview-progress-meta">
+              <span id="overview-progress-label">0%</span>
+              <span id="overview-counts">0 个方向 · 0 篇论文</span>
+            </div>
+          </div>
+          <div class="overview-progress-track" aria-hidden="true"><span id="overview-progress-bar"></span></div>
+          <div class="overview-status-actions">
+            <button id="overview-retry" type="button" class="secondary hidden">重新生成</button>
+            <button id="overview-save-later" type="button" class="secondary hidden">稍后保存</button>
+            <button id="overview-save" type="button" class="hidden">保存研究方向图</button>
+            <span id="overview-action-message" class="form-message" role="status"></span>
+          </div>
+        </section>
+
+        <section class="overview-workspace-grid">
+          <article class="card overview-canvas-card">
+            <div class="card-heading">
+              <div>
+                <p class="eyebrow">INTERACTIVE MAP</p>
+                <h2 id="overview-graph-title">方向与论文</h2>
+              </div>
+              <div class="graph-toolbar">
+                <button id="overview-fit" type="button" class="secondary" disabled>适应画布</button>
+                <button id="overview-toggle-edges" type="button" class="secondary" aria-pressed="true" disabled>隐藏低置信边</button>
+              </div>
+            </div>
+            <div id="overview-canvas" class="research-graph-canvas" aria-label="研究方向关系图">
+              <div class="graph-canvas-placeholder">
+                <span>⌁</span>
+                <p>生成后可缩放、平移和拖拽节点；点击节点可查看证据详情。</p>
+              </div>
+            </div>
+            <div id="overview-legend" class="overview-legend hidden">
+              <div class="legend-item">
+                <span class="legend-label">论文新旧</span>
+                <span class="recency-gradient" aria-hidden="true"></span>
+                <small>较早</small><small>较新</small>
+              </div>
+              <div class="legend-item heat-legend">
+                <span class="legend-label">方向活跃度</span>
+                <i class="heat-dot heat-dot-small"></i><i class="heat-dot heat-dot-medium"></i><i class="heat-dot heat-dot-large"></i>
+                <small>范围内较少</small><small>范围内较活跃</small>
+              </div>
+              <p id="overview-legend-note">热度只表示当前检索范围内的相对活跃度，不代表论文质量、正确性、创新性或全局影响力。</p>
+            </div>
+            <div id="overview-warnings" class="overview-warnings hidden"></div>
+          </article>
+
+          <aside id="overview-inspector" class="card graph-inspector" aria-live="polite">
+            <div class="graph-inspector-empty"><span>◎</span><p>点击图中的节点，在这里查看解释、论文证据和关系。</p></div>
+          </aside>
         </section>
       </section>
 
@@ -434,10 +543,12 @@
           <div>
             <p class="eyebrow">CONNECTION SETTINGS</p>
             <h2 id="settings-title">服务连接与 API Key</h2>
-            <p>每种能力使用独立凭据：论文检索、社区信号、解释模型和实验执行不会共享同一把 Key。</p>
+            <p>每种能力使用独立凭据：论文检索、社区信号、解释模型和实验执行不会共享同一把 Key。桌面 App 会把密钥交给系统凭据库管理。</p>
           </div>
           <button id="refresh-settings" class="secondary" type="button">刷新状态</button>
         </header>
+
+        <div id="desktop-runtime-status" class="desktop-runtime-status" role="status" aria-live="polite"></div>
 
         <section class="settings-overview" aria-label="API Key 使用说明">
           <article class="settings-overview-card">
@@ -450,8 +561,8 @@
           <article class="settings-overview-card">
             <span class="settings-overview-icon" aria-hidden="true">◌</span>
             <div>
-              <h3>默认只在本机进程保存</h3>
-              <p>网页从不回显明文 Key；重启 API 后网页输入会清除，持久配置请使用本地 <code>.env</code> 或 Secret Manager。</p>
+              <h3>系统凭据库保护</h3>
+              <p>桌面版使用 Windows Credential Manager 持久保存密钥；页面只显示“已配置”和脱敏尾号。</p>
             </div>
           </article>
           <article class="settings-overview-card">
@@ -472,7 +583,7 @@
             <span id="api-base-status" class="tag">正在读取</span>
           </div>
           <p class="settings-note">
-            本地运行时可以留空，默认访问当前页面同源的后端。部署到 GitHub Pages 时，请填入你自己部署的 HTTPS 后端地址，例如 <code>https://api.example.com</code>。
+            浏览器开发模式可以留空，默认访问当前页面同源的后端。桌面 App 会自动连接随应用启动的本地 FastAPI sidecar。
           </p>
           <form id="api-base-form" class="api-base-form">
             <label>
@@ -486,7 +597,7 @@
             </div>
           </form>
           <p class="settings-security-note">
-            <strong>GitHub Pages 安全提示：</strong>不要把任何服务 API Key 写进 Pages 配置、URL、仓库或前端源码。若在下方填写密钥，它会被发送到所选后端；仅在你信任且已启用 HTTPS / 身份认证的后端上使用，生产密钥优先放在后端 Secret Manager 或 <code>.env</code>。
+            <strong>安全提示：</strong>不要把任何服务 API Key 写进仓库、URL 或前端构建资源。桌面版保存时会先写入 Windows Credential Manager，再同步给当前 sidecar；浏览器开发模式仅在当前后端进程内暂存。
           </p>
         </section>
 
@@ -499,7 +610,7 @@
             <span id="model-settings-status" class="tag">正在读取</span>
           </div>
           <p class="settings-note">
-            这里配置的是“WishForge 后端 → 模型服务”的地址，不是 GitHub Pages 的后端地址。
+            这里配置的是“WishForge sidecar → 模型服务”的地址。
             代理需要提供 OpenAI 兼容的 <code>/chat/completions</code> 接口；请填写到 <code>/v1</code> 这一层，系统会自动补上接口路径。
           </p>
           <form id="model-settings-form" class="analysis-form">
@@ -533,6 +644,23 @@
           </p>
         </section>
 
+        <section class="card provider-runtime-card">
+          <div class="card-heading settings-card-heading">
+            <div>
+              <p class="eyebrow">PURPOSE-SPECIFIC ROUTING</p>
+              <h2>四类服务分别配置</h2>
+            </div>
+            <span class="tag">Provider · 代理 · 模型 · 开关</span>
+          </div>
+          <p class="settings-note">
+            这里的设置按用途分别生效：论文检索、社区检索、解释模型和实验执行互不共用路由。保存后立即影响当前 sidecar；桌面 App 重启后会从应用数据目录恢复非敏感配置。
+          </p>
+          <div id="provider-runtime-slots" class="provider-runtime-slots" aria-live="polite">
+            <p class="empty">正在读取四类服务配置…</p>
+          </div>
+          <p id="provider-runtime-message" class="form-message" role="status"></p>
+        </section>
+
         <section class="card settings-card">
           <div class="card-heading settings-card-heading">
             <div>
@@ -564,7 +692,43 @@
         </section>
       </section>
     </main>
-    <script src="runtime-config.js" defer></script>
-    <script src="app.js" defer></script>
+    <dialog id="graph-save-dialog" class="action-sheet-dialog" aria-labelledby="graph-save-dialog-title" aria-describedby="graph-save-dialog-description">
+      <form method="dialog" class="action-sheet-content">
+        <button type="button" class="dialog-close" data-dialog-close="graph-save" aria-label="关闭保存提示">×</button>
+        <p class="eyebrow">SAVE SNAPSHOT</p>
+        <h2 id="graph-save-dialog-title">保存本次概念图？</h2>
+        <p id="graph-save-dialog-description">保存后可以在“概念图”图库中继续编辑。暂不保存也不会丢失：它会保留在本次分析历史中，之后仍可保存。</p>
+        <div class="action-sheet-actions">
+          <button id="save-graph-dialog-confirm" type="button" autofocus>保存概念图</button>
+          <button id="save-graph-dialog-later" type="button" class="secondary">暂不保存</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="overview-save-dialog" class="action-sheet-dialog" aria-labelledby="overview-save-dialog-title" aria-describedby="overview-save-dialog-description">
+      <form method="dialog" class="action-sheet-content">
+        <button type="button" class="dialog-close" data-dialog-close="overview-save" aria-label="关闭保存提示">×</button>
+        <p class="eyebrow">SAVE RESEARCH MAP</p>
+        <h2 id="overview-save-dialog-title">保存这张研究方向图？</h2>
+        <p id="overview-save-dialog-description">保存后会进入统一图库；暂不保存也不会删除 Overview 任务，之后仍可回来查看和保存。</p>
+        <div class="action-sheet-actions">
+          <button id="overview-dialog-confirm" type="button" autofocus>保存研究方向图</button>
+          <button id="overview-dialog-later" type="button" class="secondary">暂不保存</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="graph-delete-dialog" class="action-sheet-dialog danger-dialog" aria-labelledby="graph-delete-dialog-title" aria-describedby="graph-delete-dialog-description">
+      <form method="dialog" class="action-sheet-content">
+        <button type="button" class="dialog-close" data-dialog-close="graph-delete" aria-label="关闭删除提示">×</button>
+        <p class="eyebrow">DELETE GRAPH</p>
+        <h2 id="graph-delete-dialog-title">删除整张概念图？</h2>
+        <p id="graph-delete-dialog-description">这会删除已保存的图和它的修改提案，操作不可撤销。历史分析里的图快照仍会保留，你之后可以再次保存。</p>
+        <div class="action-sheet-actions">
+          <button id="delete-graph-dialog-confirm" type="button" class="danger-button">删除整图</button>
+          <button id="delete-graph-dialog-cancel" type="button" class="secondary">取消</button>
+        </div>
+      </form>
+    </dialog>
+    <!-- runtime-config.js is imported by the module entrypoint; it contains no secrets. -->
+    <script type="module" src="./src/main.js"></script>
   </body>
 </html>

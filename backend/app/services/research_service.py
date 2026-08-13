@@ -39,9 +39,11 @@ from app.research_schemas import (
     GraphOperation,
     GraphPatch,
     GraphPatchCreate,
+    GraphMetadataUpdate,
+    GraphAgentPatchCreate,
 )
 from app.storage import storage
-from app.services.graph_service import graph_service
+from app.services.graph_service import GraphConflict, graph_service
 from app.services.research_orchestration import research_orchestrator
 from app.services.research_providers import (
     ArxivSearchProvider,
@@ -111,6 +113,7 @@ class ResearchService:
                 if job is None:
                     raise AnalysisNotFound(job_id)
                 self._jobs[job.id] = job
+            self._sync_deleted_graph_snapshot_locked(job)
             return job.model_copy(deep=True)
 
     def review_evidence_link(
@@ -214,6 +217,361 @@ class ResearchService:
                 )
                 for job in jobs
             ]
+
+    def _load_job_locked(self, job_id: UUID) -> AnalysisJob:
+        """Load a job while the caller holds ``self._lock``."""
+
+        job = self._jobs.get(job_id)
+        if job is None:
+            job = storage.get_analysis(str(job_id))
+            if job is None:
+                raise AnalysisNotFound(job_id)
+            self._jobs[job.id] = job
+        self._sync_deleted_graph_snapshot_locked(job)
+        return job
+
+    def _sync_deleted_graph_snapshot_locked(self, job: AnalysisJob) -> None:
+        """Downgrade a cached saved snapshot whose library row was removed."""
+
+        if job.result is None or job.result.graph_save_state != "saved":
+            return
+        saved_graph_id = job.result.saved_graph_id or job.result.graph.id
+        if storage.get_graph(saved_graph_id) is not None:
+            return
+        transient_graph = job.result.graph.model_copy(update={"save_state": "transient"})
+        job.result = job.result.model_copy(
+            update={
+                "graph": transient_graph,
+                "graph_save_state": "transient",
+                "saved_graph_id": None,
+            }
+        )
+        self._jobs[job.id] = job
+
+    def get_analysis_graph(self, job_id: UUID) -> ConceptGraph:
+        """Return the graph snapshot embedded in an analysis result.
+
+        This endpoint intentionally reads from the analysis document rather
+        than ``concept_graphs`` so transient graphs remain available after a
+        process restart and before the user elects to save them.
+        """
+
+        with self._lock:
+            job = self._load_job_locked(job_id)
+            if job.result is None:
+                raise AnalysisNotFound(job_id)
+            return job.result.graph.model_copy(deep=True)
+
+    def update_analysis_graph_metadata(
+        self,
+        job_id: UUID,
+        payload: GraphMetadataUpdate,
+    ) -> ConceptGraph:
+        """Edit metadata on a transient analysis graph with version checking."""
+
+        with self._lock:
+            job = self._load_job_locked(job_id)
+            if job.result is None:
+                raise AnalysisNotFound(job_id)
+            graph = job.result.graph
+            expected_version = payload.base_version or graph.version
+            if expected_version != graph.version:
+                raise GraphConflict(
+                    f"graph version changed: expected {expected_version}, current {graph.version}"
+                )
+            candidate = graph.model_copy(deep=True)
+            changes = payload.model_dump(exclude_unset=True, exclude={"base_version"})
+            if "root_id" in changes and changes["root_id"] not in {
+                node.id for node in candidate.nodes
+            }:
+                raise GraphConflict("root_id 必须指向图中的现有节点")
+            for key, value in changes.items():
+                setattr(candidate, key, value)
+            candidate.version += 1
+            candidate.updated_at = datetime.now(timezone.utc)
+            # Metadata edits in the analysis view never promote the graph.
+            candidate.save_state = "transient"
+            candidate.source_analysis_id = str(job_id)
+            candidate = ConceptGraph.model_validate(candidate.model_dump())
+            job.result = job.result.model_copy(
+                update={
+                    "graph": candidate,
+                    "graph_save_state": "transient",
+                    "saved_graph_id": None,
+                }
+            )
+            storage.save_analysis(job)
+            self._jobs[job.id] = job
+            return candidate.model_copy(deep=True)
+
+    def list_analysis_graph_patches(self, job_id: UUID) -> list[GraphPatch]:
+        with self._lock:
+            self._load_job_locked(job_id)
+            return storage.list_analysis_patches(str(job_id))
+
+    def create_analysis_graph_patch(
+        self,
+        job_id: UUID,
+        payload: GraphPatchCreate,
+    ) -> GraphPatch:
+        """Create/apply a canonical patch against an embedded transient graph."""
+
+        with self._lock:
+            job = self._load_job_locked(job_id)
+            if job.result is None:
+                raise AnalysisNotFound(job_id)
+            graph = job.result.graph
+            expected = payload.base_version or graph.version
+            patch = GraphPatch(
+                graph_id=graph.id,
+                base_version=expected,
+                operations=payload.operations,
+                reason=payload.reason,
+                actor=payload.actor,
+                status="proposed",
+                translation_mode=payload.translation_mode,
+                source_request=payload.source_request,
+                warnings=list(payload.warnings),
+            )
+            # Validate every proposal using the same operation engine as saved graphs.
+            graph_service.apply_operations_to_snapshot(
+                graph, patch.operations, expected_version=expected
+            )
+            if payload.actor == "agent":
+                storage.save_analysis_patch(str(job_id), patch)
+                return patch.model_copy(deep=True)
+            return self._apply_analysis_patch_locked(job, patch)
+
+    def apply_analysis_graph_patch(self, job_id: UUID, patch_id: str) -> GraphPatch:
+        with self._lock:
+            job = self._load_job_locked(job_id)
+            patch = storage.get_analysis_patch(str(job_id), patch_id)
+            if patch is None:
+                raise AnalysisNotFound(patch_id)
+            if patch.status != "proposed":
+                raise GraphConflict(f"patch {patch_id} is already {patch.status}")
+            return self._apply_analysis_patch_locked(job, patch)
+
+    def reject_analysis_graph_patch(self, job_id: UUID, patch_id: str) -> GraphPatch:
+        with self._lock:
+            self._load_job_locked(job_id)
+            patch = storage.get_analysis_patch(str(job_id), patch_id)
+            if patch is None:
+                raise AnalysisNotFound(patch_id)
+            if patch.status != "proposed":
+                raise GraphConflict(f"patch {patch_id} is already {patch.status}")
+            patch.status = "rejected"
+            storage.save_analysis_patch(str(job_id), patch)
+            return patch.model_copy(deep=True)
+
+    def _apply_analysis_patch_locked(
+        self, job: AnalysisJob, patch: GraphPatch
+    ) -> GraphPatch:
+        if job.result is None:
+            raise AnalysisNotFound(job.id)
+        previous_version = job.result.graph.version
+        updated = graph_service.apply_operations_to_snapshot(
+            job.result.graph,
+            patch.operations,
+            expected_version=patch.base_version,
+        )
+        updated.source_analysis_id = str(job.id)
+        job.result = job.result.model_copy(
+            update={
+                "graph": updated,
+                "graph_save_state": "transient",
+                "saved_graph_id": None,
+            }
+        )
+        patch.status = "applied"
+        if not storage.update_analysis_and_patch_if_graph_version(
+            job, patch, previous_version
+        ):
+            latest = storage.get_analysis(str(job.id))
+            if latest is not None:
+                self._jobs[job.id] = latest
+            raise GraphConflict(
+                f"graph version changed: expected {previous_version}, current version is newer"
+            )
+        self._jobs[job.id] = job
+        return patch.model_copy(deep=True)
+
+    def propose_analysis_agent_patch(
+        self,
+        job_id: UUID,
+        payload: GraphAgentPatchCreate,
+    ) -> GraphPatch:
+        from app.services.graph_agent_patch_service import graph_agent_patch_service
+
+        graph = self.get_analysis_graph(job_id)
+        translated = graph_agent_patch_service.translate_for_graph(graph, payload)
+        return self.create_analysis_graph_patch(job_id, translated)
+
+    def propose_analysis_node_explanation(
+        self,
+        job_id: UUID,
+        node_id: str,
+        settings: Settings,
+        *,
+        audience: str = "beginner",
+        language: str = "zh-CN",
+    ) -> GraphPatch:
+        """Generate a reviewed explanation proposal for a transient node."""
+
+        with self._lock:
+            job = self._load_job_locked(job_id)
+            if job.result is None:
+                raise AnalysisNotFound(job_id)
+            node = next((item for item in job.result.graph.nodes if item.id == node_id), None)
+            if node is None:
+                raise AnalysisNotFound(node_id)
+            evidence_ids = set(node.evidence_ids)
+            related_evidence = [
+                item for item in job.result.evidence if item.id in evidence_ids
+            ]
+            paper_ids = {item.paper_id for item in related_evidence}
+            paper_ids.update(node.paper_ids)
+            if node.paper_id:
+                paper_ids.add(node.paper_id)
+            related_papers = [
+                item for item in job.result.papers if item.id in paper_ids
+            ]
+            provider = _explanation_provider(settings)
+            warnings: list[str] = []
+            if (
+                settings.explanation_provider in {"openai", "openai_compatible"}
+                and not settings.explanation_api_key
+            ):
+                warnings.append(
+                    "未配置解释模型 API Key，本次节点解释使用规则回退，不是外部模型回答。"
+                )
+            try:
+                explanation = provider.explain(
+                    node.label, related_papers, related_evidence, audience, language
+                )
+            except ProviderUnavailable:
+                provider = RuleBasedExplanationProvider()
+                warnings.append("解释模型不可用，本次节点解释使用规则回退。")
+                explanation = provider.explain(
+                    node.label, related_papers, related_evidence, audience, language
+                )
+            warnings.extend(explanation.model_output_warnings)
+            summary = f"{explanation.one_sentence} {explanation.intuitive}".strip()[:5000]
+            return self.create_analysis_graph_patch(
+                job_id,
+                GraphPatchCreate(
+                    actor="agent",
+                    base_version=job.result.graph.version,
+                    reason="Agent 为临时图节点生成简洁解释，等待用户批准",
+                    translation_mode=(
+                        "heuristic"
+                        if provider.name in {"rule_based", "rule_based_fallback", "demo"}
+                        else "model"
+                    ),
+                    source_request=f"为节点“{node.label}”生成面向 {audience} 的简洁解释",
+                    warnings=warnings[:8],
+                    operations=[
+                        GraphOperation(
+                            op="update_node",
+                            node_id=node.id,
+                            updates=ConceptNodeUpdate(summary=summary),
+                        )
+                    ],
+                ),
+            )
+
+    def save_analysis_graph(
+        self,
+        job_id: UUID,
+        *,
+        expected_version: int | None = None,
+        name: str | None = None,
+    ) -> ConceptGraph:
+        """Promote an embedded analysis graph into the saved graph library.
+
+        The graph ID is stable across retries, so calling this method more than
+        once is idempotent and never creates duplicate graph rows.
+        """
+
+        with self._lock:
+            job = self._load_job_locked(job_id)
+            if job.result is None:
+                raise AnalysisNotFound(job_id)
+            graph = job.result.graph
+            if expected_version is not None and expected_version != graph.version:
+                raise GraphConflict(
+                    f"graph version changed: expected {expected_version}, current {graph.version}"
+                )
+
+            # A retry after the graph was saved (or after a user edited the
+            # saved copy through GraphPatch) must not overwrite those durable
+            # edits with the older analysis snapshot.  Reuse the existing row
+            # and refresh the analysis snapshot instead.
+            existing = storage.get_graph(graph.id)
+            if existing is not None:
+                if expected_version is not None and expected_version != existing.version:
+                    raise GraphConflict(
+                        f"graph version changed: expected {expected_version}, current {existing.version}"
+                    )
+                if name is not None and name != existing.name:
+                    existing = graph_service.update_metadata(
+                        existing.id,
+                        GraphMetadataUpdate(name=name, base_version=existing.version),
+                    )
+                job.result = job.result.model_copy(
+                    update={
+                        "graph": existing,
+                        "graph_save_state": "saved",
+                        "saved_graph_id": existing.id,
+                    }
+                )
+                storage.save_analysis(job)
+                self._jobs[job.id] = job
+                return existing.model_copy(deep=True)
+
+            candidate = graph.model_copy(deep=True)
+            if name is not None:
+                candidate.name = name
+            candidate.source_analysis_id = str(job_id)
+            candidate.save_state = "saved"
+            saved = graph_service.save(candidate)
+            job.result = job.result.model_copy(
+                update={
+                    "graph": saved,
+                    "graph_save_state": "saved",
+                    "saved_graph_id": saved.id,
+                }
+            )
+            storage.save_analysis(job)
+            self._jobs[job.id] = job
+            return saved.model_copy(deep=True)
+
+    def mark_saved_graph_deleted(self, graph_id: str) -> None:
+        """Refresh cached analysis snapshots after a library graph is deleted.
+
+        ``Storage.delete_graph`` updates durable analysis JSON in the same
+        transaction as the graph deletion.  A running process may still have
+        the old ``AnalysisJob`` in ``_jobs``, however; update those cached
+        objects immediately so the next GET does not briefly report a graph
+        that no longer exists in the saved gallery.
+        """
+
+        with self._lock:
+            for job_id, job in list(self._jobs.items()):
+                if job.result is None:
+                    continue
+                graph = job.result.graph
+                if graph.id != graph_id and job.result.saved_graph_id != graph_id:
+                    continue
+                transient_graph = graph.model_copy(update={"save_state": "transient"})
+                job.result = job.result.model_copy(
+                    update={
+                        "graph": transient_graph,
+                        "graph_save_state": "transient",
+                        "saved_graph_id": None,
+                    }
+                )
+                self._jobs[job_id] = job
 
     def clear(self) -> None:
         with self._lock:
@@ -584,8 +942,23 @@ class ResearchService:
                 papers,
                 evidence,
                 explanation,
+                planner=explanation_provider,
+                language=payload.language,
+                warnings=warnings,
                 project_id=payload.project_id,
                 graph_name=payload.graph_name,
+            )
+            graph.source_analysis_id = str(job_id)
+            graph.generation_id = str(job_id)
+            # Keep the generated graph inside the analysis snapshot only.  It
+            # becomes a durable graph-library row after the user confirms the
+            # save action through ``POST /analyses/{id}/graph/save``.
+            graph = graph.model_copy(
+                update={
+                    "source_analysis_id": str(job_id),
+                    "save_state": "transient",
+                    "source_scope": "metadata_abstract",
+                }
             )
             evidence_ledger = _build_evidence_ledger(
                 str(job_id),
@@ -596,7 +969,6 @@ class ResearchService:
             with self._lock:
                 if generation != self._generation:
                     return
-                graph_service.save(graph)
             innovation_candidates: list[InnovationCandidate] = []
             research_brief: ResearchBrief | None = None
             if payload.level == "research":
@@ -647,6 +1019,8 @@ class ResearchService:
                 evidence=evidence,
                 explanation=explanation,
                 graph=graph,
+                graph_save_state="transient",
+                saved_graph_id=None,
                 innovation_candidates=innovation_candidates,
                 novelty_note=(
                     "在当前 Provider、关键词、时间和返回数量范围内未发现直接等价工作的候选，不能据此证明全球不存在相似研究。"
@@ -699,17 +1073,24 @@ class ResearchService:
 
 
 def _search_provider(settings: Settings) -> SearchProvider:
+    if not getattr(settings, "paper_enabled", True):
+        raise ProviderUnavailable("论文检索 Provider 已在设置中关闭。", provider=settings.paper_provider)
     if settings.paper_provider == "demo":
         return DemoSearchProvider()
     if settings.paper_provider == "arxiv":
-        return ArxivSearchProvider()
+        return ArxivSearchProvider(endpoint=getattr(settings, "paper_base_url", None))
     if settings.paper_provider == "semantic_scholar":
         api_key = settings.paper_api_key.get_secret_value() if settings.paper_api_key else None
-        return SemanticScholarProvider(api_key=api_key)
+        return SemanticScholarProvider(
+            api_key=api_key,
+            endpoint=getattr(settings, "paper_base_url", None),
+        )
     raise ProviderUnavailable(f"未支持的论文检索 Provider：{settings.paper_provider}")
 
 
 def _explanation_provider(settings: Settings) -> ExplanationProvider:
+    if not getattr(settings, "explanation_enabled", True):
+        return RuleBasedExplanationProvider()
     if settings.explanation_provider == "rule_based":
         return RuleBasedExplanationProvider()
     if settings.explanation_provider in {"openai", "openai_compatible"}:
@@ -1772,55 +2153,369 @@ def _build_graph(
     evidence: list[EvidenceCard],
     explanation: ExplanationResult,
     *,
+    planner: ExplanationProvider | None = None,
+    language: str = "zh-CN",
+    warnings: list[str] | None = None,
     project_id: UUID | None = None,
     graph_name: str | None = None,
 ) -> ConceptGraph:
     root_id = "root"
+    evidence_by_paper = {
+        paper.id: [card for card in evidence if card.paper_id == paper.id]
+        for paper in papers
+    }
     nodes = [
         ConceptNode(
             id=root_id,
             label=concept,
             summary=explanation.one_sentence,
             node_type="concept",
+            role="root",
+            explanation=explanation.intuitive or explanation.one_sentence,
+            paper_ids=[paper.id for paper in papers[:12]],
+            summary_level="abstract_only" if papers else "model_inference",
+            confidence="medium" if evidence else "low",
             evidence_ids=[card.id for card in evidence],
         )
     ]
     edges: list[ConceptEdge] = []
-    sections = [
-        ("definition", "是什么", explanation.one_sentence, "concept"),
-        ("mechanism", "核心机制", explanation.technical, "method"),
-        ("evidence", "文献证据", "从相关论文中提取的摘要级证据。", "paper"),
-        ("limitations", "限制与空白", "；".join(explanation.limitations), "problem"),
-    ]
-    for node_id, label, summary, node_type in sections:
-        nodes.append(ConceptNode(id=node_id, label=label, summary=summary, node_type=node_type))
-        edges.append(ConceptEdge(source=root_id, target=node_id, relation="is_a"))
+
+    # When an explanation model is configured, use it as a bounded graph
+    # planner.  The deterministic extraction below remains the honest fallback
+    # and also supplies paper leaves.  Every model proposal is validated
+    # against this run's paper/evidence IDs before it can enter the graph.
+    graph_plan: dict[str, object] | None = None
+    plan_graph = getattr(planner, "plan_concept_graph", None)
+    if callable(plan_graph) and papers:
+        try:
+            candidate = plan_graph(concept, papers, evidence, language)
+            if isinstance(candidate, dict):
+                graph_plan = candidate
+        except ProviderUnavailable as exc:
+            if warnings is not None:
+                warnings.append(f"概念图模型规划不可用，已使用证据规则回退：{exc}")
+
+    if graph_plan is not None:
+        _apply_model_graph_plan(nodes, edges, graph_plan, papers, evidence)
+
+    # Concepts and limitations come from the explainer, while paper methods
+    # and problems below remain tied to a concrete abstract/evidence card.
+    existing_labels = {node.label.casefold() for node in nodes}
+    for index, related in enumerate(explanation.related_concepts[:8]):
+        if related.casefold() in existing_labels:
+            continue
+        related_id = f"concept-{index}"
+        nodes.append(
+            ConceptNode(
+                id=related_id,
+                label=related,
+                summary=f"与“{concept}”相关的概念；请结合相连论文和证据核验其边界。",
+                explanation=f"它是理解“{concept}”时常一起出现的概念。",
+                node_type="concept",
+                role="concept",
+                paper_ids=[paper.id for paper in papers[:4]],
+                evidence_ids=[card.id for card in evidence[:8]],
+                summary_level="model_inference",
+                confidence="low",
+            )
+        )
+        edges.append(
+            ConceptEdge(
+                source=root_id,
+                target=related_id,
+                relation="related_to",
+                source_kind="model_inference",
+                confidence="low",
+                explanation="由解释模型或规则从当前概念分析中提取，尚需人工核验。",
+            )
+        )
+        existing_labels.add(related.casefold())
+
+    for index, limitation in enumerate(explanation.limitations[:6]):
+        problem_id = f"problem-{index}"
+        nodes.append(
+            ConceptNode(
+                id=problem_id,
+                label=limitation[:120],
+                summary=limitation,
+                explanation=limitation,
+                node_type="problem",
+                role="problem",
+                paper_ids=[paper.id for paper in papers[:6]],
+                evidence_ids=[card.id for card in evidence if card.evidence_type in {"limitation", "future_work"}],
+                summary_level="abstract_only" if evidence else "model_inference",
+                confidence="low",
+            )
+        )
+        edges.append(
+            ConceptEdge(
+                source=root_id,
+                target=problem_id,
+                relation="has_problem",
+                source_kind="model_inference",
+                confidence="low",
+                explanation="当前分析识别出的限制或待解决问题。",
+            )
+        )
 
     for index, paper in enumerate(papers[:6]):
         paper_id = f"paper-{index}-{paper.id[:16]}"
+        cards = evidence_by_paper.get(paper.id, [])
+        sentences = [
+            item.strip()
+            for item in re.split(r"(?<=[.!?。！？])\s+|(?<=[。！？])", paper.abstract)
+            if item.strip()
+        ]
+        method_summary = next(
+            (item for item in sentences if re.search(r"we (?:propose|present|introduce)|method|framework|approach|提出|方法|框架", item, re.I)),
+            sentences[0] if sentences else "摘要未提供可核验的方法说明。",
+        )
+        problem_summary = next(
+            (item for item in sentences if re.search(r"problem|challenge|limitation|difficult|问题|挑战|限制", item, re.I)),
+            sentences[0] if sentences else "摘要未提供可核验的问题说明。",
+        )
+        how_it_works = next(
+            (item for item in sentences if re.search(r"\bby\b|through|using|based on|via|通过|利用|基于", item, re.I)),
+            "摘要未给出足够实现细节，需要阅读方法章节后确认。",
+        )
+        method_id = f"method-{index}-{paper.id[:12]}"
+        nodes.append(
+            ConceptNode(
+                id=method_id,
+                label=_method_label(paper.title),
+                summary=method_summary,
+                explanation=method_summary,
+                node_type="method",
+                role="method",
+                paper_ids=[paper.id],
+                evidence_ids=[card.id for card in cards],
+                summary_level="abstract_only",
+                method_summary=method_summary,
+                confidence="medium" if paper.abstract else "low",
+            )
+        )
+        edges.append(
+            ConceptEdge(
+                source=root_id,
+                target=method_id,
+                relation="uses",
+                source_kind="keyword",
+                confidence="medium" if paper.abstract else "low",
+                evidence_ids=[card.id for card in cards],
+                explanation="方法节点由该论文标题、摘要及证据卡抽取。",
+            )
+        )
         nodes.append(
             ConceptNode(
                 id=paper_id,
                 label=paper.title,
-                summary=f"{paper.year or '未标年份'} · {paper.venue or paper.source}",
+                summary=f"问题：{problem_summary} 方法：{method_summary}",
+                explanation=f"问题：{problem_summary}\n方法：{method_summary}\n怎么做：{how_it_works}",
                 node_type="paper",
-                evidence_ids=[card.id for card in evidence if card.paper_id == paper.id],
+                role="paper",
+                paper_id=paper.id,
+                paper_ids=[paper.id],
+                year=paper.year,
+                citation_count=paper.citation_count,
+                source_url=paper.url,
+                source_sections=["Abstract"] if paper.abstract else [],
+                summary_level="abstract_only",
+                problem_summary=problem_summary,
+                method_summary=method_summary,
+                how_it_works=how_it_works,
+                confidence="medium" if paper.abstract else "low",
+                evidence_ids=[card.id for card in cards],
             )
         )
-        edges.append(ConceptEdge(source="evidence", target=paper_id, relation="supports"))
-
-    for index, related in enumerate(explanation.related_concepts[:8]):
-        related_id = f"related-{index}"
-        nodes.append(ConceptNode(id=related_id, label=related, summary="相关概念，可继续展开。"))
-        edges.append(ConceptEdge(source=root_id, target=related_id, relation="related_to"))
-    return ConceptGraph(
+        edges.append(
+            ConceptEdge(
+                source=method_id,
+                target=paper_id,
+                relation="supports",
+                source_kind="keyword",
+                confidence="medium" if paper.abstract else "low",
+                evidence_ids=[card.id for card in cards],
+                explanation="该论文是相连方法节点的摘要级来源。",
+            )
+        )
+    graph = ConceptGraph(
         project_id=project_id,
         name=graph_name or f"{concept} 概念图",
-        description="由概念分析结果生成的第一版证据关联图。",
+        description="由概念、方法、问题、论文与证据关系生成的研究概念网络。",
         root_id=root_id,
+        graph_kind="concept_network",
+        source_scope="metadata_abstract",
+        save_state="transient",
+        warnings=["当前图基于检索结果、摘要和 Agent/规则抽取，不是完整引用网络。"],
+        layout_algorithm="cose",
         nodes=nodes,
         edges=edges,
     )
+    _validate_concept_graph(graph, papers, evidence)
+    _apply_concept_graph_metrics(graph)
+    return graph
+
+
+def _apply_model_graph_plan(
+    nodes: list[ConceptNode],
+    edges: list[ConceptEdge],
+    payload: dict[str, object],
+    papers: list[PaperRecord],
+    evidence: list[EvidenceCard],
+) -> None:
+    known_papers = {paper.id for paper in papers}
+    evidence_by_id = {card.id: card for card in evidence}
+    allowed_roles = {"concept", "method", "problem"}
+    allowed_relations = {"is_a", "uses", "improves", "supports", "related_to", "has_problem"}
+    allowed_sources = {"semantic_similarity", "keyword", "model_inference"}
+    allowed_confidence = {"low", "medium", "high"}
+    id_aliases: dict[str, str] = {"root": "root"}
+    used_ids = {node.id for node in nodes}
+    raw_nodes = payload.get("nodes")
+    for index, raw in enumerate(raw_nodes[:10] if isinstance(raw_nodes, list) else []):
+        if not isinstance(raw, dict):
+            continue
+        label = " ".join(str(raw.get("label") or "").split())[:200]
+        role = str(raw.get("role") or "concept")
+        if not label or role not in allowed_roles:
+            continue
+        paper_ids = [
+            value for value in raw.get("paper_ids", [])
+            if isinstance(value, str) and value in known_papers
+        ][:12]
+        evidence_ids = [
+            value for value in raw.get("evidence_ids", [])
+            if isinstance(value, str) and value in evidence_by_id
+            and (not paper_ids or evidence_by_id[value].paper_id in set(paper_ids))
+        ][:20]
+        if role in {"method", "problem"} and not (paper_ids or evidence_ids):
+            continue
+        requested_id = re.sub(r"[^a-zA-Z0-9_-]+", "-", str(raw.get("id") or "")).strip("-")
+        node_id = requested_id[:120] or f"planned-{role}-{index}"
+        base = node_id
+        suffix = 2
+        while node_id in used_ids:
+            node_id = f"{base}-{suffix}"
+            suffix += 1
+        used_ids.add(node_id)
+        if requested_id:
+            id_aliases[requested_id] = node_id
+        confidence = str(raw.get("confidence") or "low")
+        nodes.append(
+            ConceptNode(
+                id=node_id,
+                label=label,
+                summary=str(raw.get("explanation") or "")[:2000],
+                explanation=str(raw.get("explanation") or "")[:5000],
+                node_type=role,
+                role=role,
+                paper_ids=list(dict.fromkeys(paper_ids)),
+                evidence_ids=list(dict.fromkeys(evidence_ids)),
+                summary_level="abstract_only" if (paper_ids or evidence_ids) else "model_inference",
+                confidence=confidence if confidence in allowed_confidence else "low",
+            )
+        )
+
+    known_nodes = {node.id for node in nodes}
+    raw_edges = payload.get("edges")
+    for raw in raw_edges[:24] if isinstance(raw_edges, list) else []:
+        if not isinstance(raw, dict):
+            continue
+        source = id_aliases.get(str(raw.get("source")), str(raw.get("source") or ""))
+        target = id_aliases.get(str(raw.get("target")), str(raw.get("target") or ""))
+        relation = str(raw.get("relation") or "related_to")
+        source_kind = str(raw.get("source_kind") or "model_inference")
+        confidence = str(raw.get("confidence") or "low")
+        if source not in known_nodes or target not in known_nodes or source == target:
+            continue
+        if relation not in allowed_relations:
+            relation = "related_to"
+        if source_kind not in allowed_sources:
+            source_kind = "model_inference"
+        if confidence not in allowed_confidence:
+            confidence = "low"
+        if any(edge.source == source and edge.target == target and edge.relation == relation for edge in edges):
+            continue
+        edges.append(
+            ConceptEdge(
+                source=source,
+                target=target,
+                relation=relation,
+                source_kind=source_kind,
+                confidence=confidence,
+                explanation=str(raw.get("explanation") or "")[:2000],
+            )
+        )
+
+
+def _validate_concept_graph(
+    graph: ConceptGraph,
+    papers: list[PaperRecord],
+    evidence: list[EvidenceCard],
+) -> None:
+    known_papers = {paper.id for paper in papers}
+    known_evidence = {card.id for card in evidence}
+    node_ids = {node.id for node in graph.nodes}
+    if len(node_ids) != len(graph.nodes):
+        raise ValueError("概念图节点 ID 不唯一")
+    if any(edge.source not in node_ids or edge.target not in node_ids for edge in graph.edges):
+        raise ValueError("概念图存在端点缺失的边")
+    for node in graph.nodes:
+        node.paper_ids = [paper_id for paper_id in node.paper_ids if paper_id in known_papers]
+        node.evidence_ids = [item for item in node.evidence_ids if item in known_evidence]
+        if node.role == "paper" and (not node.paper_id or node.paper_id not in known_papers):
+            raise ValueError("论文节点必须关联本次检索到的合法 paper_id")
+
+    # Connect otherwise-isolated semantic nodes conservatively to the root so
+    # every visible node has context without inventing a stronger relation.
+    connected = {edge.source for edge in graph.edges} | {edge.target for edge in graph.edges}
+    for node in graph.nodes:
+        if node.id != graph.root_id and node.id not in connected:
+            graph.edges.append(
+                ConceptEdge(
+                    source=graph.root_id,
+                    target=node.id,
+                    relation="related_to",
+                    source_kind="model_inference",
+                    confidence="low",
+                    explanation="验证器为孤立候选补充的保守上下文连接。",
+                )
+            )
+
+
+def _apply_concept_graph_metrics(graph: ConceptGraph) -> None:
+    years = [node.year for node in graph.nodes if node.role == "paper" and node.year is not None]
+    minimum = min(years) if years else None
+    maximum = max(years) if years else None
+    for node in graph.nodes:
+        if node.role == "paper":
+            if node.year is None or minimum is None or maximum is None:
+                recency = 0.5
+            else:
+                recency = (node.year - minimum) / max(1, maximum - minimum)
+            node.visual.recency_score = max(0.0, min(1.0, recency))
+            node.visual.radius = 14 + (8 * node.visual.recency_score)
+        elif node.role == "root":
+            node.visual.radius = 42
+            node.visual.activity_score = 1
+        else:
+            degree = sum(edge.source == node.id or edge.target == node.id for edge in graph.edges)
+            activity = min(1.0, degree / max(1, len(graph.nodes) - 1))
+            node.visual.activity_score = activity
+            node.visual.heat_score = activity
+            node.visual.radius = 24 + (12 * math.sqrt(activity))
+
+
+def _method_label(title: str) -> str:
+    """Use a readable method label without inventing a paper-independent name."""
+
+    cleaned = re.sub(r"\s+", " ", title).strip()
+    for separator in (":", "—", " - "):
+        if separator in cleaned:
+            head = cleaned.split(separator, 1)[0].strip()
+            if 2 <= len(head) <= 100:
+                return head
+    return f"{cleaned[:96]} 的方法"
 
 
 def _build_innovation_candidates(

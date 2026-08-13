@@ -1,0 +1,26 @@
+{
+  "name": "wishforge-frontend",
+  "private": true,
+  "version": "0.2.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 1420",
+    "build": "vite build",
+    "preview": "vite preview --host 127.0.0.1 --port 1420",
+    "test": "node --test src/**/*.test.js",
+    "check": "node --check app.js && node --check smoke-browser.mjs && node --check src/main.js && node --check src/desktop-bridge.js && node --check src/graph/graph-renderer.js && node --check src/graph/graph-layout.js && node --check src/graph/graph-inspector.js && node --check src/graph/graph-metrics.js",
+    "smoke:browser": "node smoke-browser.mjs",
+    "tauri": "cd ../src-tauri && tauri",
+    "tauri:dev": "cd ../src-tauri && tauri dev --config tauri.dev.conf.json",
+    "tauri:build": "cd ../src-tauri && tauri build"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.11.1",
+    "cytoscape": "^3.33.1"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.4",
+    "puppeteer-core": "^24.16.0",
+    "vite": "^7.1.1"
+  }
+}

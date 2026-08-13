@@ -1,3 +1,5 @@
+import sqlite3
+
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
@@ -5,6 +7,7 @@ from pydantic import SecretStr
 from app.config import Settings, get_settings
 from app.main import app
 from app.research_schemas import (
+    ConceptEdge,
     ConceptGraph,
     ConceptNode,
     ExplanationResult,
@@ -40,7 +43,11 @@ def test_web_shell_is_served() -> None:
 
     assert page.status_code == 200
     assert "WishForge" in page.text
-    assert "runtime-config.js" in page.text
+    assert (
+        "runtime-config.js" in page.text
+        or "src/main.js" in page.text
+        or "/assets/index-" in page.text
+    )
     assert stylesheet.status_code == 200
     assert app_script.status_code == 200
     assert runtime_config.status_code == 200
@@ -156,8 +163,25 @@ def test_concept_analysis_creates_evidence_and_graph() -> None:
         assert result["graph"]["root_id"] == "root"
         assert result["graph"]["name"] == "Attention Mechanism 概念图"
         assert result["graph"]["version"] == 1
+        assert result["graph_save_state"] == "transient"
+        assert result["graph"]["save_state"] == "transient"
+        assert client.get(f"/api/v1/graphs/{result['graph']['id']}").status_code == 404
         assert result["evidence"][0]["locator"]["kind"] == "abstract"
         assert len(result["graph"]["nodes"]) >= 5
+        labels = {node["label"] for node in result["graph"]["nodes"]}
+        assert not {"是什么", "核心机制", "文献证据", "限制与空白"} & labels
+        node_ids = [node["id"] for node in result["graph"]["nodes"]]
+        assert len(node_ids) == len(set(node_ids))
+        valid_node_ids = set(node_ids)
+        assert all(edge["source"] in valid_node_ids and edge["target"] in valid_node_ids for edge in result["graph"]["edges"])
+        paper_nodes = [node for node in result["graph"]["nodes"] if node["role"] == "paper"]
+        assert paper_nodes and all(node["paper_id"] for node in paper_nodes)
+        evidence_ids = {card["id"] for card in result["evidence"]}
+        evidence_backed = [
+            node for node in result["graph"]["nodes"]
+            if node["role"] in {"method", "problem"} and node["summary_level"] != "model_inference"
+        ]
+        assert all(node["paper_ids"] or set(node["evidence_ids"]) & evidence_ids for node in evidence_backed)
         assert result["explanation"]["one_sentence"]
     finally:
         app.dependency_overrides.clear()
@@ -234,9 +258,19 @@ def test_literature_analysis_uses_model_query_planner_and_arxiv(monkeypatch) -> 
             evidence_ids=[item.id for item in evidence],
         )
 
+    def fake_graph_plan(
+        self: OpenAICompatibleExplanationProvider,
+        concept: str,
+        papers: list[PaperRecord],
+        evidence: list,
+        language: str,
+    ) -> dict:
+        return {"nodes": [], "edges": []}
+
     monkeypatch.setattr(OpenAICompatibleExplanationProvider, "plan_search_queries", fake_plan)
     monkeypatch.setattr(OpenAICompatibleExplanationProvider, "plan_followup_queries", fake_followup)
     monkeypatch.setattr(OpenAICompatibleExplanationProvider, "explain", fake_explain)
+    monkeypatch.setattr(OpenAICompatibleExplanationProvider, "plan_concept_graph", fake_graph_plan)
     monkeypatch.setattr(ArxivSearchProvider, "search", fake_search)
     app.dependency_overrides[get_settings] = lambda: Settings(
         paper_provider="arxiv",
@@ -308,6 +342,12 @@ def test_agent_graph_patch_requires_user_apply() -> None:
             if job["status"] in {"completed", "failed"}:
                 break
         graph = job["result"]["graph"]
+        saved = client.post(
+            f"/api/v1/analyses/{job_id}/graph/save",
+            json={"expected_version": graph["version"]},
+        )
+        assert saved.status_code == 200
+        graph = saved.json()["graph"]
         patch = client.post(
             f"/api/v1/graphs/{graph['id']}/patches",
             json={
@@ -324,7 +364,17 @@ def test_agent_graph_patch_requires_user_apply() -> None:
                             "evidence_ids": [],
                             "editable": True,
                         },
-                    }
+                    },
+                    {
+                        "op": "add_edge",
+                        "edge": {
+                            "id": "root-related-idea",
+                            "source": graph["root_id"],
+                            "target": "related-idea",
+                            "relation": "related_to",
+                            "source_kind": "model_inference",
+                        },
+                    },
                 ],
             },
         )
@@ -356,6 +406,15 @@ def _seed_graph(*, locked_node: bool = False) -> ConceptGraph:
             ConceptNode(id="root", label="根概念", editable=True),
             ConceptNode(id="child", label="子概念", editable=not locked_node),
         ],
+        edges=[
+            ConceptEdge(
+                id="root-child",
+                source="root",
+                target="child",
+                relation="is_a",
+                source_kind="user",
+            )
+        ],
     )
     return graph_service.save(graph)
 
@@ -367,6 +426,147 @@ def _add_node_operation(node_id: str) -> dict:
     }
 
 
+def _add_connected_node_operations(node_id: str) -> list[dict]:
+    return [
+        _add_node_operation(node_id),
+        {
+            "op": "add_edge",
+            "edge": {
+                "id": f"root-{node_id}",
+                "source": "root",
+                "target": node_id,
+                "relation": "related_to",
+                "source_kind": "user",
+            },
+        },
+    ]
+
+
+def _connected_seed_graph() -> ConceptGraph:
+    graph = ConceptGraph(
+        id="connected-graph-test",
+        name="连通性测试图",
+        root_id="root",
+        nodes=[
+            ConceptNode(id="root", label="根概念"),
+            ConceptNode(id="child", label="子概念"),
+        ],
+        edges=[
+            ConceptEdge(
+                id="root-child",
+                source="root",
+                target="child",
+                relation="is_a",
+                source_kind="user",
+            )
+        ],
+    )
+    return graph_service.save(graph)
+
+
+def test_graph_patch_rejects_orphan_node_and_edge_removal() -> None:
+    graph = _connected_seed_graph()
+
+    orphan_add = client.post(
+        f"/api/v1/graphs/{graph.id}/patches",
+        json={
+            "actor": "user",
+            "reason": "不能创建孤立节点",
+            "base_version": graph.version,
+            "operations": [_add_node_operation("orphan")],
+        },
+    )
+    assert orphan_add.status_code == 409
+
+    orphan_remove = client.post(
+        f"/api/v1/graphs/{graph.id}/patches",
+        json={
+            "actor": "user",
+            "reason": "不能删掉唯一连线",
+            "base_version": graph.version,
+            "operations": [{"op": "remove_edge", "node_id": "root-child"}],
+        },
+    )
+    assert orphan_remove.status_code == 409
+    assert graph_service.get(graph.id).version == graph.version
+
+
+def test_graph_patch_accepts_atomic_connected_node_and_edge_addition() -> None:
+    graph = _connected_seed_graph()
+    response = client.post(
+        f"/api/v1/graphs/{graph.id}/patches",
+        json={
+            "actor": "user",
+            "reason": "原子地增加一个有连接的节点",
+            "base_version": graph.version,
+            "operations": [
+                _add_node_operation("method"),
+                {
+                    "op": "add_edge",
+                    "edge": {
+                        "id": "child-method",
+                        "source": "child",
+                        "target": "method",
+                        "relation": "uses",
+                        "source_kind": "user",
+                    },
+                },
+            ],
+        },
+    )
+    assert response.status_code == 200
+    current = graph_service.get(graph.id)
+    assert {node.id for node in current.nodes} == {"root", "child", "method"}
+    assert {edge.id for edge in current.edges} == {"root-child", "child-method"}
+
+
+def test_legacy_disconnected_graph_can_be_annotated_and_repaired_incrementally() -> None:
+    graph = _seed_graph()
+    legacy = graph.model_copy(deep=True)
+    legacy.edges = []
+    storage.save_graph(legacy)
+    graph_service.invalidate(legacy.id)
+
+    annotated = client.post(
+        f"/api/v1/graphs/{legacy.id}/patches",
+        json={
+            "actor": "user",
+            "reason": "旧图仍可补充说明",
+            "base_version": legacy.version,
+            "operations": [
+                {
+                    "op": "update_node",
+                    "node_id": "child",
+                    "updates": {"summary": "等待重新连接的旧节点"},
+                }
+            ],
+        },
+    )
+    assert annotated.status_code == 200
+    current = graph_service.get(legacy.id)
+    repaired = client.post(
+        f"/api/v1/graphs/{legacy.id}/patches",
+        json={
+            "actor": "user",
+            "reason": "把旧节点重新连到根",
+            "base_version": current.version,
+            "operations": [
+                {
+                    "op": "add_edge",
+                    "edge": {
+                        "id": "repair-root-child",
+                        "source": "root",
+                        "target": "child",
+                        "relation": "related_to",
+                        "source_kind": "user",
+                    },
+                }
+            ],
+        },
+    )
+    assert repaired.status_code == 200
+
+
 def test_graph_patch_rejects_stale_base_version() -> None:
     graph = _seed_graph()
     first = graph_service.create_patch(
@@ -374,7 +574,7 @@ def test_graph_patch_rejects_stale_base_version() -> None:
         GraphPatchCreate(
             reason="先添加一个节点",
             base_version=graph.version,
-            operations=[_add_node_operation("first")],
+            operations=_add_connected_node_operations("first"),
         ),
     )
     graph_service.apply_patch(graph.id, first.id)
@@ -385,7 +585,7 @@ def test_graph_patch_rejects_stale_base_version() -> None:
             GraphPatchCreate(
                 reason="使用旧版本继续添加节点",
                 base_version=graph.version,
-                operations=[_add_node_operation("stale")],
+                operations=_add_connected_node_operations("stale"),
             ),
         )
 
@@ -425,7 +625,7 @@ def test_two_proposals_from_same_version_conflict_on_second_apply() -> None:
         GraphPatchCreate(
             reason="提案 A",
             base_version=graph.version,
-            operations=[_add_node_operation("proposal-a")],
+            operations=_add_connected_node_operations("proposal-a"),
         ),
     )
     second = graph_service.create_patch(
@@ -433,7 +633,7 @@ def test_two_proposals_from_same_version_conflict_on_second_apply() -> None:
         GraphPatchCreate(
             reason="提案 B",
             base_version=graph.version,
-            operations=[_add_node_operation("proposal-b")],
+            operations=_add_connected_node_operations("proposal-b"),
         ),
     )
 
@@ -574,7 +774,7 @@ def test_graph_list_and_patch_history_endpoints() -> None:
 
     proposed = client.post(
         f"/api/v1/graphs/{graph.id}/patches",
-        json={"actor": "agent", "reason": "补充候选节点", "operations": [_add_node_operation("candidate")]},
+        json={"actor": "agent", "reason": "补充候选节点", "operations": _add_connected_node_operations("candidate")},
     )
     assert proposed.status_code == 200
     history = client.get(f"/api/v1/graphs/{graph.id}/patches")
@@ -909,6 +1109,11 @@ def test_analysis_and_graph_survive_service_cache_reset() -> None:
                 break
         assert job["status"] == "completed"
         graph_id = job["result"]["graph"]["id"]
+        saved = client.post(
+            f"/api/v1/analyses/{job_id}/graph/save",
+            json={"expected_version": job["result"]["graph"]["version"]},
+        )
+        assert saved.status_code == 200
 
         # Simulate a service restart: durable rows remain, process-local caches
         # do not. The public GET/list APIs must hydrate from SQLite.
@@ -931,6 +1136,114 @@ def test_analysis_and_graph_survive_service_cache_reset() -> None:
         app.dependency_overrides.clear()
 
 
+def test_analysis_graph_lifecycle_save_is_idempotent_and_delete_preserves_history() -> None:
+    app.dependency_overrides[get_settings] = lambda: Settings(
+        paper_provider="demo",
+        explanation_provider="rule_based",
+        demo_mode=True,
+    )
+    try:
+        created = client.post(
+            "/api/v1/analyses",
+            json={"concept": "Attention", "level": "literature", "max_papers": 1},
+        )
+        job_id = created.json()["id"]
+        for _ in range(30):
+            job = client.get(f"/api/v1/analyses/{job_id}").json()
+            if job["status"] in {"completed", "failed"}:
+                break
+        assert job["status"] == "completed"
+        graph = job["result"]["graph"]
+        graph_id = graph["id"]
+        assert client.get("/api/v1/graphs").json() == []
+
+        first = client.post(
+            f"/api/v1/analyses/{job_id}/graph/save",
+            json={"expected_version": graph["version"], "name": "Attention 已保存"},
+        )
+        assert first.status_code == 200
+        assert first.json()["saved_graph_id"] == graph_id
+        assert first.json()["graph"]["save_state"] == "saved"
+
+        second = client.post(
+            f"/api/v1/analyses/{job_id}/graph/save",
+            json={"expected_version": graph["version"]},
+        )
+        assert second.status_code == 200
+        assert second.json()["saved_graph_id"] == graph_id
+        assert len(client.get("/api/v1/graphs").json()) == 1
+
+        patch = client.post(
+            f"/api/v1/graphs/{graph_id}/patches",
+            json={
+                "actor": "agent",
+                "reason": "保存后增加一个节点",
+                "operations": _add_connected_node_operations("saved-extra"),
+            },
+        )
+        assert patch.status_code == 200
+        patch_id = patch.json()["id"]
+        deleted = client.delete(f"/api/v1/graphs/{graph_id}?expected_version=1")
+        assert deleted.status_code == 204
+        assert client.get(f"/api/v1/graphs/{graph_id}").status_code == 404
+        assert client.get(f"/api/v1/graphs/{graph_id}/patches").status_code == 404
+        # Deleting the library copy does not destroy the analysis snapshot.
+        restored = client.get(f"/api/v1/analyses/{job_id}/graph")
+        assert restored.status_code == 200
+        assert restored.json()["id"] == graph_id
+        assert restored.json()["save_state"] == "transient"
+        history = client.get(f"/api/v1/analyses/{job_id}")
+        assert history.status_code == 200
+        assert history.json()["result"]["graph_save_state"] == "transient"
+        assert history.json()["result"]["saved_graph_id"] is None
+        # The historical snapshot remains reusable after the library copy is
+        # removed, so the user can save it again later without creating a
+        # second analysis result.
+        resaved = client.post(
+            f"/api/v1/analyses/{job_id}/graph/save",
+            json={"expected_version": restored.json()["version"]},
+        )
+        assert resaved.status_code == 200
+        assert resaved.json()["saved_graph_id"] == graph_id
+        assert resaved.json()["graph"]["save_state"] == "saved"
+        assert client.get(f"/api/v1/graphs/{graph_id}/patches/{patch_id}").status_code in {
+            404,
+            405,
+        }
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_analysis_graph_metadata_patch_is_still_transient() -> None:
+    app.dependency_overrides[get_settings] = lambda: Settings(
+        paper_provider="demo",
+        explanation_provider="rule_based",
+        demo_mode=True,
+    )
+    try:
+        created = client.post(
+            "/api/v1/analyses",
+            json={"concept": "Attention", "level": "literature", "max_papers": 1},
+        )
+        job_id = created.json()["id"]
+        for _ in range(30):
+            job = client.get(f"/api/v1/analyses/{job_id}").json()
+            if job["status"] in {"completed", "failed"}:
+                break
+        graph = job["result"]["graph"]
+        updated = client.patch(
+            f"/api/v1/analyses/{job_id}/graph",
+            json={"name": "临时重命名", "base_version": graph["version"]},
+        )
+        assert updated.status_code == 200
+        assert updated.json()["name"] == "临时重命名"
+        assert updated.json()["version"] == graph["version"] + 1
+        assert updated.json()["save_state"] == "transient"
+        assert client.get("/api/v1/graphs").json() == []
+    finally:
+        app.dependency_overrides.clear()
+
+
 def test_storage_path_is_configurable_and_clear_is_available(tmp_path, monkeypatch) -> None:
     database_path = tmp_path / "custom-wishforge.db"
     monkeypatch.setenv("WISHFORGE_STORAGE_PATH", str(database_path))
@@ -943,9 +1256,163 @@ def test_storage_path_is_configurable_and_clear_is_available(tmp_path, monkeypat
     isolated.close()
 
 
+def test_phase1_storage_migration_adds_lifecycle_columns_and_patch_table(tmp_path) -> None:
+    database_path = tmp_path / "legacy-wishforge.db"
+    connection = sqlite3.connect(database_path)
+    connection.executescript(
+        """
+        CREATE TABLE concept_graphs (
+            id TEXT PRIMARY KEY,
+            payload TEXT NOT NULL,
+            project_id TEXT,
+            version INTEGER NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        PRAGMA user_version = 1;
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    isolated = Storage(str(database_path))
+    try:
+        connection = sqlite3.connect(database_path)
+        columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(concept_graphs)").fetchall()
+        }
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        version = connection.execute("PRAGMA user_version").fetchone()[0]
+        connection.close()
+        assert {"graph_kind", "source_analysis_id", "source_scope", "save_state", "generation_id"}.issubset(columns)
+        assert "overview_jobs" in tables
+        assert "analysis_graph_patches" in tables
+        assert version >= 2
+    finally:
+        isolated.close()
+
+
 def test_shared_storage_clear_removes_analysis_and_graph_rows() -> None:
     graph = _seed_graph()
     assert storage.get_graph(graph.id) is not None
     storage.clear()
     assert storage.get_graph(graph.id) is None
     assert storage.list_analyses() == []
+
+
+def test_transient_analysis_graph_supports_reviewed_patches() -> None:
+    import time
+
+    app.dependency_overrides[get_settings] = lambda: Settings(
+        paper_provider="demo", explanation_provider="rule_based", demo_mode=True
+    )
+    try:
+        created = client.post(
+            "/api/v1/analyses",
+            json={"concept": "Attention Mechanism", "level": "literature", "max_papers": 3},
+        )
+        assert created.status_code == 202
+        analysis_id = created.json()["id"]
+        for _ in range(100):
+            job = client.get(f"/api/v1/analyses/{analysis_id}").json()
+            if job["status"] in {"completed", "failed"}:
+                break
+            time.sleep(0.01)
+        assert job["status"] == "completed"
+        graph = job["result"]["graph"]
+        proposal = client.post(
+            f"/api/v1/analyses/{analysis_id}/graph/agent-patch",
+            json={
+                "request": "在根节点下新增“线性注意力”方法节点",
+                "target_node_id": graph["root_id"],
+                "base_version": graph["version"],
+            },
+        )
+        assert proposal.status_code == 200
+        patch = proposal.json()
+        assert patch["status"] == "proposed"
+        assert client.get(f"/api/v1/graphs/{graph['id']}").status_code == 404
+        applied = client.post(
+            f"/api/v1/analyses/{analysis_id}/graph/patches/{patch['id']}/apply"
+        )
+        assert applied.status_code == 200
+        current = client.get(f"/api/v1/analyses/{analysis_id}/graph").json()
+        assert current["version"] == graph["version"] + 1
+        assert current["save_state"] == "transient"
+        assert any(node["label"] == "线性注意力" for node in current["nodes"])
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_transient_analysis_graph_rejects_orphaning_edge_removal() -> None:
+    import time
+
+    app.dependency_overrides[get_settings] = lambda: Settings(
+        paper_provider="demo", explanation_provider="rule_based", demo_mode=True
+    )
+    try:
+        created = client.post(
+            "/api/v1/analyses",
+            json={"concept": "Attention Mechanism", "level": "literature", "max_papers": 2},
+        )
+        analysis_id = created.json()["id"]
+        for _ in range(100):
+            job = client.get(f"/api/v1/analyses/{analysis_id}").json()
+            if job["status"] in {"completed", "failed"}:
+                break
+            time.sleep(0.01)
+        assert job["status"] == "completed"
+        graph = job["result"]["graph"]
+        root_edge = next(edge for edge in graph["edges"] if edge["source"] == graph["root_id"])
+
+        rejected = client.post(
+            f"/api/v1/analyses/{analysis_id}/graph/patches",
+            json={
+                "actor": "user",
+                "reason": "尝试删除唯一父边",
+                "base_version": graph["version"],
+                "operations": [{"op": "remove_edge", "node_id": root_edge["id"]}],
+            },
+        )
+        assert rejected.status_code == 409
+        current = client.get(f"/api/v1/analyses/{analysis_id}/graph").json()
+        assert current["version"] == graph["version"]
+        assert any(edge["id"] == root_edge["id"] for edge in current["edges"])
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_saved_graph_node_detail_and_layout_are_persisted() -> None:
+    graph = _seed_graph()
+    detail = client.get(f"/api/v1/graphs/{graph.id}/nodes/{graph.root_id}")
+    assert detail.status_code == 200
+    assert detail.json()["node"]["id"] == graph.root_id
+    layout = client.patch(
+        f"/api/v1/graphs/{graph.id}/layout",
+        json={
+            "expected_version": graph.version,
+            "positions": [
+                {"node_id": node.id, "x": index * 100 + 10, "y": index * 50 + 20}
+                for index, node in enumerate(graph.nodes)
+            ],
+            "layout_algorithm": "preset",
+        },
+    )
+    assert layout.status_code == 200
+    updated = layout.json()
+    assert updated["version"] == graph.version + 1
+    assert updated["layout_algorithm"] == "preset"
+    assert all(node["visual"]["x"] is not None for node in updated["nodes"])
+    stale = client.patch(
+        f"/api/v1/graphs/{graph.id}/layout",
+        json={
+            "expected_version": graph.version,
+            "positions": [{"node_id": graph.root_id, "x": 0, "y": 0}],
+        },
+    )
+    assert stale.status_code == 409

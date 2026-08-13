@@ -225,10 +225,14 @@ class ArxivSearchProvider:
         timeout: float = 30.0,
         minimum_interval_seconds: float = 3.0,
         *,
+        endpoint: str | None = None,
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.timeout = timeout
+        # An explicit proxy endpoint is optional; retaining the class default
+        # keeps existing callers and tests deterministic.
+        self.endpoint = (endpoint or self.endpoint).rstrip("/")
         self.minimum_interval_seconds = max(0.0, minimum_interval_seconds)
         self._sleep = sleep
         self._clock = clock
@@ -358,6 +362,7 @@ class SemanticScholarProvider:
         api_key: str | None = None,
         timeout: float = 20.0,
         *,
+        endpoint: str | None = None,
         max_retries: int = _DEFAULT_MAX_RETRIES,
         retry_backoff_seconds: float = _DEFAULT_BACKOFF_SECONDS,
         max_retry_wait_seconds: float = _DEFAULT_MAX_RETRY_WAIT_SECONDS,
@@ -371,6 +376,7 @@ class SemanticScholarProvider:
             raise ValueError("max_retry_wait_seconds 不能小于 0")
         self.api_key = api_key
         self.timeout = timeout
+        self.endpoint = (endpoint or "https://api.semanticscholar.org/graph/v1/paper/search").rstrip("/")
         self.max_retries = max_retries
         self.retry_backoff_seconds = retry_backoff_seconds
         self.max_retry_wait_seconds = max_retry_wait_seconds
@@ -394,7 +400,7 @@ class SemanticScholarProvider:
         for retry_index in range(self.max_retries + 1):
             try:
                 response = httpx.get(
-                    "https://api.semanticscholar.org/graph/v1/paper/search",
+                    self.endpoint,
                     params=params,
                     headers=headers,
                     timeout=self.timeout,
@@ -837,6 +843,112 @@ class OpenAICompatibleExplanationProvider:
         """Backward-compatible first query for callers that expect one phrase."""
 
         return self.plan_search_queries(concept, language)[0].query
+
+    def plan_concept_graph(
+        self,
+        concept: str,
+        papers: Sequence[PaperRecord],
+        evidence: Sequence[EvidenceCard],
+        language: str,
+    ) -> dict[str, object]:
+        """Propose a bounded evidence-linked graph plan for later validation.
+
+        The service treats this output as a proposal, never as authoritative
+        graph data: unknown paper/evidence IDs and unsupported relations are
+        discarded by the graph builder before the user sees them.
+        """
+
+        paper_payload = _format_paper_payload(list(papers[:8]), abstract_limit=1400)
+        evidence_payload = _format_evidence_payload(list(evidence[:32]))
+        prompt = f"""
+你是 WishForge 的 ConceptGraphPlanner、NodeExplanationAgent 和 RelationAgent。
+围绕“{concept}”生成一张有界研究概念网络；语言：{language}。
+只依据下方论文标题、摘要与证据卡。不得声称读过全文，不得创造论文或证据 ID。
+
+只返回 JSON 对象：
+{{"nodes":[{{"id":"stable-short-id","label":"节点名","role":"concept|method|problem","explanation":"一条易懂解释","paper_ids":["给定 paper_id"],"evidence_ids":["给定 evidence_id"],"confidence":"low|medium|high"}}],"edges":[{{"source":"root 或节点 id","target":"节点 id","relation":"is_a|uses|improves|supports|related_to|has_problem","source_kind":"semantic_similarity|keyword|model_inference","confidence":"low|medium|high","explanation":"为什么相连"}}]}}
+
+约束：
+1. 最多 10 个非论文节点；不要返回根节点或论文节点，系统会从真实输入补上；
+2. method/problem 节点至少关联一篇给定论文或证据；无法确认则不要生成；
+3. 边只能连接 root 或返回的节点；不要生成自环；
+4. 模型判断的边必须标为 model_inference，不得伪装成 citation；
+5. 解释必须简洁、易懂，并说明证据边界。
+
+论文：
+{paper_payload or '无'}
+
+证据卡：
+{evidence_payload or '无'}
+""".strip()
+        return self._request_explanation_part(
+            prompt,
+            system="你负责生成保守、可验证的科研概念图提案，结构正确比节点数量更重要。",
+            temperature=0.1,
+            part_label="概念图规划",
+        )
+
+    def plan_research_directions(
+        self,
+        topic: str,
+        papers: Sequence[PaperRecord],
+        prior_queries: Sequence[str],
+        *,
+        max_directions: int,
+    ) -> list[dict[str, object]]:
+        """Propose Overview taxonomy directions from the retained corpus."""
+
+        paper_payload = _format_paper_payload(list(papers[:12]), abstract_limit=1200)
+        prompt = f"""
+你是 WishForge 的 TopicTaxonomyPlannerAgent。研究主题：“{topic}”。
+本次已有检索词：{', '.join(prior_queries[:8]) or '无'}。
+只依据下方论文标题和摘要提出最多 {max_directions} 个一级研究方向。
+
+只返回 JSON：
+{{"directions":[{{"key":"short_key","label":"方向名","definition":"研究什么","boundary":"哪些论文不属于这里","query_terms":["英文 arXiv 检索短语"],"match_terms":["用于边界核对的中英文关键词"],"seed_paper_ids":["给定 paper_id"],"subdirections":[{{"key":"sub_key","label":"细分名","match_terms":["关键词"]}}]}}]}}
+
+要求：
+1. 方向彼此尽量区分，不能只是同义改写；
+2. seed_paper_ids 只能使用下方论文 ID；
+3. query_terms 每个方向 1 至 3 个，必须是简短英文检索词；
+4. match_terms 至少 2 个，用于服务端边界过滤；
+5. 最多 3 个细分方向；没有证据支持时可以不填；
+6. 不得声称这是一份完整学科分类。
+
+论文：
+{paper_payload or '无'}
+""".strip()
+        payload = self._request_explanation_part(
+            prompt,
+            system="你负责提出有边界、可检索、可审计的研究方向分类，不负责证明完整性。",
+            temperature=0.1,
+            part_label="研究方向规划",
+        )
+        directions = payload.get("directions")
+        return directions[:max_directions] if isinstance(directions, list) else []
+
+    def synthesize_research_overview(
+        self,
+        topic: str,
+        directions: Sequence[dict[str, object]],
+        paper_summaries: Sequence[dict[str, object]],
+    ) -> dict[str, object]:
+        """Write evidence-bounded Overview title/root/direction summaries."""
+
+        prompt = f"""
+你是 WishForge 的 OverviewSynthesisAgent。主题：“{topic}”。
+根据下方已经审计过的方向和论文阅读摘要，生成展示文案；不能增加节点、论文或证据。
+只返回 JSON：
+{{"title":"研究方向图标题","root_explanation":"根节点简洁说明","direction_explanations":{{"direction_key":"简洁说明"}},"warnings":["范围边界"]}}
+方向：{json.dumps(list(directions)[:8], ensure_ascii=False)}
+论文阅读摘要：{json.dumps(list(paper_summaries)[:40], ensure_ascii=False)}
+""".strip()
+        return self._request_explanation_part(
+            prompt,
+            system="你负责综合已经验证的结构，只写展示文案，不得扩大事实范围。",
+            temperature=0.1,
+            part_label="研究方向综合",
+        )
 
     def plan_search_queries(self, concept: str, language: str) -> list[SearchQueryPlan]:
         """Generate two or three distinct, bounded arXiv retrieval angles."""

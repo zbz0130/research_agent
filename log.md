@@ -1777,3 +1777,61 @@ X、知乎、Reddit 适配器仍属后续。现有 community provider / demo 不
 - 真正创新点判断必须扩展全文、引用图、社区和跨来源检索。
 
 因此，这一版本可以作为概念分析和论文初筛的可靠第一版，也为后续概念树、概念图、社区检索、多智能体创新分析和创新性查重提供了较稳固的数据基础。
+
+---
+
+## 30. Phase 1：概念图生命周期（`codex/graph-lifecycle`）
+
+本阶段从 `main` 新建分支开发，目标限定为图快照生命周期，不提前实现 Cytoscape、Overview 多 Agent 或 Tauri 壳。
+
+- 分析完成后的概念图嵌入 `AnalysisResult`，默认 `save_state=transient`；不会自动写入已保存图库。
+- 新增分析图读取、元数据 PATCH、显式保存接口；保存使用版本号 CAS，重复保存复用同一图 ID。
+- 前端新增保存 Action Sheet，默认聚焦“保存概念图”；关闭或“暂不保存”只保留历史快照。
+- 新增整图删除接口；删除会级联 GraphPatch，并把关联历史快照回退为 `transient`，不删除分析、论文和证据。
+- SQLite `user_version` 迁移到 2，补充概念图生命周期字段、`overview_jobs` 预留表和临时图 Patch 预留表；旧图默认按已保存图兼容读取。
+- 临时图在本阶段只允许改名称/根节点；节点结构和 Agent Patch 控件会提示先保存，避免请求不存在的已保存图端点。
+- 新增 `PaperReadingSummary`、节点角色兼容推导和图视觉字段，为后续真实研究图预留数据契约。
+- 验证：`python -m pytest backend/tests -q`、`node --check frontend/app.js`、Python 编译检查和 `git diff --check` 通过；另有隔离 SQLite 生命周期端到端测试通过。
+
+本阶段仍明确未完成：真实圆形节点和连线、Cytoscape.js、研究方向 Overview、arXiv PDF 章节阅读、Tauri sidecar 和 iOS 风格桌面壳。
+
+---
+
+## 31. 研究方向 Overview 与真实图第一版（`codex/research-overview`）
+
+本阶段基于 `codex/graph-lifecycle` 开发，解决用户“研究方向图在哪”和旧概念图只是缩进方框的问题。
+
+- 前端加入独立“研究方向图”导航页；文献解释与研究线索结果在有有效论文时显示 `Overview / 研究方向图`，快速解释不显示。
+- 新增异步 Overview API：创建/复用任务、轮询、方向按需展开、显式保存。任务状态和结果写入 SQLite，重启时未完成任务标记为 `interrupted`。
+- 第一版生成“主题 → 一级方向 → 细分方向 → 论文叶节点”的有界 DAG；论文节点必须带 `paper_id`，并保存摘要级问题、方法、怎么做、来源和置信度。
+- 计算论文 `recency_score` 与方向 `heat_score`；热度仅表示本次检索范围内的相对活跃度，不代表质量或创新性。
+- 前端引入 Vite 与本地 Cytoscape.js 依赖。普通概念图使用力导向布局，Overview 使用有向分层布局；支持真实连线、缩放、平移、拖拽、fit、低置信边开关和节点 Inspector。
+- Overview 完成后弹出保存 Action Sheet；暂不保存仍保留任务，保存后以 `graph_kind=research_direction` 进入统一图库。
+- FastAPI 在存在 `frontend/dist` 时优先托管 Vite 构建产物，同时保留旧根资源路径用于本地兼容诊断。
+- 文档同步更新 `README.md`、`docs/features.md`、`docs/architecture.md`；GitHub Pages 文档标记为历史方案。
+- 收尾审计补齐结构化方向运行记录，保存 Provider、查询、返回/接纳/拒绝/截断数、`split/keep/merge/discard` 决策及错误；前端可只重试失败方向。
+- 按需展开不再只重排现有论文：arXiv/Demo Provider 可安全重建时会再次执行该方向专属检索，并继续受深度、单方向和总论文预算限制。
+- 后端加入 `pypdf` 运行依赖；开放 arXiv PDF 抽取成功时保存短章节摘录、章节名与规范 PDF URL，明确保持 `unverified` 且不伪造页码。
+- 概念图加入节点搜索和角色筛选，多图画布也使用 Cytoscape 真实节点与连线；修复 Inspector 异步晚返回覆盖新选中节点和 `partial` Overview 无限轮询的问题。
+
+后续在同一分支补齐了原第一版的关键缺口：方向规划器生成定义、边界与专属检索词；最多 4 个方向工作器共享一个 Provider 与限流器并行调研；细分审查显式记录 `split / keep / merge / discard`；论文按 DOI/arXiv/canonical ID/标题去重并唯一归属。局部失败会保留成功方向并持久化 `partial`。
+
+论文阅读新增受限开放 arXiv PDF 链路：只从规范 arXiv ID 构造 HTTPS 地址，下载与抽取均有 30 秒界限、20 MB 上限，不做 OCR，抽取 Introduction、Method、Experiment、Discussion、Conclusion；任何失败逐篇回退摘要并保留 warning。当前工作器是透明规则角色，不声称实际启动多个语言模型 Agent，也不把章节句子抽取伪装成已人工阅读全文。
+
+概念图内容生成从固定“是什么/核心机制/文献证据/限制与空白”占位分区改为概念、方法、问题和论文证据节点。临时图现可直接使用版本化 Patch：用户修改立即应用，Agent 修改和节点解释仍须批准；Patch 保存于 `analysis_graph_patches`，不会提前把图放入图库。已保存图新增节点详情与布局 CAS 接口，前端可保存拖拽坐标。
+
+验证扩展到全后端测试、前端语法与 Vite 构建、Python 编译和差异检查；浏览器级真实流程继续作为本分支最终验收项。Tauri Windows sidecar 仍属于下一阶段，未在本分支伪装完成。
+
+最终收尾又补齐了阶段审计发现的状态与证据缺口：Overview 历史列表可以在重启后恢复；`partial` 保持为可查看/展开/保存的终态；研究方向图保存后仍能恢复其 PDF 章节证据；删除统一图库副本会把 Overview 历史恢复为 `transient`；保存后再展开或重试，可以用 CAS 将新版图重新写入图库。纯 Python `pypdf` 抽取增加 30 秒等待边界。
+
+Agent 编排采用“模型可选、规则可审计”的语义：配置了解释模型 Key 时，普通概念图会调用独立结构化规划角色，Overview 会分别调用方向规划和最终综合角色；模型结果必须通过论文/证据 ID、关系、数量、孤立节点和 DAG 校验。未配置 Key、调用失败或结构不合格时明确记录规则回退，方向检索工作器仍共享论文 Provider 并行运行，不会借用实验或其他用途的 API Key。
+
+阶段提交前的最终结构审计进一步收紧 GraphPatch：完整 Patch 应用后，所有节点都必须通过至少一条关系路径与根节点连通。新增节点和连接边可以在同一个原子 Patch 内提交；仅新增孤立节点或删除某个节点唯一的连接边会返回冲突且不改变图版本。这条规则同时作用于已保存图和分析历史中的临时图。
+
+同一轮审计修复了 Overview 异步线程的运行时配置传递：创建接口现在把 FastAPI 请求中解析出的 Settings 对象交给后台任务，确保设置页刚配置的解释模型 Key、模型名和代理 URL能被方向规划/综合角色使用；密钥仍只驻留进程内存，不进入 Overview 持久化载荷。新增回归测试用替代 Provider 验证规划和综合两次模型角色都收到实时模型配置。
+
+浏览器真实验收使用隔离 SQLite、Demo 论文和规则解释启动 FastAPI，再用本机 Chrome + Puppeteer 打开研究方向图：验证历史任务自动恢复、非空 Cytoscape 画布、论文节点点击后显示问题/方法/怎么做、低置信边开关、连续创建第二次分析、保存弹窗默认焦点和暂不保存状态。该流程发现并修复了 `resetAnalysisView()` 过早清空保存提示标记的问题；现在每次新分析都会按分析 ID 独立弹出一次保存确认。smoke 脚本已纳入前端命令，控制台无未捕获异常。
+
+Overview 的执行审计也从 warning 文本提升为 `OverviewResult.agent_runs` 结构化账本。它分别记录真实模型、确定性规则、Provider 检索、文档解析和验证角色的状态、耗时、计数与错误类型；模型失败和规则回退不再混成一条。记录经过无密钥约束，不落库 API Key、Authorization、代理 URL、Prompt、原始响应或上游错误正文，并覆盖初始生成、按需展开和失败方向重试。
+
+截图验收又发现研究方向节点叠成一个圆：`Number(null) === 0` 让布局代码把所有空坐标误判为已保存坐标并启用 preset。现已改为只有 `x/y` 同时非空且有限时才恢复 preset，并新增布局单元测试与浏览器坐标唯一性断言。修复后的截图显示根、方向、子方向和论文叶节点分层展开；同时为画布增加键盘焦点、方向键选点和 Enter/空格打开 Inspector，并在 Chrome smoke 中实际验证。

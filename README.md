@@ -2,7 +2,7 @@
 
 面向科研人员的证据驱动研究工作台：把一个模糊想法变成有来源、能理解、可继续研究的知识。
 
-当前仓库处于 **Stage 1：概念分析与研究线索 MVP**。这一阶段已经打通“概念 → 论文检索 → 证据卡 → 主张—证据账本 → 易懂解释 → 概念图”的首条闭环，并新增“研究想法 → 范围化 prior-art 判断”“三路研究 Agent Brief”“多图 → 跨领域候选”和“创新候选 → 实验方案草案”的可验收入口。真实社交平台实时抓取、全文页码级证据、团队权限和实验执行仍属于后续阶段。
+当前仓库处于 **研究图谱阶段：概念分析、真实关系图与研究方向 Overview**。现已打通“概念 → 论文检索 → 证据卡 → 主张—证据账本 → 易懂解释 → 可交互概念图”，并增加按需生成的“主题 → 研究方向 → 细分方向 → 论文叶节点”Overview，以及“研究想法 → 范围化 prior-art 判断”“三路研究 Agent Brief”“多图 → 跨领域候选”和“创新候选 → 实验方案草案”等入口。真实社交平台实时抓取、非开放论文全文、团队权限、实验执行和 Tauri 桌面外壳仍属于后续阶段。
 
 功能的当前可用状态和 API/页面入口见 [已实现功能说明](docs/features.md)；逐次开发过程、失败实验和验收记录见 [开发日志](log.md)。
 
@@ -46,7 +46,7 @@ L4 只表示：在本次记录的数据库、关键词、论文数量和“标�
 .
 ├── backend/                 # FastAPI API 与领域服务
 │   └── app/
-├── frontend/                # 许愿机 Web 控制台（当前为零构建依赖原型）
+├── frontend/                # Vite + Cytoscape.js 本地 Web 控制台
 ├── runner/                  # 后续本地 Docker/GPU 实验执行器的边界说明
 ├── docs/                    # 架构和阶段验收说明
 ├── docker-compose.yml
@@ -65,7 +65,20 @@ $env:PYTHONPATH = "backend"
 python -m uvicorn app.main:app --reload
 ```
 
-然后打开 <http://localhost:8000>。API 文档在 <http://localhost:8000/docs>。
+首次运行还需要构建前端：
+
+```powershell
+cd frontend
+npm install
+npm run build
+cd ..
+```
+
+然后打开 <http://localhost:8000>。FastAPI 会优先托管 `frontend/dist`；API 文档在 <http://localhost:8000/docs>。
+
+需要前端热更新时，在另一个 PowerShell 窗口运行 `cd frontend; npm run dev`，然后打开 <http://127.0.0.1:1420>。Vite 会把 `/api` 代理到本地 8000 端口。
+
+阶段验收可以在已有本地服务上运行真实 Chrome smoke test：先用临时目录中的 `WISHFORGE_STORAGE_PATH` 启动专用 FastAPI 服务，再设置 `WISHFORGE_SMOKE_URL`、已有的 `WISHFORGE_OVERVIEW_ID` 和可选的 `WISHFORGE_CHROME_PATH`，最后在 `frontend` 目录执行 `npm run smoke:browser`。它会验证 Overview 历史恢复、非空 Cytoscape 画布、节点 Inspector、边筛选，以及连续分析后的默认保存弹窗。不要把 smoke test 指向日常使用的 SQLite 数据库。
 
 如果你在 Git Bash、WSL 或 Linux 中运行，路径分隔符要使用 `/`：
 
@@ -210,9 +223,43 @@ Invoke-RestMethod -Method Post `
 docker compose up --build
 ```
 
-## GitHub Pages 前端部署
+## 产品运行方式
 
-前端可以由 GitHub Pages 自动发布，但 GitHub Pages 只能提供静态页面，不能运行 FastAPI、SQLite、论文检索或模型调用。需要先部署独立的 HTTPS 后端，并把其**不含 `/api/v1`** 的公开地址设置为仓库 Actions Variable `WISHFORGE_API_BASE_URL`；绝不能在该 Variable 或 Pages 前端中放 API Key。完整的 CORS、Pages Source 和安全配置见 [GitHub Pages 部署说明](docs/github-pages.md)。
+GitHub Pages 不再作为产品部署目标。当前产品同时支持浏览器开发模式和 Tauri Windows 桌面 App。桌面 App 启动时会自动拉起本地 Python sidecar，不需要单独启动 FastAPI。
+
+### Windows 桌面开发模式
+
+最简单的方式是双击仓库根目录中的 `启动 WishForge.bat`。它会自动设置项目环境、检查前端依赖并启动桌面 App。
+
+也可以在 PowerShell 中执行：
+
+```powershell
+cd D:\C++\search_agent
+.\start-wishforge.ps1
+```
+
+请在 Windows PowerShell（不是 WSL）中执行：
+
+```powershell
+cd D:\C++\search_agent
+\.venv\Scripts\Activate.ps1
+pip install -r backend\requirements.txt
+pip install pyinstaller
+cd frontend
+npm install
+npm.cmd run tauri:dev
+```
+
+如果 PowerShell 禁止执行 `npm.ps1`，使用上面的 `npm.cmd` 即可。首次启动会打开 WishForge 桌面窗口；关闭窗口会同时停止本地 sidecar。
+
+生成可安装版本：
+
+```powershell
+cd D:\C++\search_agent\frontend
+npm.cmd run tauri:build
+```
+
+安装包会出现在 `src-tauri\target\release\bundle\msi` 和 `src-tauri\target\release\bundle\nsis`。
 
 ## 当前阶段验收标准
 
@@ -222,6 +269,10 @@ docker compose up --build
 - 可以创建和查看一个研究项目，并在服务重启后从 SQLite 恢复；
 - 可以创建异步概念分析任务并轮询阶段进度；
 - 文献模式能返回论文元数据、摘要级证据卡、分层解释和概念图；
+- 文献/研究模式结果可以按需生成异步研究方向 Overview；
+- 概念图和研究方向图以真实节点与连线呈现，支持缩放、平移、拖拽、搜索/筛选和节点详情；
+- 临时概念图可编辑且 Agent 修改必须先审核；已保存图可保存手动布局；
+- Overview 使用有界方向级并行检索，保存查询与决策审计，可单独重试失败方向；开放 arXiv PDF 通过 `pypdf` 读取章节和未核验短摘录，失败逐篇退回摘要；
 - 研究模式能返回谨慎的创新候选和新颖性范围说明；
 - 研究模式能返回社区 / 模型脑暴 / 论文限制三路 AgentRun，以及综合候选和来源标签；
 - 可以通过 `POST /api/v1/ideas/check` 对一个研究想法做范围化 prior-art 判断，并通过 `GET /api/v1/ideas/checks` 回看记录；

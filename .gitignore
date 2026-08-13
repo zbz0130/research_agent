@@ -14,12 +14,17 @@ venv/
 node_modules/
 dist/
 .next/
+src-tauri/target/
+src-tauri/bin/*.exe
 
 # Local research artifacts
 data/
 artifacts/
 runs/
 *.sqlite3
+*.db
+*.db-wal
+*.db-shm
 
 # IDE/OS
 .idea/

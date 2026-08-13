@@ -3,7 +3,7 @@
 > 这份文档描述当前产品已经可以使用的功能、入口、数据边界和验收方式。
 > 它和 [`log.md`](../log.md) 的职责不同：`log.md` 记录开发过程、失败实验和提交时间线；本文件只维护“现在有什么、怎么用、能相信到什么程度”。
 >
-> 文档基线：功能分支的 `43fa676`，以及已经合入 `main` 的运行时模型代理提交 `df9411c`。两部分最终由 `main` 的合并提交统一提供。
+> 文档基线：`main` 的既有功能，加上当前 `codex/research-overview` 分支的图生命周期、真实 Cytoscape 图和可审计 Overview 流水线。Tauri 桌面外壳仍属于后续阶段，不能按本文件当作已完成能力。
 
 ## 1. 产品定位
 
@@ -38,11 +38,13 @@ WishForge 是一个面向科研人员的研究工作台。当前第一版的主�
 | 主张—证据账本 | 已实现 | 分析结果 / ledger API | 展示支持关系、覆盖率、强度和下一步核验动作 |
 | 人工证据核验 | 已实现 | 账本按钮 / review API | 只能修改审阅元数据，不会改写原文摘要 |
 | 想法 prior-art 查重 | 已实现 | 创新与查重页 | L0–L4 范围化相似度、相关工作、替代方向和验证步骤 |
-| 概念图与概念树 | 已实现（基础版） | 概念图页 | 创建、保存、编辑、局部查看、多图比较和 Agent 提案 |
+| 概念图与概念树 | 已实现（真实图第一版） | 概念图页 | Cytoscape 圆/椭圆节点、真实连线、缩放、平移、拖拽、节点搜索/类型筛选和 Inspector；多图画布也使用真实图，并继续支持保存、编辑、局部查看、多图比较和 Agent 提案 |
+| 概念图保存生命周期 | Phase 1 已实现 | 工作台 / 概念图页 | 分析结果先保存为临时快照，用户确认后进入图库；支持稍后保存、幂等保存和整图删除 |
+| 研究方向 Overview | 已实现（有界可审计版） | 文献/研究分析结果 → `Overview / 研究方向图`，或顶部“研究方向图”页 | 方向规划、最多 4 个方向工作器共享 Provider 并行检索、显式 split/keep/merge/discard、开放 arXiv PDF 章节抽取和逐篇摘要降级；异步生成“主题 → 方向 → 细分方向 → 论文叶节点” |
 | Agent GraphPatch | 已实现（受限版） | 概念图页 / API | 自然语言只转换成有界提案，必须人工批准或拒绝 |
 | 实验方案草案 | 已实现（不执行） | 实验页 / API | 生成并审阅方案，但不会运行代码或实验 |
 | API Key 分槽位 | 已实现 | 设置页 / `.env` | 论文、社区、解释模型和实验用途分开配置 |
-| 运行时模型代理 | `main` 已实现 | 设置页 / `/settings/runtime` | Provider、模型和 Base URL 只覆盖当前 API 进程 |
+| 运行时模型代理 | `main` 已实现 | 设置页 / `/settings/runtime` | 保留旧的解释模型兼容字段；新增四个用途槽位的 Provider、模型、Base URL、启用状态和安全连接测试（`/settings/providers/{slot}`）。密钥仍由独立凭据接口处理 |
 
 ## 3. 概念分析模式
 
@@ -71,7 +73,7 @@ WishForge 是一个面向科研人员的研究工作台。当前第一版的主�
 6. 从摘要句子生成多标签证据卡；
 7. 并行生成核心解释、论文批次主张和限制审计；
 8. 做引用、数字、论文边界和措辞安全校验；
-9. 保存分析、概念图和证据账本。
+9. 保存分析快照和证据账本；概念图先以 `transient` 快照嵌入分析，用户确认后才进入已保存图库。
 
 查询计划会保存 `query`、`purpose`、`phase` 和 `derived_from_paper_ids`，因此用户可以看到检索范围是怎样形成的。
 
@@ -241,10 +243,11 @@ L4 只是一个范围化检索结论，不是原创性保证。查重结果可�
 
 概念图由节点和边组成，节点可以关联摘要证据。当前支持：
 
-- 分析完成后自动生成概念图；
+- 分析完成后生成概念图快照；默认状态是 `transient`，不会自动出现在已保存图库；
+- 分析完成后前端显示保存 Action Sheet，默认推荐“保存概念图”；选择“暂不保存”不会删除历史分析中的快照；
+- 从历史分析结果再次点击“保存为概念图”可以稍后保存；同一分析图使用稳定 ID，重复保存不会生成重复记录；
 - 手工创建或导入概念图；
-- 修改图名、描述和根节点；
-- 手动新增或编辑节点；
+- 已保存图和分析历史中的临时图都可以修改图名、描述、根节点、节点和边；临时图使用独立的 `analysis_graph_patches` 审计记录，用户修改立即按版本应用，Agent 修改与节点解释仍需批准；
 - 选择多棵图并排查看；
 - 按节点 ID 生成不落库的局部视图；
 - 比较多棵图并生成跨领域候选；
@@ -258,6 +261,47 @@ L4 只是一个范围化检索结论，不是原创性保证。查重结果可�
 4. 用户查看操作和警告；
 5. 用户调用 apply 或 reject；
 6. 服务端检查图谱版本，避免旧提案覆盖新内容。
+
+### 8.1 临时图与已保存图的生命周期
+
+分析结果中的图与图库中的图是两个有意区分的状态：
+
+```text
+分析完成
+   │
+   ▼
+transient 图快照（保留在 analysis_jobs.result.graph）
+   │  用户选择保存
+   ▼
+saved 图（写入 concept_graphs，可编辑、可列出、可删除）
+```
+
+Phase 1 的接口如下：
+
+| 方法 | 路径 | 作用 |
+| --- | --- | --- |
+| GET | `/api/v1/analyses/{analysis_id}/graph` | 读取分析中的临时或已保存快照 |
+| PATCH | `/api/v1/analyses/{analysis_id}/graph` | 在分析历史中修改图名、说明或根节点；不会自动保存到图库 |
+| POST | `/api/v1/analyses/{analysis_id}/graph/save` | 使用版本 CAS 将快照提升为已保存图；重复调用幂等 |
+| DELETE | `/api/v1/graphs/{graph_id}?expected_version=...` | 删除整张已保存图和级联 GraphPatch；历史分析快照保留并回到 `transient` |
+
+`GET /api/v1/graphs` 只列出 `saved` 图。删除图不会删除 `analysis_jobs`、`overview_jobs`、论文、证据账本或历史结果；关联的分析或 Overview 快照会回到 `transient`，用户以后仍可重新保存。临时图已经支持用户修改以及 Agent `proposed → apply/reject` 的完整 GraphPatch 审批。图修改在完整 Patch 应用后检查所有节点是否仍与根节点连通；新增节点必须在同一 Patch 中同时建立关系边，删除唯一连接边会被拒绝，避免编辑后出现没有上下文的孤立圆点。
+
+### 8.2 当前边界
+
+当前概念图已经使用本地 npm 依赖中的 Cytoscape.js 渲染：节点是圆形/椭圆形，边是真实连线，并支持缩放、平移、拖拽、fit、低置信边开关和节点详情 Inspector。老图仍使用兼容字段读取，不会因为缺少新视觉字段而失效。
+
+没有保存坐标的新图使用实际布局算法；`x/y=null` 不会再被误当作 `(0,0)` 的 preset 坐标，因此初次打开时节点不会叠成一个圆。图画布可获得键盘焦点，方向键循环选择可见节点，Enter/空格打开 Inspector；同时保留鼠标、触控板缩放、平移和拖拽。
+
+研究方向 Overview 已经可用：完成文献解释或研究线索分析后，点击 `Overview / 研究方向图` 启动异步任务；结果按“主题 → 一级方向 → 细分方向 → 论文叶节点”组织。方向规划器给出定义、边界与专属检索词，方向工作器共享同一个论文 Provider 和限流器并最多并发 4 个，细分审查会记录 `split / keep / merge / discard`。每个方向还会保存结构化审计（查询范围、返回/接纳/拒绝/截断数、决策和错误）；单方向失败不会抹掉其他结果，任务会标为 `partial`，前端允许只重试失败方向。点击方向继续展开时会在可安全重建 Provider 的前提下再次执行方向专属检索。论文节点包含问题、方法、怎么做、年份、来源和真实阅读范围；开放 arXiv PDF 可抽取 Introduction、Method、Experiment、Discussion、Conclusion，章节短摘录以未核验 EvidenceCard 保存，失败或无全文时逐篇回退 `abstract_only`。Overview 任务持久化在 SQLite 中，`GET /api/v1/overviews` 支持应用重启后恢复历史任务；保存到统一图库后，节点 Inspector 仍可通过 `generation_id` 恢复 Overview 独有的 PDF 章节证据。
+
+Overview 使用混合 Agent 编排：配置了解释模型 Key 时，`TopicTaxonomyPlannerAgent` 和 `OverviewSynthesisAgent` 会进行独立的结构化模型调用；每个方向的检索工作器并行运行，共享论文 Provider 与限流器。模型输出仍需经过 ID、边界、数量和图结构校验。没有解释模型 Key、模型调用失败或输出不合格时，会明确记录 `deterministic_rule_fallback` 并使用可审计规则，不能伪装成模型调用。分类、章节边界和摘录仍需研究者核验。arXiv 与 Demo Provider 可以在后台安全重建并执行方向级检索；需要论文专用 Key 的 Provider 当前会诚实退回原分析论文，而不会借用解释或实验 Key。PDF 文本层由 `pypdf` 处理（失败时可尝试本机 `pdftotext`），不做 OCR，也不虚构页码。当前仍不提供完整引用/共引网络，Tauri 桌面壳属于后续阶段。
+
+每次 Overview 还会在 `result.agent_runs` 中保存结构化、无密钥的运行审计：角色、执行模式、Provider、真实模型名（仅模型调用）、状态、起止时间、耗时、输入/输出计数、方向和错误类型。规划、方向协调与每个方向工作器、论文读取、验证、综合，以及按需展开/局部重试都有记录；模型失败和规则回退是两条不同记录。审计不会保存 API Key、Authorization、Base URL、Prompt、原始模型响应或上游错误正文。
+
+设置页中的解释模型 Key、模型名和代理 URL 是当前进程内配置；创建 Overview 时会把这份实时配置安全传给后台任务，但不会把 Key 序列化到 SQLite、结果 JSON 或日志。也就是说，配置后新建的研究方向图会使用该解释模型槽位；论文检索、社区和实验槽位不会被借用。
+
+临时概念图也可直接编辑：用户手动节点修改会立即以版本化 Patch 应用，Agent 自然语言修改与节点解释仍先进入待审核列表。保存前这些 Patch 写入 `analysis_graph_patches`，不会让临时图偷偷进入图库。已保存图支持节点详情接口和手动布局持久化。
 
 用户自己的手动修改可以立即应用。自然语言翻译在当前版本使用透明的有界启发式规则，不允许直接提交任意字段、删除根节点或绕过版本检查。
 
@@ -293,20 +337,22 @@ arXiv Provider 默认不需要论文 Key。解释模型使用 OpenAI-compatible 
 常用的非密钥配置包括：
 
 - `WISHFORGE_PAPER_PROVIDER`：默认 `arxiv`，也可选择已实现的其他 Provider；
+- `WISHFORGE_PAPER_BASE_URL`、`WISHFORGE_PAPER_MODEL`、`WISHFORGE_PAPER_ENABLED`；
 - `WISHFORGE_COMMUNITY_PROVIDER`：当前默认 `demo`；
+- `WISHFORGE_COMMUNITY_BASE_URL`、`WISHFORGE_COMMUNITY_MODEL`、`WISHFORGE_COMMUNITY_ENABLED`；
 - `WISHFORGE_EXPLANATION_PROVIDER`、`WISHFORGE_EXPLANATION_MODEL`；
-- `WISHFORGE_EXPLANATION_BASE_URL`、`WISHFORGE_EXPLANATION_TIMEOUT_SECONDS`；
-- `WISHFORGE_EXPERIMENT_PROVIDER`、`WISHFORGE_DEMO_MODE`；
+- `WISHFORGE_EXPLANATION_BASE_URL`、`WISHFORGE_EXPLANATION_TIMEOUT_SECONDS`、`WISHFORGE_EXPLANATION_ENABLED`；
+- `WISHFORGE_EXPERIMENT_PROVIDER`、`WISHFORGE_EXPERIMENT_BASE_URL`、`WISHFORGE_EXPERIMENT_MODEL`、`WISHFORGE_EXPERIMENT_ENABLED`；
+- `WISHFORGE_DEMO_MODE`；
 - `WISHFORGE_STORAGE_PATH`、`WISHFORGE_CORS_ORIGINS`。
 
 `.env` 固定从仓库根目录加载，不依赖启动时的当前目录。
 
-网页上的 Key：
+网页上的 Key（桌面版由 Windows Credential Manager 持久保存；浏览器开发模式仅进程内）：
 
 - 只返回已配置状态和掩码；
-- 当前版本只保存在 API 进程内存；
-- 重启后清除；
-- 不写入 SQLite、日志或响应正文；
+- 不写入前端构建产物、SQLite 或普通日志；
+- 不写入 SQLite、日志或响应正文（浏览器模式的值只存于当前进程）；
 - 当前没有登录和权限系统，只适合本机或受保护内网。
 
 ### 10.2 运行时解释模型代理
@@ -318,7 +364,7 @@ GET   /api/v1/settings/runtime
 PATCH /api/v1/settings/runtime
 ```
 
-可以配置：
+兼容接口可以配置：
 
 - explanation provider；
 - 模型名称；
@@ -333,6 +379,15 @@ https://proxy.example.com/v1
 
 后端会请求 `/chat/completions`。该接口不接收 API Key；Key 仍然通过独立的 `/settings/api-keys` 配置。网页修改只覆盖当前进程，长期部署请写入后端 `.env` 或 Secret Manager。
 
+桌面设置页还可以按以下四个用途分别 PATCH 非敏感配置：
+
+```text
+PATCH /api/v1/settings/providers/{paper_search|community_search|explanation_model|experiment_runner}
+POST  /api/v1/settings/providers/{slot}/test
+```
+
+每个槽位都返回 `provider`、`base_url`、`model`、`enabled` 和掩码后的凭据状态。连接测试默认只验证格式；明确传入 `{"probe": true}` 时才对 Base URL 做 3 秒、无凭据的 HTTP 连通性探测，不会启动论文检索、模型调用或实验。
+
 这两个 runtime endpoint 已随 `df9411c` 合入 `main`。开发分支在合并前曾不包含它们，因此如果单独检出旧的功能分支提交，需要以 `main` 的合并结果为准。
 
 ## 11. 前端、后端和持久化
@@ -342,12 +397,15 @@ https://proxy.example.com/v1
 当前 Web 控制台分为：
 
 - 工作台：概念分析和结果；
-- 概念图：树、图、Patch 审核和多图视图；
+- 概念图：真实关系图、节点 Inspector、Patch 审核和多图视图；
+- 研究方向图：异步 Overview 状态、方向/论文图、按需展开与保存；
 - 创新与查重：prior-art 和研究候选；
 - 实验：实验方案草案和人工审阅；
 - 设置：后端连接、Provider 状态和密钥槽位。
 
-设置页中的“后端 API 基地址”保存在浏览器的 localStorage；部署到 GitHub Pages 时只能填写公开的 HTTPS 后端地址，不能把任何模型或论文 Key 放进 Pages、URL 或前端源码。
+前端已经切换到 Vite 构建。`npm run dev` 在 1420 端口运行并代理本地 FastAPI，`npm run build` 生成 `frontend/dist`；FastAPI 检测到构建产物后会优先托管它。本分支仍是浏览器/本地 Web 壳，Windows Tauri sidecar 尚未完成。
+
+仓库提供 `frontend/smoke-browser.mjs` 和 `npm run smoke:browser` 进行 Chrome 级交互验收，覆盖 Overview 历史恢复、Cytoscape 节点点击、Inspector、边开关、连续发起分析、保存弹窗默认焦点和暂不保存语义。运行时必须让专用 FastAPI 服务使用临时 `WISHFORGE_STORAGE_PATH`，并显式传入 `WISHFORGE_OVERVIEW_ID`；不要连接日常使用的 SQLite 数据库。
 
 ### 后端
 
