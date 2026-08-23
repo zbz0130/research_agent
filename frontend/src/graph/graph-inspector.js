@@ -22,6 +22,29 @@ function detailBlock(label, value) {
   return `<section class="graph-inspector-section"><p>${esc(label)}</p><div>${esc(value)}</div></section>`;
 }
 
+const ROLE_LABELS = {
+  root: "研究主题",
+  problem: "核心问题",
+  method: "方法路线",
+  direction: "研究方向",
+  paper: "论文证据",
+  concept: "概念",
+  idea: "研究想法",
+  note: "注释",
+};
+
+const RELATION_LABELS = {
+  is_a: "属于",
+  part_of: "组成",
+  related_to: "相关",
+  supports: "论文证据",
+  contradicts: "反驳",
+  has_problem: "核心问题",
+  improves: "改进",
+  uses: "方法路线",
+  inspired_by: "启发自",
+};
+
 function evidenceMarkup(items = []) {
   const evidence = items.filter((item) => item && (item.excerpt || item.claim)).slice(0, 8);
   if (!evidence.length) return "";
@@ -58,7 +81,7 @@ export function inspectorMarkup(node, relatedEdges = [], options = {}) {
   return `
     <div class="graph-inspector-heading">
       <div>
-        <p class="section-label">${esc(role)}</p>
+        <p class="section-label">${esc(ROLE_LABELS[role] || role)}</p>
         <h3>${esc(node.label || "未命名节点")}</h3>
       </div>
       <span class="tag">${esc(node.confidence || "low")} confidence</span>
@@ -80,22 +103,22 @@ export function inspectorMarkup(node, relatedEdges = [], options = {}) {
         ${Number.isFinite(Number(node.citation_count)) ? `<div><dt>引用数</dt><dd>${esc(node.citation_count)}</dd></div>` : ""}
       </dl>
     ` : ""}
-    ${role === "direction" ? `
+    ${["problem", "method", "direction"].includes(role) ? `
       <section class="graph-inspector-section graph-inspector-metric">
         <p>范围内活跃度</p>
         <div class="metric-bar"><span style="width:${Math.round((Number(visual.heat_score) || 0) * 100)}%"></span></div>
-        <small>${esc(heatSources || "依据当前方向论文数量、新论文比例等可用项计算")}</small>
+        <small>${esc(heatSources || "依据当前分支论文数量、新论文比例等可用项计算")}</small>
       </section>
     ` : ""}
     ${relatedEdges.length ? `
       <section class="graph-inspector-section">
         <p>相关关系</p>
         <ul class="graph-inspector-relations">${relatedEdges.slice(0, 12).map((edge) => `
-          <li>${esc(edge.source)} <strong>${esc(edge.relation || "related_to")}</strong> ${esc(edge.target)}</li>
+          <li>${esc(edge.source)} <strong>${esc(RELATION_LABELS[edge.relation] || edge.relation || "相关")}</strong> ${esc(edge.target)}</li>
         `).join("")}</ul>
       </section>
     ` : ""}
     ${sourceUrl ? `<a class="graph-source-button" href="${esc(sourceUrl)}" target="_blank" rel="noreferrer noopener">打开论文来源 ↗</a>` : ""}
-    ${role === "direction" && options.allowExpand ? '<button type="button" class="secondary graph-expand-button" data-overview-expand-node>继续调研这个方向</button>' : ""}
+    ${["method", "direction"].includes(role) && options.allowExpand ? `<button type="button" class="secondary graph-expand-button" data-overview-expand-node>${role === "method" ? "继续细化这条方法路线" : "继续调研这个方向"}</button>` : ""}
   `;
 }

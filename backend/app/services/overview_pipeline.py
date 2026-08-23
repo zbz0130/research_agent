@@ -158,6 +158,8 @@ class DirectionPlan:
     match_terms: tuple[str, ...]
     seed_paper_ids: tuple[str, ...] = ()
     subdirections: tuple[tuple[str, str, tuple[str, ...]], ...] = ()
+    problem: str = ""
+    first_principles: str = ""
 
 
 @dataclass
@@ -298,6 +300,11 @@ class TopicTaxonomyPlanner:
                     match_terms=rule.match_terms,
                     seed_paper_ids=seed_ids,
                     subdirections=rule.subdirections,
+                    problem=rule.definition,
+                    first_principles=(
+                        f"目标：{rule.definition} "
+                        f"约束与反例边界：{rule.boundary}"
+                    ),
                 )
             )
         if other_seed_ids:
@@ -313,6 +320,11 @@ class TopicTaxonomyPlanner:
                     query_terms=(_clean_query(f"{topic} related work"),),
                     match_terms=topic_terms,
                     seed_paper_ids=other_seed_ids,
+                    problem="识别当前分类规则尚未覆盖、但可能属于该主题的重要研究问题。",
+                    first_principles=(
+                        "先保留未归类证据，再检查其目标、约束和失败模式；"
+                        "证据不足时不强行命名成熟研究方向。"
+                    ),
                 )
             )
         return plans
@@ -380,6 +392,10 @@ class TopicTaxonomyPlanner:
                 ).strip("-")[:100] or f"sub-{sub_index}"
                 subdirections.append((sub_key, sub_label, sub_terms))
             used_keys.add(key)
+            problem = " ".join(str(raw.get("problem") or "").split())[:3000]
+            first_principles = " ".join(
+                str(raw.get("first_principles") or "").split()
+            )[:4000]
             plans.append(
                 DirectionPlan(
                     key=key,
@@ -390,6 +406,11 @@ class TopicTaxonomyPlanner:
                     match_terms=match_terms,
                     seed_paper_ids=seed_ids,
                     subdirections=tuple(subdirections),
+                    problem=problem or definition,
+                    first_principles=(
+                        first_principles
+                        or f"目标与问题：{definition} 约束与排除边界：{boundary}"
+                    ),
                 )
             )
         return plans

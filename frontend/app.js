@@ -1,3 +1,16 @@
+import {
+  buildAddEdgeOperation,
+  buildAddNodeOperations,
+  buildRemoveEdgeOperation,
+  buildRemoveNodeOperation,
+} from "./src/graph/graph-editor.js";
+import {
+  completedAnalysisHasPapers,
+  createResearchOverviewPayload,
+  createTopicAnalysisPayload,
+  overviewGenerationSucceeded,
+} from "./src/research/overview-workflow.js";
+
 const healthEl = document.querySelector("#health");
 const apiKeysEl = document.querySelector("#api-keys");
 const apiKeyForm = document.querySelector("#api-key-form");
@@ -71,6 +84,10 @@ const analysisGraphSaveStatusEl = document.querySelector("#analysis-graph-save-s
 const saveAnalysisGraphButton = document.querySelector("#save-analysis-graph");
 const analysisOverviewActionsEl = document.querySelector("#analysis-overview-actions");
 const createOverviewButton = document.querySelector("#create-overview");
+const overviewTopicForm = document.querySelector("#overview-topic-form");
+const overviewTopicInput = document.querySelector("#overview-topic-input");
+const overviewTopicSubmit = document.querySelector("#overview-topic-submit");
+const overviewTopicMessageEl = document.querySelector("#overview-topic-message");
 const overviewStateTagEl = document.querySelector("#overview-state-tag");
 const overviewStageTitleEl = document.querySelector("#overview-stage-title");
 const overviewStatusMessageEl = document.querySelector("#overview-status-message");
@@ -80,6 +97,7 @@ const overviewProgressBarEl = document.querySelector("#overview-progress-bar");
 const overviewRetryButton = document.querySelector("#overview-retry");
 const overviewSaveLaterButton = document.querySelector("#overview-save-later");
 const overviewSaveButton = document.querySelector("#overview-save");
+const overviewEditButton = document.querySelector("#overview-edit");
 const overviewActionMessageEl = document.querySelector("#overview-action-message");
 const overviewGraphTitleEl = document.querySelector("#overview-graph-title");
 const overviewCanvasEl = document.querySelector("#overview-canvas");
@@ -1954,6 +1972,7 @@ function renderGraphInspector(node, relatedEdges = []) {
   const inspector = document.querySelector("#concept-graph-inspector");
   if (!inspector || !window.WishForgeGraph?.inspectorMarkup) return;
   state.conceptGraphSelectedNodeId = node?.id || null;
+  refreshGraphEditorControls();
   const requestedGraphId = state.graphId;
   const requestedNodeId = node?.id || null;
   const evidenceById = new Map((state.analysisResult?.evidence || []).map((item) => [item.id, item]));
@@ -2045,9 +2064,31 @@ function renderGraph(graph) {
         </label>
         <button type="button" class="secondary" data-concept-graph-fit>适应画布</button>
         <button type="button" class="secondary" data-concept-graph-save-layout ${saved ? "" : "disabled"}>保存布局</button>
+        <button type="button" class="secondary" data-concept-graph-edit>编辑模式</button>
         <button type="button" class="secondary" data-concept-graph-low-confidence aria-pressed="true">隐藏低置信边</button>
         <span class="settings-note">滚轮缩放 · 空白处拖动 · 节点可拖拽</span>
       </div>
+      <form class="graph-editor-panel hidden" data-graph-editor-form>
+        <div class="graph-editor-heading"><strong>图编辑</strong><span>编辑会立即写入已保存图谱；论文证据节点默认受保护。</span></div>
+        <div class="graph-editor-grid">
+          <label>新增节点名称<input data-editor-node-label maxlength="120" placeholder="例如：分层记忆" /></label>
+          <label>节点类型<select data-editor-node-type><option value="problem">问题</option><option value="method">方法</option><option value="direction">研究方向</option><option value="concept">概念</option><option value="note">注释</option></select></label>
+          <label>连接到<select data-editor-parent></select></label>
+          <button type="submit" data-editor-add-node>新增并连接</button>
+        </div>
+        <div class="graph-editor-grid graph-editor-connect-grid">
+          <label>起点<select data-editor-source></select></label>
+          <label>终点<select data-editor-target></select></label>
+          <label>关系<select data-editor-relation><option value="related_to">相关</option><option value="has_problem">包含问题</option><option value="uses">使用</option><option value="improves">改进</option><option value="supports">支持</option><option value="is_a">属于</option></select></label>
+          <button type="button" class="secondary" data-editor-add-edge>连接两点</button>
+        </div>
+        <div class="graph-editor-footer">
+          <span data-editor-selection>尚未选中节点</span>
+          <button type="button" class="secondary danger-button" data-editor-remove-node disabled>删除选中节点</button>
+          <label>删除连线<select data-editor-edge></select></label>
+          <button type="button" class="secondary danger-button" data-editor-remove-edge>删除连线</button>
+        </div>
+      </form>
       <div class="concept-graph-layout">
         <div class="concept-graph-canvas" aria-label="概念关系图"></div>
         <aside id="${inspectorId}" class="graph-inspector compact-inspector">
@@ -2080,6 +2121,13 @@ function renderGraph(graph) {
     });
     graphEl.querySelector("[data-concept-graph-role]")?.addEventListener("change", applyGraphFilter);
     graphEl.querySelector("[data-concept-graph-fit]")?.addEventListener("click", () => state.conceptGraphRenderer?.fit());
+    graphEl.querySelector("[data-concept-graph-edit]")?.addEventListener("click", (event) => {
+      const panel = graphEl.querySelector("[data-graph-editor-form]");
+      const opening = panel?.classList.contains("hidden");
+      panel?.classList.toggle("hidden", !opening);
+      event.currentTarget.textContent = opening ? "退出编辑模式" : "编辑模式";
+      if (opening) refreshGraphEditorControls();
+    });
     graphEl.querySelector("[data-concept-graph-save-layout]")?.addEventListener("click", async (event) => {
       if (!isSavedGraph(state.graph)) return;
       const button = event.currentTarget;
@@ -2116,6 +2164,7 @@ function renderGraph(graph) {
     state.conceptGraphSelectedNodeId = null;
     state.conceptGraphRenderer?.update(graph, { kind: graph.graph_kind || "concept_network" });
     inspector.innerHTML = '<div class="graph-inspector-empty"><span>◎</span><p>点击圆形节点查看解释、证据与关系。</p></div>';
+    refreshGraphEditorControls();
   }
   window.requestAnimationFrame(() => state.conceptGraphRenderer?.fit());
 }
@@ -2650,7 +2699,72 @@ graphMetaForm.addEventListener("submit", async (event) => {
   setGraphMessage(transientAnalysis ? "临时概念图设置已保存；保存图后可继续编辑节点。" : "概念图名称已保存。", "");
 });
 
+graphEl.addEventListener("submit", async (event) => {
+  const form = event.target.closest("[data-graph-editor-form]");
+  if (!form) return;
+  event.preventDefault();
+  if (!isSavedGraph(state.graph)) {
+    setGraphMessage("请先保存研究方向图，再使用图编辑功能。", "error-text");
+    return;
+  }
+  const label = form.querySelector("[data-editor-node-label]")?.value.trim();
+  const nodeType = form.querySelector("[data-editor-node-type]")?.value || "note";
+  const parent = form.querySelector("[data-editor-parent]")?.value;
+  if (!label || !parent) {
+    setGraphMessage("请填写节点名称并选择它要连接到的节点。", "error-text");
+    return;
+  }
+  const id = `user-${Date.now()}`;
+  try {
+    await applyUserPatch(buildAddNodeOperations({
+      id,
+      edgeId: `edge-${Date.now()}`,
+      label,
+      nodeType,
+      parentId: parent,
+    }), "用户在图编辑模式新增节点并建立连接");
+    form.querySelector("[data-editor-node-label]").value = "";
+    setGraphMessage("节点已添加并连接。", "");
+  } catch (error) {
+    setGraphMessage(`新增节点失败：${error.message}`, "error-text");
+  }
+});
+
 graphEl.addEventListener("click", async (event) => {
+  const editorAction = event.target.closest("[data-editor-add-edge], [data-editor-remove-node], [data-editor-remove-edge]");
+  if (editorAction && state.graph) {
+    if (!isSavedGraph(state.graph)) {
+      setGraphMessage("请先保存研究方向图，再使用图编辑功能。", "error-text");
+      return;
+    }
+    const panel = graphEl.querySelector("[data-graph-editor-form]");
+    try {
+      if (editorAction.matches("[data-editor-add-edge]")) {
+        const source = panel?.querySelector("[data-editor-source]")?.value;
+        const target = panel?.querySelector("[data-editor-target]")?.value;
+        const relation = panel?.querySelector("[data-editor-relation]")?.value || "related_to";
+        await applyUserPatch([
+          buildAddEdgeOperation({ id: `edge-${Date.now()}`, sourceId: source, targetId: target, relation }),
+        ], "用户在图编辑模式手动连接两个节点");
+        setGraphMessage("连线已创建。", "");
+      } else if (editorAction.matches("[data-editor-remove-node]")) {
+        const nodeId = state.conceptGraphSelectedNodeId;
+        const operation = buildRemoveNodeOperation(state.graph, nodeId);
+        const node = state.graph.nodes.find((item) => item.id === nodeId);
+        if (!window.confirm(`删除“${node.label || node.id}”及其连线？`)) return;
+        await applyUserPatch([operation], "用户在图编辑模式删除节点");
+        state.conceptGraphSelectedNodeId = null;
+        setGraphMessage("节点及其关联连线已删除。", "");
+      } else {
+        const edgeId = panel?.querySelector("[data-editor-edge]")?.value;
+        await applyUserPatch([buildRemoveEdgeOperation(state.graph, edgeId)], "用户在图编辑模式删除连线");
+        setGraphMessage("连线已删除。", "");
+      }
+    } catch (error) {
+      setGraphMessage(`图编辑失败：${error.message}`, "error-text");
+    }
+    return;
+  }
   const explainButton = event.target.closest("[data-node-explain]");
   if (explainButton && state.graph) {
     const nodeId = explainButton.dataset.nodeExplain;
@@ -2715,14 +2829,14 @@ nodeForm.addEventListener("submit", async (event) => {
 });
 
 const overviewStageLabels = {
-  direction_planning: "规划一级研究方向",
-  direction_research: "并行调研各研究方向",
-  direction_expansion: "判断方向是否需要继续细分",
+  direction_planning: "拆解核心问题与成功标准",
+  direction_research: "并行调研各问题分支",
+  direction_expansion: "归纳解决问题的方法路线",
   paper_reading: "阅读论文摘要与可用章节",
   direction_validation: "核对论文归属与证据",
-  graph_synthesis: "合成研究方向图",
+  graph_synthesis: "合成问题—方法—论文结构图",
   statistics_layout: "计算活跃度、新旧程度与布局",
-  completed: "研究方向图已生成",
+  completed: "问题—方法—论文结构图已生成",
 };
 
 function setOverviewActionMessage(text, kind = "") {
@@ -2866,11 +2980,12 @@ function resetOverviewView({ preserveJobStatus = false } = {}) {
   if (overviewStageTitleEl) overviewStageTitleEl.textContent = "先在工作台完成一次文献或研究分析";
   if (overviewStatusMessageEl) overviewStatusMessageEl.textContent = "分析至少包含一篇有效论文后，点击 Overview 按钮开始生成。";
   if (overviewProgressLabelEl) overviewProgressLabelEl.textContent = "0%";
-  if (overviewCountsEl) overviewCountsEl.textContent = "0 个方向 · 0 篇论文";
+  if (overviewCountsEl) overviewCountsEl.textContent = "0 个问题/方法节点 · 0 篇论文";
   if (overviewProgressBarEl) overviewProgressBarEl.style.width = "0%";
   overviewRetryButton?.classList.add("hidden");
   overviewSaveLaterButton?.classList.add("hidden");
   overviewSaveButton?.classList.add("hidden");
+  overviewEditButton?.classList.add("hidden");
   if (overviewFitButton) overviewFitButton.disabled = true;
   if (overviewToggleEdgesButton) overviewToggleEdgesButton.disabled = true;
   if (overviewToggleEdgesButton) {
@@ -2920,7 +3035,7 @@ function renderOverviewStatus(job) {
   if (overviewProgressLabelEl) overviewProgressLabelEl.textContent = `${progress}%`;
   if (overviewProgressBarEl) overviewProgressBarEl.style.width = `${progress}%`;
   if (overviewCountsEl) {
-    overviewCountsEl.textContent = `${Number(result?.direction_count) || 0} 个方向 · ${Number(result?.paper_count) || 0} 篇论文`;
+    overviewCountsEl.textContent = `${Number(result?.direction_count) || 0} 个问题/方法节点 · ${Number(result?.paper_count) || 0} 篇论文`;
   }
   const canRegenerate = ["failed", "interrupted", "partial"].includes(status);
   overviewRetryButton?.classList.toggle("hidden", !canRegenerate);
@@ -2929,7 +3044,42 @@ function renderOverviewStatus(job) {
   const saved = job?.save_state === "saved" || Boolean(job?.saved_graph_id);
   overviewSaveButton?.classList.toggle("hidden", !hasGraph || saved);
   overviewSaveLaterButton?.classList.toggle("hidden", !hasGraph || saved);
+  overviewEditButton?.classList.toggle("hidden", !hasGraph);
+  if (overviewEditButton) overviewEditButton.textContent = saved ? "打开图编辑模式" : "保存并进入编辑模式";
   if (saved && overviewSaveButton) overviewSaveButton.classList.add("hidden");
+}
+
+function refreshGraphEditorControls() {
+  const panel = graphEl?.querySelector("[data-graph-editor-form]");
+  const graph = state.graph;
+  if (!panel || !graph?.nodes?.length) return;
+  const optionMarkup = graph.nodes.map((node) => (
+    `<option value="${escapeHtml(node.id)}">${escapeHtml(node.label || node.id)}</option>`
+  )).join("");
+  const setOptions = (selector, preferred) => {
+    const control = panel.querySelector(selector);
+    if (!control) return;
+    const oldValue = control.value;
+    control.innerHTML = optionMarkup;
+    const candidates = [oldValue, preferred, graph.root_id];
+    const next = candidates.find((value) => graph.nodes.some((node) => node.id === value));
+    if (next) control.value = next;
+  };
+  const selectedId = state.conceptGraphSelectedNodeId || graph.root_id;
+  setOptions("[data-editor-parent]", selectedId);
+  setOptions("[data-editor-source]", selectedId);
+  setOptions("[data-editor-target]", graph.root_id);
+  const edgeControl = panel.querySelector("[data-editor-edge]");
+  if (edgeControl) {
+    edgeControl.innerHTML = graph.edges.length
+      ? graph.edges.map((edge) => `<option value="${escapeHtml(edge.id)}">${escapeHtml(edge.source)} → ${escapeHtml(edge.target)} · ${escapeHtml(edge.relation || "相关")}</option>`).join("")
+      : '<option value="">暂无可删除连线</option>';
+  }
+  const selected = graph.nodes.find((node) => node.id === selectedId);
+  const selection = panel.querySelector("[data-editor-selection]");
+  if (selection) selection.textContent = selected ? `已选中：${selected.label || selected.id}` : "尚未选中节点";
+  const removeButton = panel.querySelector("[data-editor-remove-node]");
+  if (removeButton) removeButton.disabled = !selected || selected.id === graph.root_id || selected.editable === false;
 }
 
 function renderOverviewWarnings(warnings = []) {
@@ -2988,7 +3138,7 @@ function renderOverviewInspector(node, relatedEdges = []) {
     evidence_cards: (node.evidence_ids || []).map((id) => evidenceById.get(id)).filter(Boolean),
   } : node;
   overviewInspectorEl.innerHTML = window.WishForgeGraph.inspectorMarkup(enriched, relatedEdges, {
-    allowExpand: (node?.role || node?.node_type) === "direction"
+    allowExpand: ["method", "direction"].includes(node?.role || node?.node_type)
       && ["succeeded", "partial"].includes(state.overviewJob?.status),
   });
   const expandButton = overviewInspectorEl.querySelector("[data-overview-expand-node]");
@@ -3014,7 +3164,7 @@ function renderOverviewInspector(node, relatedEdges = []) {
           detailedNode,
           detail.related_edges || relatedEdges,
           {
-            allowExpand: (detailedNode.role || detailedNode.node_type) === "direction"
+            allowExpand: ["method", "direction"].includes(detailedNode.role || detailedNode.node_type)
               && ["succeeded", "partial"].includes(state.overviewJob?.status),
           },
         );
@@ -3071,6 +3221,81 @@ function maybePromptOverviewSave(job) {
   if (job.save_state === "saved" || state.overviewSavePromptedForId === String(job.id)) return;
   state.overviewSavePromptedForId = String(job.id);
   window.requestAnimationFrame(() => showDialog(overviewSaveDialog));
+}
+
+function setOverviewTopicMessage(text, kind = "") {
+  if (!overviewTopicMessageEl) return;
+  overviewTopicMessageEl.textContent = text;
+  overviewTopicMessageEl.className = `form-message ${kind}`;
+}
+
+function waitFor(milliseconds) {
+  return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+}
+
+async function waitForTopicAnalysis(analysisId) {
+  while (true) {
+    const response = await apiFetch(`/api/v1/analyses/${encodeURIComponent(analysisId)}`);
+    if (!response.ok) throw new Error(await response.text());
+    const job = await response.json();
+    setOverviewTopicMessage(`第一步：${job.message || "正在检索论文"} · ${job.progress || 0}%`);
+    if (job.status === "completed") return job;
+    if (job.status === "failed") throw new Error(job.error || "论文调研失败");
+    await waitFor(700);
+  }
+}
+
+async function createTopicOverview(topic) {
+  if (!topic) return;
+  if (overviewTopicSubmit) overviewTopicSubmit.disabled = true;
+  state.overviewId = null;
+  state.overviewJob = null;
+  state.overviewAnalysisId = null;
+  state.overviewSelectedNodeId = null;
+  stopOverviewPolling();
+  state.overviewRenderer?.destroy();
+  state.overviewRenderer = null;
+  setOverviewTopicMessage("正在建立问题导向的论文调研任务…");
+  try {
+    const analysisResponse = await apiFetch("/api/v1/analyses", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(createTopicAnalysisPayload(topic)),
+    });
+    if (!analysisResponse.ok) throw new Error(await analysisResponse.text());
+    const analysisJob = await analysisResponse.json();
+    state.analysisId = analysisJob.id;
+    state.overviewAnalysisId = analysisJob.id;
+    const completedAnalysis = await waitForTopicAnalysis(analysisJob.id);
+    if (!completedAnalysisHasPapers(completedAnalysis)) {
+      throw new Error("本次检索没有得到可用于研究方向图的学术论文");
+    }
+    state.analysisResult = completedAnalysis.result;
+    setOverviewTopicMessage("第二步：正在把问题、方法与论文证据组织为研究方向图…");
+    const overviewResponse = await apiFetch(`/api/v1/analyses/${encodeURIComponent(analysisJob.id)}/overview`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(createResearchOverviewPayload()),
+    });
+    if (!overviewResponse.ok) throw new Error(await overviewResponse.text());
+    const overviewJob = await overviewResponse.json();
+    state.overviewId = String(overviewJob.id);
+    state.overviewJob = overviewJob;
+    state.overviewJobs = [overviewJob, ...state.overviewJobs.filter((item) => String(item.id) !== String(overviewJob.id))];
+    state.overviewHistoryLoaded = true;
+    renderOverviewHistory();
+    renderOverviewStatus(overviewJob);
+    await pollOverview(state.overviewId);
+    if (!overviewGenerationSucceeded(state.overviewJob)) {
+      throw new Error(state.overviewJob?.error || "研究方向图未能生成");
+    }
+    setOverviewTopicMessage("研究方向图已生成。你可以拖拽圆形节点、缩放画布，并点击节点查看问题、方法和论文证据。");
+  } catch (error) {
+    setOverviewTopicMessage(`一键调研失败：${error.message}`, "error-text");
+    setOverviewActionMessage(`一键调研失败：${error.message}`, "error-text");
+  } finally {
+    if (overviewTopicSubmit) overviewTopicSubmit.disabled = false;
+  }
 }
 
 async function pollOverview(id) {
@@ -3164,7 +3389,7 @@ async function expandOverviewDirection(nodeId) {
   if (!state.overviewId || !state.overviewJob || !nodeId) return;
   const button = overviewInspectorEl?.querySelector("[data-overview-expand-node]");
   if (button) button.disabled = true;
-  setOverviewActionMessage("正在调研并展开所选方向…", "");
+  setOverviewActionMessage("正在调研并细化所选方法路线…", "");
   try {
     const response = await apiFetch(`/api/v1/overviews/${encodeURIComponent(state.overviewId)}/expand`, {
       method: "POST",
@@ -3180,7 +3405,7 @@ async function expandOverviewDirection(nodeId) {
     renderOverviewStatus(job);
     const result = overviewResult(job);
     if (result?.graph) renderOverviewGraph(result);
-    setOverviewActionMessage("方向已更新；请检查新增的子方向与论文。", "");
+    setOverviewActionMessage("方法路线已更新；请检查新增的细分路线与论文证据。", "");
   } catch (error) {
     setOverviewActionMessage(`方向展开失败：${error.message}`, "error-text");
   } finally {
@@ -3222,6 +3447,33 @@ async function saveOverview() {
   }
 }
 
+async function openOverviewEditor() {
+  if (!state.overviewJob || !overviewResult()?.graph) return;
+  if (overviewEditButton) overviewEditButton.disabled = true;
+  try {
+    let graph = null;
+    if (state.overviewJob.save_state === "saved" && state.overviewJob.saved_graph_id) {
+      const response = await apiFetch(`/api/v1/graphs/${encodeURIComponent(state.overviewJob.saved_graph_id)}`);
+      if (!response.ok) throw new Error(await response.text());
+      graph = await response.json();
+    } else {
+      const saved = await saveOverview();
+      graph = saved?.graph || null;
+    }
+    if (!graph?.id) throw new Error("研究方向图保存后未返回可编辑图谱");
+    state.graph = graph;
+    state.graphId = graph.id;
+    await loadGraphPicker(graph.id);
+    navigateTo("concept-graphs");
+    renderGraph(graph);
+    setGraphMessage("已进入图编辑模式：可新增节点、连接节点、删除用户节点，并保存拖拽后的布局。", "");
+  } catch (error) {
+    setOverviewActionMessage(`无法进入图编辑模式：${error.message}`, "error-text");
+  } finally {
+    if (overviewEditButton) overviewEditButton.disabled = false;
+  }
+}
+
 createOverviewButton?.addEventListener("click", () => createOverview());
 overviewRetryButton?.addEventListener("click", () => createOverview({ force: true }));
 overviewFitButton?.addEventListener("click", () => state.overviewRenderer?.fit());
@@ -3246,6 +3498,7 @@ overviewHistoryRefreshButton?.addEventListener("click", () => {
     .catch((error) => setOverviewActionMessage(`历史任务刷新失败：${error.message}`, "error-text"));
 });
 overviewSaveButton?.addEventListener("click", () => showDialog(overviewSaveDialog));
+overviewEditButton?.addEventListener("click", () => openOverviewEditor());
 overviewSaveLaterButton?.addEventListener("click", () => {
   closeDialog(overviewSaveDialog);
   setOverviewActionMessage("研究方向图暂不保存；Overview 任务仍可继续查看。", "");
@@ -3360,6 +3613,11 @@ analysisForm.addEventListener("submit", async (event) => {
     analysisSubmit.disabled = false;
     setAnalysisMessage("创建分析失败：" + error.message, "error-text");
   }
+});
+
+overviewTopicForm?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  await createTopicOverview(overviewTopicInput?.value.trim());
 });
 
 projectForm.addEventListener("submit", async (event) => {

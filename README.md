@@ -227,6 +227,10 @@ docker compose up --build
 
 GitHub Pages 不再作为产品部署目标。当前产品同时支持浏览器开发模式和 Tauri Windows 桌面 App。桌面 App 启动时会自动拉起本地 Python sidecar，不需要单独启动 FastAPI。
 
+### Windows 桌面 App
+
+普通使用直接运行安装包 `src-tauri\target\release\bundle\nsis\WishForge_0.2.0_x64-setup.exe`，安装后从开始菜单打开 WishForge；不需要手动启动 Python、Vite 或 sidecar。
+
 ### Windows 桌面开发模式
 
 最简单的方式是双击仓库根目录中的 `启动 WishForge.bat`。它会自动设置项目环境、检查前端依赖并启动桌面 App。
@@ -242,7 +246,7 @@ cd D:\C++\search_agent
 
 ```powershell
 cd D:\C++\search_agent
-\.venv\Scripts\Activate.ps1
+.\.venv\Scripts\Activate.ps1
 pip install -r backend\requirements.txt
 pip install pyinstaller
 cd frontend
@@ -259,7 +263,7 @@ cd D:\C++\search_agent\frontend
 npm.cmd run tauri:build
 ```
 
-安装包会出现在 `src-tauri\target\release\bundle\msi` 和 `src-tauri\target\release\bundle\nsis`。
+默认生成面向普通 Windows 用户的 NSIS 一键安装程序：`src-tauri\target\release\bundle\nsis\WishForge_0.2.0_x64-setup.exe`。构建前会自动生成 sidecar，并真实调用健康接口；无法启动的 sidecar 不会进入安装包。
 
 ## 当前阶段验收标准
 
@@ -269,10 +273,11 @@ npm.cmd run tauri:build
 - 可以创建和查看一个研究项目，并在服务重启后从 SQLite 恢复；
 - 可以创建异步概念分析任务并轮询阶段进度；
 - 文献模式能返回论文元数据、摘要级证据卡、分层解释和概念图；
-- 文献/研究模式结果可以按需生成异步研究方向 Overview；
+- 文献/研究模式结果可以按需生成异步研究方向 Overview，结构固定为“主题 → 核心问题 → 方法路线 → 论文证据”；
 - 概念图和研究方向图以真实节点与连线呈现，支持缩放、平移、拖拽、搜索/筛选和节点详情；
 - 临时概念图可编辑且 Agent 修改必须先审核；已保存图可保存手动布局；
-- Overview 使用有界方向级并行检索，保存查询与决策审计，可单独重试失败方向；开放 arXiv PDF 通过 `pypdf` 读取章节和未核验短摘录，失败逐篇退回摘要；
+- Overview 使用有界方向级并行检索；配置解释模型后，每个问题分支会由独立审查 Agent 判断 split/keep 和方法归组，服务端拒绝越界论文 ID并保留回退审计；
+- 开放 arXiv PDF 通过 `pypdf` 读取 Introduction、Method、Experiment、Discussion、Conclusion 等可用章节并生成未核验证据卡，失败逐篇退回摘要；论文阅读 Agent 只能基于这些证据与摘要生成“问题/方法/怎么做”，不能改变来源范围；
 - 研究模式能返回谨慎的创新候选和新颖性范围说明；
 - 研究模式能返回社区 / 模型脑暴 / 论文限制三路 AgentRun，以及综合候选和来源标签；
 - 可以通过 `POST /api/v1/ideas/check` 对一个研究想法做范围化 prior-art 判断，并通过 `GET /api/v1/ideas/checks` 回看记录；

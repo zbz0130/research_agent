@@ -31,3 +31,19 @@ test("paper leaves are circular and grow only within a readable range", () => {
   assert.equal(appearance.width, appearance.height);
   assert.ok(appearance.width >= 42 && appearance.width <= 74);
 });
+
+test("problem and method nodes remain circular and grow with branch heat", () => {
+  for (const role of ["problem", "method"]) {
+    const cool = nodeAppearance(
+      { role, visual: { radius: 28, heat_score: 0 } },
+      { root_id: "topic" },
+    );
+    const hot = nodeAppearance(
+      { role, visual: { radius: 58, heat_score: 1 } },
+      { root_id: "topic" },
+    );
+    assert.equal(cool.width, cool.height);
+    assert.equal(hot.width, hot.height);
+    assert.ok(hot.width > cool.width);
+  }
+});

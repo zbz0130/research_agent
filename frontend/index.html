@@ -339,10 +339,28 @@
           <div>
             <p class="eyebrow">RESEARCH DIRECTION OVERVIEW</p>
             <h2 id="research-overview-title">研究方向图</h2>
-            <p>从一个主题向下展开研究方向和论文证据。方向大小表示本次检索范围内的相对活跃度，论文颜色深浅表示相对新旧。</p>
+            <p>从研究目标出发，沿“核心问题 → 方法路线 → 论文证据”展开。问题与方法节点大小表示当前范围内活跃度，论文颜色深浅表示相对新旧。</p>
           </div>
           <span id="overview-state-tag" class="tag tag-beta">等待生成</span>
         </header>
+
+        <section class="card overview-start-card" aria-labelledby="overview-start-title">
+          <div class="card-heading">
+            <div>
+              <p class="eyebrow">ONE-CLICK RESEARCH</p>
+              <h2 id="overview-start-title">从一个粗略方向开始调研</h2>
+              <p>输入如 <code>agent memory</code> 的研究主题。系统会先用第一性原理拆解目标、约束、失败模式和成功标准，再按“核心问题 → 方法路线 → 论文证据”生成可拖拽的结构图。</p>
+            </div>
+          </div>
+          <form id="overview-topic-form" class="overview-topic-form">
+            <label for="overview-topic-input">研究方向</label>
+            <div class="overview-topic-actions">
+              <input id="overview-topic-input" maxlength="500" required placeholder="例如：agent memory、具身智能中的长程规划" />
+              <button id="overview-topic-submit" type="submit">一键调研并生成结构图</button>
+            </div>
+            <p id="overview-topic-message" class="form-message" role="status">会以研究者模式检索论文；完成后自动进入研究方向图。</p>
+          </form>
+        </section>
 
         <section class="card overview-history-card" aria-labelledby="overview-history-title">
           <div class="overview-history-copy">
@@ -370,7 +388,7 @@
             </div>
             <div class="overview-progress-meta">
               <span id="overview-progress-label">0%</span>
-              <span id="overview-counts">0 个方向 · 0 篇论文</span>
+              <span id="overview-counts">0 个问题/方法节点 · 0 篇论文</span>
             </div>
           </div>
           <div class="overview-progress-track" aria-hidden="true"><span id="overview-progress-bar"></span></div>
@@ -378,6 +396,7 @@
             <button id="overview-retry" type="button" class="secondary hidden">重新生成</button>
             <button id="overview-save-later" type="button" class="secondary hidden">稍后保存</button>
             <button id="overview-save" type="button" class="hidden">保存研究方向图</button>
+            <button id="overview-edit" type="button" class="secondary hidden">进入图编辑模式</button>
             <span id="overview-action-message" class="form-message" role="status"></span>
           </div>
         </section>
@@ -387,7 +406,7 @@
             <div class="card-heading">
               <div>
                 <p class="eyebrow">INTERACTIVE MAP</p>
-                <h2 id="overview-graph-title">方向与论文</h2>
+                <h2 id="overview-graph-title">问题、方法与论文证据</h2>
               </div>
               <div class="graph-toolbar">
                 <button id="overview-fit" type="button" class="secondary" disabled>适应画布</button>
@@ -407,7 +426,7 @@
                 <small>较早</small><small>较新</small>
               </div>
               <div class="legend-item heat-legend">
-                <span class="legend-label">方向活跃度</span>
+                <span class="legend-label">问题/方法活跃度</span>
                 <i class="heat-dot heat-dot-small"></i><i class="heat-dot heat-dot-medium"></i><i class="heat-dot heat-dot-large"></i>
                 <small>范围内较少</small><small>范围内较活跃</small>
               </div>

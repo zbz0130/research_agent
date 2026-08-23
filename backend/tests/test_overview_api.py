@@ -110,7 +110,14 @@ def test_overview_create_poll_and_idempotent_reuse() -> None:
         assert "当前检索范围内" in result["legend"]["heat_note"]
 
         nodes = graph["nodes"]
+        node_by_id = {node["id"]: node for node in nodes}
+        problem_nodes = [node for node in nodes if node["role"] == "problem"]
+        method_nodes = [node for node in nodes if node["role"] == "method"]
         paper_nodes = [node for node in nodes if node["role"] == "paper"]
+        assert problem_nodes
+        assert method_nodes
+        assert all(node["problem_summary"] for node in problem_nodes)
+        assert all(node["method_summary"] for node in method_nodes)
         assert len(paper_nodes) == result["paper_count"]
         assert all(node["paper_id"] for node in paper_nodes)
         assert all(node["problem_summary"] for node in paper_nodes)
@@ -125,6 +132,16 @@ def test_overview_create_poll_and_idempotent_reuse() -> None:
         for edge in graph["edges"]:
             outgoing[edge["source"]].append(edge["target"])
         assert all(not outgoing[node["id"]] for node in paper_nodes)
+        parents = {edge["target"]: edge["source"] for edge in graph["edges"]}
+        assert all(node_by_id[parents[node["id"]]]["role"] == "method" for node in paper_nodes)
+        assert all(
+            node_by_id[parents[parents[node["id"]]]]["role"] == "problem"
+            for node in paper_nodes
+        )
+        assert all(
+            parents[parents[parents[node["id"]]]] == graph["root_id"]
+            for node in paper_nodes
+        )
         assert client.get(f"/api/v1/graphs/{graph['id']}").status_code == 404
     finally:
         app.dependency_overrides.clear()
@@ -158,6 +175,35 @@ def test_overview_uses_live_request_settings_for_optional_model_agents(
             "warnings": [],
         }
 
+    def fake_review(self, topic, direction, papers):
+        calls.append(f"review:{self.model}")
+        return {
+            "decision": "keep",
+            "reason": "测试范围内的方法差异不足以继续拆分。",
+            "method_routes": [
+                {
+                    "key": "core",
+                    "label": "核心方法路线",
+                    "paper_ids": [paper.id for paper in papers],
+                }
+            ],
+        }
+
+    def fake_paper_summaries(self, topic, direction, papers):
+        calls.append(f"papers:{self.model}")
+        return {
+            "papers": [
+                {
+                    "paper_id": paper["paper_id"],
+                    "problem": paper["deterministic_extract"]["problem"],
+                    "method": paper["deterministic_extract"]["method"],
+                    "how_it_works": paper["deterministic_extract"]["how_it_works"],
+                    "limitations": "",
+                }
+                for paper in papers
+            ]
+        }
+
     monkeypatch.setattr(
         OpenAICompatibleExplanationProvider,
         "plan_research_directions",
@@ -167,6 +213,16 @@ def test_overview_uses_live_request_settings_for_optional_model_agents(
         OpenAICompatibleExplanationProvider,
         "synthesize_research_overview",
         fake_synthesis,
+    )
+    monkeypatch.setattr(
+        OpenAICompatibleExplanationProvider,
+        "review_research_direction",
+        fake_review,
+    )
+    monkeypatch.setattr(
+        OpenAICompatibleExplanationProvider,
+        "summarize_research_papers",
+        fake_paper_summaries,
     )
     app.dependency_overrides[get_settings] = lambda: Settings(
         paper_provider="demo",
@@ -198,6 +254,8 @@ def test_overview_uses_live_request_settings_for_optional_model_agents(
         assert current["status"] in {"succeeded", "partial"}
         assert calls == [
             "plan:runtime-overview-model",
+            "review:runtime-overview-model",
+            "papers:runtime-overview-model",
             "synthesis:runtime-overview-model",
         ]
         warnings = current["result"]["warnings"]
@@ -261,26 +319,25 @@ def test_overview_expand_direction_keeps_papers_as_leaves() -> None:
         ).json()["id"]
         job = _wait_overview(overview_id)
         graph = job["result"]["graph"]
-        direction_ids = {
-            node["id"] for node in graph["nodes"] if node["role"] == "direction"
+        method_ids = {
+            node["id"] for node in graph["nodes"] if node["role"] == "method"
         }
-        direct_paper_direction = next(
+        direct_paper_method = next(
             (
                 edge["source"]
                 for edge in graph["edges"]
-                if edge["source"] in direction_ids
+                if edge["source"] in method_ids
                 and next(node for node in graph["nodes"] if node["id"] == edge["target"])["role"]
                 == "paper"
             ),
             None,
         )
-        # The initial builder already emits root -> direction -> subdirection
-        # -> paper.  If no direct paper direction exists, expand correctly
-        # rejects a leaf-level direction because the max depth is reached.
-        target = direct_paper_direction or next(
+        # The first-principles builder emits root -> problem -> method -> paper.
+        # A method route can be refined once more while papers remain leaves.
+        target = direct_paper_method or next(
             node["id"]
             for node in graph["nodes"]
-            if node["role"] == "direction"
+            if node["role"] == "method"
             and any(
                 edge["source"] == node["id"]
                 and next(item for item in graph["nodes"] if item["id"] == edge["target"])["role"]
@@ -335,7 +392,7 @@ def test_overview_resave_after_expansion_updates_graph_library() -> None:
         target = next(
             edge["source"]
             for edge in graph["edges"]
-            if node_by_id[edge["source"]]["role"] == "direction"
+            if node_by_id[edge["source"]]["role"] == "method"
             and node_by_id[edge["target"]]["role"] == "paper"
         )
         expanded = client.post(
@@ -820,6 +877,7 @@ def test_overview_persists_secret_free_structured_agent_runs() -> None:
             "topic_taxonomy_planner",
             "direction_research_coordinator",
             "direction_research_worker",
+            "direction_review_worker",
             "paper_reading",
             "direction_validation",
             "overview_synthesis",
@@ -856,6 +914,72 @@ def test_overview_persists_secret_free_structured_agent_runs() -> None:
         app.dependency_overrides.clear()
 
 
+def test_model_direction_review_cannot_add_or_duplicate_papers() -> None:
+    baseline = overview_module.DirectionExpansionDecision(
+        direction_key="agent-memory",
+        decision="split",
+        reason="deterministic baseline",
+        paper_ids=["p1", "p2", "p3"],
+        subgroups={"baseline": ["p1", "p2", "p3"]},
+        subgroup_labels={"baseline": "基线路线"},
+    )
+    reviewed = overview_module._validated_direction_review(
+        {
+            "decision": "split",
+            "reason": "模型认为存在不同机制。",
+            "method_routes": [
+                {"key": "route-a", "label": "路线 A", "paper_ids": ["p1", "forged"]},
+                {"key": "route-b", "label": "路线 B", "paper_ids": ["p1", "p2"]},
+            ],
+        },
+        baseline,
+    )
+
+    assert reviewed is not None
+    flattened = [paper_id for ids in reviewed.subgroups.values() for paper_id in ids]
+    assert set(flattened) == {"p1", "p2", "p3"}
+    assert len(flattened) == len(set(flattened))
+    assert "forged" not in flattened
+
+
+def test_model_paper_summary_preserves_source_scope_and_rejects_unknown_ids() -> None:
+    paper = PaperRecord(
+        id="known-paper",
+        canonical_id="known-paper",
+        title="Known Paper",
+        abstract="We address an expensive memory problem. We propose a cache method. We do so by paging state.",
+        source="arxiv",
+        source_kind="academic",
+    )
+    original = _read_paper_abstract(paper, [])
+    validated = overview_module._validated_model_paper_summaries(
+        {
+            "papers": [
+                {
+                    "paper_id": "known-paper",
+                    "problem": "降低长程记忆检索成本。",
+                    "method": "提出分页式缓存方法。",
+                    "how_it_works": "按需换入相关状态并复用缓存页。",
+                    "limitations": "",
+                },
+                {
+                    "paper_id": "forged-paper",
+                    "problem": "伪造问题",
+                    "method": "伪造方法",
+                    "how_it_works": "伪造过程",
+                },
+            ]
+        },
+        [original],
+    )
+
+    assert set(validated) == {"known-paper"}
+    assert validated["known-paper"].summary_level == original.summary_level
+    assert validated["known-paper"].source_sections == original.source_sections
+    assert validated["known-paper"].evidence_ids == original.evidence_ids
+    assert any("仅结合摘要" in warning for warning in validated["known-paper"].warnings)
+
+
 def test_overview_agent_runs_distinguish_model_success_from_rule_work(monkeypatch) -> None:
     analysis_id = _completed_analysis()
     analysis = research_service.get(UUID(analysis_id))
@@ -882,6 +1006,33 @@ def test_overview_agent_runs_distinguish_model_success_from_rule_work(monkeypatc
                 "title": "模型综合后的 Attention 方向图",
                 "root_explanation": "只综合已验证的方向与论文。",
                 "direction_explanations": {"attention": "注意力方法方向。"},
+            }
+
+        def review_research_direction(self, topic, direction, papers):
+            return {
+                "decision": "keep",
+                "reason": "当前论文属于一条核心方法路线。",
+                "method_routes": [
+                    {
+                        "key": "core",
+                        "label": "核心注意力方法",
+                        "paper_ids": [paper.id for paper in papers],
+                    }
+                ],
+            }
+
+        def summarize_research_papers(self, topic, direction, papers):
+            return {
+                "papers": [
+                    {
+                        "paper_id": paper["paper_id"],
+                        "problem": paper["deterministic_extract"]["problem"],
+                        "method": paper["deterministic_extract"]["method"],
+                        "how_it_works": paper["deterministic_extract"]["how_it_works"],
+                        "limitations": "",
+                    }
+                    for paper in papers
+                ]
             }
 
     monkeypatch.setattr(
@@ -913,6 +1064,8 @@ def test_overview_agent_runs_distinguish_model_success_from_rule_work(monkeypatc
     ]
     assert {(item.role, item.status) for item in model_runs} == {
         ("topic_taxonomy_planner", "succeeded"),
+        ("direction_review_worker", "succeeded"),
+        ("paper_reading", "succeeded"),
         ("overview_synthesis", "succeeded"),
     }
     assert all(item.provider == "test_model_provider" for item in model_runs)
@@ -1143,10 +1296,10 @@ def test_expand_uses_direction_provider_and_respects_total_bound(monkeypatch) ->
         )
         current = _wait_overview(str(job.id))
         graph = current["result"]["graph"]
-        directions = {node["id"]: node for node in graph["nodes"] if node["role"] == "direction"}
+        methods = {node["id"]: node for node in graph["nodes"] if node["role"] == "method"}
         target = next(
             edge["source"] for edge in graph["edges"]
-            if edge["source"] in directions
+            if edge["source"] in methods
             and next(node for node in graph["nodes"] if node["id"] == edge["target"])["role"] == "paper"
         )
         before_calls = len(provider.calls)

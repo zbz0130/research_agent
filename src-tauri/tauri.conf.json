@@ -38,7 +38,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis", "msi"],
+    "targets": ["nsis"],
     "externalBin": ["bin/wishforge-sidecar"],
     "windows": {
       "webviewInstallMode": {

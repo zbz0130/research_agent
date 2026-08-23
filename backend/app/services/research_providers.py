@@ -902,18 +902,23 @@ class OpenAICompatibleExplanationProvider:
         prompt = f"""
 你是 WishForge 的 TopicTaxonomyPlannerAgent。研究主题：“{topic}”。
 本次已有检索词：{', '.join(prior_queries[:8]) or '无'}。
-只依据下方论文标题和摘要提出最多 {max_directions} 个一级研究方向。
+只依据下方论文标题和摘要提出最多 {max_directions} 个一级研究方向。先用第一性原理拆解：
+先确定该主题中研究者真正要优化的目标、不可回避的约束/失败模式，以及现有方案为什么无法满足；
+再按“要解决的核心问题”而非按流行模型名或应用名划分方向。每个方向必须明确输出 problem，
+并在 first_principles 中依次说明优化目标、不可回避的约束、主要失败模式与判断是否解决的标准；
+definition 再说明该问题下常见的方法路线。
 
 只返回 JSON：
-{{"directions":[{{"key":"short_key","label":"方向名","definition":"研究什么","boundary":"哪些论文不属于这里","query_terms":["英文 arXiv 检索短语"],"match_terms":["用于边界核对的中英文关键词"],"seed_paper_ids":["给定 paper_id"],"subdirections":[{{"key":"sub_key","label":"细分名","match_terms":["关键词"]}}]}}]}}
+{{"directions":[{{"key":"short_key","label":"问题方向名","problem":"要解决的核心问题","first_principles":"目标；约束；失败模式；成功标准","definition":"常见方法路线","boundary":"哪些论文不属于这里","query_terms":["英文 arXiv 检索短语"],"match_terms":["用于边界核对的中英文关键词"],"seed_paper_ids":["给定 paper_id"],"subdirections":[{{"key":"sub_key","label":"方法路线名","match_terms":["关键词"]}}]}}]}}
 
 要求：
-1. 方向彼此尽量区分，不能只是同义改写；
+1. 方向彼此尽量区分，不能只是同义改写；problem 必须是可检验的问题，而不是领域名；
 2. seed_paper_ids 只能使用下方论文 ID；
 3. query_terms 每个方向 1 至 3 个，必须是简短英文检索词；
 4. match_terms 至少 2 个，用于服务端边界过滤；
-5. 最多 3 个细分方向；没有证据支持时可以不填；
-6. 不得声称这是一份完整学科分类。
+5. 最多 3 个细分方向；细分项优先按“解决该问题的方法路线”命名，没有证据支持时可以不填；
+6. first_principles 不得写口号，必须覆盖目标、约束、失败模式和成功标准；
+7. 不得声称这是一份完整学科分类。
 
 论文：
 {paper_payload or '无'}
@@ -948,6 +953,74 @@ class OpenAICompatibleExplanationProvider:
             system="你负责综合已经验证的结构，只写展示文案，不得扩大事实范围。",
             temperature=0.1,
             part_label="研究方向综合",
+        )
+
+    def review_research_direction(
+        self,
+        topic: str,
+        direction: dict[str, object],
+        papers: Sequence[PaperRecord],
+    ) -> dict[str, object]:
+        """Act as one bounded branch reviewer after retrieval and deduplication."""
+
+        paper_payload = _format_paper_payload(list(papers[:8]), abstract_limit=1800)
+        prompt = f"""
+你是 WishForge 的 DirectionReviewAgent，只审查一个问题分支。
+总主题：{topic}
+问题分支：{json.dumps(direction, ensure_ascii=False)}
+
+基于下面已经通过服务端检索边界检查的论文，判断该问题是否形成至少两条有证据区分的方法路线。
+只返回 JSON：
+{{"decision":"split 或 keep","reason":"判断依据","method_routes":[{{"key":"short_key","label":"方法路线名","paper_ids":["给定 paper_id"]}}]}}
+
+要求：
+1. 只能使用下方给定的 paper_id，不得新增论文；
+2. 每篇论文最多属于一条路线；不得按年份、作者或应用领域机械分组；
+3. split 需要至少 3 篇论文且形成至少 2 条非空、方法机制不同的路线，否则必须 keep；
+4. 最多 3 条路线；名称必须描述“如何解决问题”，不能只是“其他论文”；
+5. 只依据标题和摘要，不得声称读过未提供的全文。
+
+论文：
+{paper_payload or '无'}
+""".strip()
+        return self._request_explanation_part(
+            prompt,
+            system="你是单一研究分支的审查 Agent；只做有边界的分组判断，不扩大论文集合。",
+            temperature=0,
+            part_label="研究方向分支审查",
+        )
+
+    def summarize_research_papers(
+        self,
+        topic: str,
+        direction: dict[str, object],
+        papers: Sequence[dict[str, object]],
+    ) -> dict[str, object]:
+        """Summarize a bounded branch from abstracts and extracted evidence only."""
+
+        prompt = f"""
+你是 WishForge 的 PaperReadingAgent。总主题：{topic}
+当前核心问题与方法分支：{json.dumps(direction, ensure_ascii=False)}
+
+根据下方每篇论文的摘要、规则摘句和开放 arXiv PDF 章节证据，为每篇论文生成简洁中文解析。
+只返回 JSON：
+{{"papers":[{{"paper_id":"给定 ID","problem":"解决什么问题","method":"提出什么方法","how_it_works":"大概怎么做","limitations":"已提供文本能确认的局限；没有则为空字符串"}}]}}
+
+要求：
+1. paper_id 只能来自输入；每篇输入论文最多返回一次；
+2. problem、method、how_it_works 必须分别回答三个问题，不能互相复制；
+3. 只能使用输入中的摘要和 evidence_excerpts，不得补充记忆中的论文事实；
+4. 没有正文证据时明确保持摘要级措辞，不得声称读过全文；
+5. 不评价论文好坏，不编造实验数字、引用数、章节或局限。
+
+输入论文：
+{json.dumps(list(papers)[:8], ensure_ascii=False)}
+""".strip()
+        return self._request_explanation_part(
+            prompt,
+            system="你是证据约束的论文阅读 Agent；只压缩给定文本，不新增事实或来源。",
+            temperature=0,
+            part_label="论文证据摘要",
         )
 
     def plan_search_queries(self, concept: str, language: str) -> list[SearchQueryPlan]:

@@ -14,6 +14,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager, RunEvent, State};
 
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+
 const CREDENTIAL_SERVICE: &str = "com.wishforge.research";
 const CREDENTIAL_SLOTS: &[(&str, &str)] = &[
     ("paper_search", "WISHFORGE_PAPER_API_KEY"),
@@ -234,6 +237,28 @@ fn wait_for_health(base_url: &str) -> Result<(), String> {
     Err("本地 FastAPI sidecar 在 30 秒内没有通过健康检查".to_string())
 }
 
+fn terminate_sidecar(child: &mut Child) {
+    #[cfg(target_os = "windows")]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        let status = Command::new("taskkill")
+            .args(["/PID", &child.id().to_string(), "/T", "/F"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .creation_flags(CREATE_NO_WINDOW)
+            .status();
+        if !status.is_ok_and(|value| value.success()) {
+            let _ = child.kill();
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = child.kill();
+    }
+    let _ = child.wait();
+}
+
 fn start_sidecar(app: &AppHandle, state: &AppState) -> Result<(), String> {
     let data_dir = app
         .path()
@@ -273,8 +298,7 @@ fn start_sidecar(app: &AppHandle, state: &AppState) -> Result<(), String> {
         .map_err(|error| format!("启动 WishForge sidecar 失败：{error}"))?;
     if let Err(error) = wait_for_health(&base_url) {
         let mut child = child;
-        let _ = child.kill();
-        let _ = child.wait();
+        terminate_sidecar(&mut child);
         return Err(error);
     }
     *state
@@ -301,8 +325,7 @@ impl AppState {
     fn stop(&self) {
         if let Ok(mut slot) = self.sidecar.lock() {
             if let Some(mut child) = slot.take() {
-                let _ = child.kill();
-                let _ = child.wait();
+                terminate_sidecar(&mut child);
             }
         }
     }

@@ -43,9 +43,11 @@ from app.research_schemas import (
 from app.services.graph_service import GraphConflict, graph_service
 from app.services.overview_pipeline import (
     DirectionExpansionAgent,
+    DirectionExpansionDecision,
     DirectionPipelineResult,
     DirectionPlan,
     DirectionResearchAgent,
+    DirectionResearchOutcome,
     OpenArxivSectionReader,
     TopicTaxonomyPlanner,
     DirectionResearchCoordinator,
@@ -134,6 +136,421 @@ def _provider_model_name(provider: object) -> str | None:
     return cleaned[:300] or None
 
 
+def _validated_direction_review(
+    payload: object,
+    baseline: DirectionExpansionDecision,
+) -> DirectionExpansionDecision | None:
+    """Validate one untrusted branch review without widening its paper set."""
+
+    if not isinstance(payload, dict) or baseline.decision not in {"split", "keep"}:
+        return None
+    proposed = payload.get("decision")
+    if proposed not in {"split", "keep"}:
+        return None
+    reason = " ".join(str(payload.get("reason") or "").split())[:2000]
+    if not reason:
+        return None
+    allowed_order = list(dict.fromkeys(baseline.paper_ids))
+    allowed = set(allowed_order)
+    raw_routes = payload.get("method_routes")
+    if not isinstance(raw_routes, list):
+        return None
+
+    groups: dict[str, list[str]] = {}
+    labels: dict[str, str] = {}
+    assigned: set[str] = set()
+    for index, route in enumerate(raw_routes[:3]):
+        if not isinstance(route, dict):
+            continue
+        label = " ".join(str(route.get("label") or "").split())[:300]
+        if not label:
+            continue
+        requested = re.sub(
+            r"[^a-z0-9_-]+",
+            "-",
+            str(route.get("key") or f"method-{index}").casefold(),
+        ).strip("-")[:100] or f"method-{index}"
+        key = requested
+        suffix = 2
+        while key in groups:
+            key = f"{requested}-{suffix}"
+            suffix += 1
+        route_paper_ids = route.get("paper_ids")
+        if not isinstance(route_paper_ids, list):
+            continue
+        accepted = [
+            paper_id
+            for paper_id in route_paper_ids
+            if isinstance(paper_id, str)
+            and paper_id in allowed
+            and paper_id not in assigned
+        ]
+        accepted = list(dict.fromkeys(accepted))
+        if not accepted:
+            continue
+        groups[key] = accepted
+        labels[key] = label
+        assigned.update(accepted)
+
+    if not groups:
+        return None
+    missing = [paper_id for paper_id in allowed_order if paper_id not in assigned]
+    if missing:
+        if len(groups) < 3:
+            groups["other-verified-methods"] = missing
+            labels["other-verified-methods"] = "其他已验证方法线索"
+        else:
+            largest = max(groups, key=lambda key: len(groups[key]))
+            groups[largest].extend(missing)
+
+    if proposed == "split" and (len(groups) < 2 or len(allowed_order) < 3):
+        proposed = "keep"
+        reason = f"{reason}；服务端因论文数或有效路线数不足，将 split 收敛为 keep。"
+    if proposed == "keep":
+        label = next(iter(labels.values()), "综合方法路线")
+        groups = {"papers": allowed_order}
+        labels = {"papers": label}
+
+    return DirectionExpansionDecision(
+        direction_key=baseline.direction_key,
+        decision=proposed,
+        reason=reason,
+        paper_ids=allowed_order,
+        subgroups=groups,
+        subgroup_labels=labels,
+        merge_target=baseline.merge_target,
+    )
+
+
+def _review_directions_with_agents(
+    topic: str,
+    pipeline: DirectionPipelineResult,
+    provider: object,
+) -> list[OverviewAgentRun]:
+    """Run one bounded reviewer per branch and retain deterministic fallbacks."""
+
+    reviewer = getattr(provider, "review_research_direction", None)
+    provider_name = str(getattr(provider, "name", None) or "wishforge_direction_rules")
+    model_name = _provider_model_name(provider)
+    plan_by_key = pipeline.plan_by_key()
+    outcome_by_key = {outcome.plan.key: outcome for outcome in pipeline.outcomes}
+    paper_by_id = {paper.id: paper for paper in pipeline.papers}
+    decisions_by_key = pipeline.decision_by_key()
+
+    def deterministic_run(decision: DirectionExpansionDecision, *, fallback: bool = False):
+        started_at = _utcnow()
+        started_perf = time.perf_counter()
+        return _agent_run(
+            role="direction_review_worker",
+            status="succeeded",
+            execution_mode=("deterministic_rule_fallback" if fallback else "deterministic_rule"),
+            provider="wishforge_direction_adjudicator",
+            started_at=started_at,
+            started_perf=started_perf,
+            direction_key=decision.direction_key,
+            input_paper_count=len(decision.paper_ids),
+            output_paper_count=len(decision.paper_ids),
+            summary=(
+                f"分支审查结论为 {decision.decision}；"
+                f"形成 {len(decision.subgroups)} 条有界方法路线。"
+            ),
+        )
+
+    if not callable(reviewer):
+        return [deterministic_run(decision) for decision in pipeline.decisions]
+
+    def review_one(
+        plan: DirectionPlan,
+        outcome: DirectionResearchOutcome,
+        baseline: DirectionExpansionDecision,
+    ) -> tuple[DirectionExpansionDecision | None, list[OverviewAgentRun]]:
+        started_at = _utcnow()
+        started_perf = time.perf_counter()
+        papers = [paper_by_id[item] for item in baseline.paper_ids if item in paper_by_id]
+        direction_payload = {
+            "key": plan.key,
+            "label": plan.label,
+            "problem": plan.problem or plan.definition,
+            "first_principles": plan.first_principles,
+            "definition": plan.definition,
+            "boundary": plan.boundary,
+            "baseline_decision": baseline.decision,
+        }
+        try:
+            raw = reviewer(topic, direction_payload, papers)
+            reviewed = _validated_direction_review(raw, baseline)
+            if reviewed is None:
+                raise ValueError("模型分支审查未通过服务端边界校验")
+            return reviewed, [
+                _agent_run(
+                    role="direction_review_worker",
+                    status="succeeded",
+                    execution_mode="model",
+                    provider=provider_name,
+                    model=model_name,
+                    started_at=started_at,
+                    started_perf=started_perf,
+                    direction_key=plan.key,
+                    input_paper_count=len(papers),
+                    output_paper_count=len(reviewed.paper_ids),
+                    summary=(
+                        f"独立审查问题分支“{plan.label}”；结论为 {reviewed.decision}，"
+                        f"服务端接纳 {len(reviewed.subgroups)} 条方法路线。"
+                    ),
+                )
+            ]
+        except Exception as exc:
+            failed = _agent_run(
+                role="direction_review_worker",
+                status="failed",
+                execution_mode="model",
+                provider=provider_name,
+                model=model_name,
+                started_at=started_at,
+                started_perf=started_perf,
+                direction_key=plan.key,
+                input_paper_count=len(papers),
+                output_paper_count=len(baseline.paper_ids),
+                summary=f"问题分支“{plan.label}”的模型审查未完成；保留确定性结论。",
+                warnings=["模型审查失败或返回越界论文 ID，未改变已验证论文集合。"],
+                error_type=_safe_error_category(exc),
+            )
+            return None, [failed, deterministic_run(baseline, fallback=True)]
+
+    eligible = [
+        decision
+        for decision in pipeline.decisions
+        if decision.decision in {"split", "keep"}
+        and decision.paper_ids
+        and decision.direction_key in outcome_by_key
+    ]
+    results: dict[str, tuple[DirectionExpansionDecision | None, list[OverviewAgentRun]]] = {}
+    workers = max(1, min(4, len(eligible)))
+    if eligible:
+        with ThreadPoolExecutor(
+            max_workers=workers,
+            thread_name_prefix="wishforge-direction-review",
+        ) as pool:
+            futures = {
+                pool.submit(
+                    review_one,
+                    plan_by_key[decision.direction_key],
+                    outcome_by_key[decision.direction_key],
+                    decision,
+                ): decision.direction_key
+                for decision in eligible
+            }
+            for future in as_completed(futures):
+                key = futures[future]
+                results[key] = future.result()
+
+    runs: list[OverviewAgentRun] = []
+    revised: list[DirectionExpansionDecision] = []
+    for baseline in pipeline.decisions:
+        result = results.get(baseline.direction_key)
+        if result is None:
+            revised.append(baseline)
+            runs.append(deterministic_run(baseline))
+            continue
+        reviewed, branch_runs = result
+        revised.append(reviewed or baseline)
+        runs.extend(branch_runs)
+    pipeline.decisions = revised
+    return runs
+
+
+def _validated_model_paper_summaries(
+    payload: object,
+    originals: list[PaperReadingSummary],
+) -> dict[str, PaperReadingSummary]:
+    """Apply model prose only to known papers while preserving provenance."""
+
+    if not isinstance(payload, dict) or not isinstance(payload.get("papers"), list):
+        return {}
+    original_by_id = {reading.paper_id: reading for reading in originals}
+    validated: dict[str, PaperReadingSummary] = {}
+    for item in payload["papers"][: len(originals)]:
+        if not isinstance(item, dict):
+            continue
+        paper_id = item.get("paper_id")
+        if not isinstance(paper_id, str) or paper_id not in original_by_id or paper_id in validated:
+            continue
+        problem = " ".join(str(item.get("problem") or "").split())[:3000]
+        method = " ".join(str(item.get("method") or "").split())[:4000]
+        how = " ".join(str(item.get("how_it_works") or "").split())[:4000]
+        limitations = " ".join(str(item.get("limitations") or "").split())[:3000]
+        if not problem or not method or not how:
+            continue
+        original = original_by_id[paper_id]
+        source_note = (
+            "解释模型仅结合摘要和已抽取的开放 arXiv 章节证据生成展示摘要。"
+            if original.summary_level == "arxiv_sections"
+            else "解释模型仅结合摘要生成展示摘要，未读取论文正文。"
+        )
+        validated[paper_id] = original.model_copy(
+            update={
+                "problem": problem,
+                "method": method,
+                "how_it_works": how,
+                "limitations": limitations or original.limitations,
+                "warnings": list(dict.fromkeys([*original.warnings, source_note]))[:20],
+            }
+        )
+    return validated
+
+
+def _summarize_readings_with_agents(
+    topic: str,
+    pipeline: DirectionPipelineResult,
+    readings: list[PaperReadingSummary],
+    provider: object,
+) -> tuple[list[PaperReadingSummary], list[OverviewAgentRun]]:
+    """Run one evidence-bounded paper summarizer per accepted problem branch."""
+
+    summarizer = getattr(provider, "summarize_research_papers", None)
+    if not callable(summarizer) or not readings:
+        return readings, []
+    provider_name = str(getattr(provider, "name", None) or "unavailable")
+    model_name = _provider_model_name(provider)
+    reading_by_id = {reading.paper_id: reading for reading in readings}
+    paper_by_id = {paper.id: paper for paper in pipeline.papers}
+    plan_by_key = pipeline.plan_by_key()
+    groups = [
+        (decision, [reading_by_id[item] for item in decision.paper_ids if item in reading_by_id])
+        for decision in pipeline.decisions
+        if decision.decision in {"split", "keep"} and decision.direction_key in plan_by_key
+    ]
+    groups = [(decision, items) for decision, items in groups if items]
+    if not groups:
+        return readings, []
+
+    def fallback_run(decision: DirectionExpansionDecision, items: list[PaperReadingSummary]):
+        started_at = _utcnow()
+        started_perf = time.perf_counter()
+        return _agent_run(
+            role="paper_reading",
+            status="succeeded",
+            execution_mode="deterministic_rule_fallback",
+            provider="wishforge_evidence_sentence_selector",
+            started_at=started_at,
+            started_perf=started_perf,
+            direction_key=decision.direction_key,
+            input_paper_count=len(items),
+            output_paper_count=len(items),
+            summary="模型论文摘要不可用；保留由摘要/章节证据直接摘取的保守解析。",
+        )
+
+    def summarize_one(
+        decision: DirectionExpansionDecision,
+        items: list[PaperReadingSummary],
+    ) -> tuple[dict[str, PaperReadingSummary], list[OverviewAgentRun]]:
+        plan = plan_by_key[decision.direction_key]
+        started_at = _utcnow()
+        started_perf = time.perf_counter()
+        payload = []
+        for reading in items[:8]:
+            paper = paper_by_id.get(reading.paper_id)
+            if paper is None:
+                continue
+            payload.append(
+                {
+                    "paper_id": paper.id,
+                    "title": paper.title,
+                    "abstract": paper.abstract[:1600],
+                    "summary_level": reading.summary_level,
+                    "source_sections": reading.source_sections,
+                    "evidence_excerpts": [
+                        {
+                            "section": card.location,
+                            "excerpt": card.excerpt[:600],
+                        }
+                        for card in reading.section_evidence[:4]
+                    ],
+                    "deterministic_extract": {
+                        "problem": reading.problem,
+                        "method": reading.method,
+                        "how_it_works": reading.how_it_works,
+                    },
+                }
+            )
+        direction_payload = {
+            "key": plan.key,
+            "label": plan.label,
+            "problem": plan.problem or plan.definition,
+            "first_principles": plan.first_principles,
+            "method_routes": list(decision.subgroup_labels.values()),
+        }
+        try:
+            raw = summarizer(topic, direction_payload, payload)
+            summarized = _validated_model_paper_summaries(raw, items)
+            if not summarized:
+                raise ValueError("论文阅读模型没有返回可接纳的摘要")
+            missing = len(items) - len(summarized)
+            return summarized, [
+                _agent_run(
+                    role="paper_reading",
+                    status="partial" if missing else "succeeded",
+                    execution_mode="model",
+                    provider=provider_name,
+                    model=model_name,
+                    started_at=started_at,
+                    started_perf=started_perf,
+                    direction_key=decision.direction_key,
+                    input_paper_count=len(items),
+                    output_paper_count=len(summarized),
+                    summary=(
+                        f"结合摘要与可用章节证据，为分支“{plan.label}”生成 "
+                        f"{len(summarized)} 篇论文解析。"
+                    ),
+                    warnings=(
+                        [f"{missing} 篇模型输出未通过校验，保留确定性摘句结果。"]
+                        if missing else []
+                    ),
+                )
+            ]
+        except Exception as exc:
+            failed = _agent_run(
+                role="paper_reading",
+                status="failed",
+                execution_mode="model",
+                provider=provider_name,
+                model=model_name,
+                started_at=started_at,
+                started_perf=started_perf,
+                direction_key=decision.direction_key,
+                input_paper_count=len(items),
+                output_paper_count=len(items),
+                summary=f"分支“{plan.label}”的模型论文摘要未完成。",
+                warnings=["模型不能改变来源章节或证据卡；已保留确定性读取结果。"],
+                error_type=_safe_error_category(exc),
+            )
+            return {}, [failed, fallback_run(decision, items)]
+
+    results: dict[str, dict[str, PaperReadingSummary]] = {}
+    runs_by_key: dict[str, list[OverviewAgentRun]] = {}
+    workers = max(1, min(4, len(groups)))
+    with ThreadPoolExecutor(
+        max_workers=workers,
+        thread_name_prefix="wishforge-paper-summary",
+    ) as pool:
+        futures = {
+            pool.submit(summarize_one, decision, items): decision.direction_key
+            for decision, items in groups
+        }
+        for future in as_completed(futures):
+            key = futures[future]
+            summaries, branch_runs = future.result()
+            results[key] = summaries
+            runs_by_key[key] = branch_runs
+
+    merged = dict(reading_by_id)
+    runs: list[OverviewAgentRun] = []
+    for decision, _ in groups:
+        merged.update(results.get(decision.direction_key, {}))
+        runs.extend(runs_by_key.get(decision.direction_key, []))
+    return [merged[reading.paper_id] for reading in readings], runs
+
+
 class OverviewService:
     def __init__(self) -> None:
         self._lock = RLock()
@@ -208,8 +625,8 @@ class OverviewService:
                     f"graph version changed: expected {payload.expected_version}, current {graph.version}"
                 )
             target = next((node for node in graph.nodes if node.id == payload.node_id), None)
-            if target is None or target.role != "direction":
-                raise GraphConflict("只能展开研究方向节点")
+            if target is None or target.role not in {"direction", "method"}:
+                raise GraphConflict("只能继续细化研究方向或方法路线节点")
             depths = _node_depths(graph)
             target_depth = depths.get(target.id, 99)
             if target_depth >= job.request.max_depth:
@@ -386,8 +803,8 @@ class OverviewService:
                         label=label,
                         summary=f"按 {len(members)} 篇当前检索论文的方法线索细分。",
                         explanation="这是基于标题和摘要关键词形成的局部细分，需要人工核验方向边界。",
-                        node_type="direction",
-                        role="direction",
+                        node_type="method",
+                        role="method",
                         paper_ids=[member.paper_id for member in members if member.paper_id],
                         evidence_ids=evidence_ids,
                         confidence="low",
@@ -447,7 +864,7 @@ class OverviewService:
                     ],
                     "agent_runs": [*job.result.agent_runs, *expansion_runs][:300],
                     "warnings": warnings[:40],
-                    "direction_count": sum(node.role == "direction" for node in candidate.nodes),
+                    "direction_count": _research_structure_count(candidate.nodes),
                     "paper_count": sum(node.role == "paper" for node in candidate.nodes),
                 }
             )
@@ -589,6 +1006,50 @@ class OverviewService:
             parent_id = failed.direction_node_id
             if not parent_id or not any(node.id == parent_id for node in candidate.nodes):
                 parent_id = candidate.root_id
+            parent_node = next(node for node in candidate.nodes if node.id == parent_id)
+            if new_papers and parent_node.role == "problem":
+                route_id = _unique_node_id(candidate, f"{parent_id}-retry-method")
+                route_methods = list(dict.fromkeys(
+                    reading_by_id[paper.id].method.strip()
+                    for paper in new_papers
+                    if paper.id in reading_by_id and reading_by_id[paper.id].method.strip()
+                ))[:3]
+                route_summary = "；".join(route_methods)[:4000] or "重试检索论文的方法路线待人工核验。"
+                route_evidence = list(dict.fromkeys(
+                    evidence_id
+                    for reading in new_readings
+                    for evidence_id in reading.evidence_ids
+                ))
+                candidate.nodes.append(
+                    ConceptNode(
+                        id=route_id,
+                        label="重试检索补充的方法路线",
+                        summary=f"方法路线：{route_summary}"[:5000],
+                        explanation=(
+                            f"该路线用于应对：{parent_node.problem_summary or parent_node.label}\n"
+                            f"归纳方法：{route_summary}"
+                        ),
+                        node_type="method",
+                        role="method",
+                        problem_summary=parent_node.problem_summary,
+                        method_summary=route_summary,
+                        paper_ids=[paper.id for paper in new_papers],
+                        evidence_ids=route_evidence,
+                        confidence="low",
+                        visual=GraphNodeVisual(radius=28),
+                    )
+                )
+                candidate.edges.append(
+                    ConceptEdge(
+                        source=parent_id,
+                        target=route_id,
+                        relation="uses",
+                        confidence="low",
+                        source_kind="keyword",
+                        explanation="失败方向重试后，根据新增论文的方法摘要建立补充路线。",
+                    )
+                )
+                parent_id = route_id
             for paper in new_papers:
                 paper_node = _paper_node(
                     paper,
@@ -1046,8 +1507,15 @@ class OverviewService:
                 stage="direction_expansion",
                 progress=45,
                 message=(
-                    "正在审查方向边界并记录 split / keep / merge / discard 决策"
+                    "正在并行审查各问题分支，并验证 split / keep / merge / discard 决策"
                 ),
+            )
+            agent_runs.extend(
+                _review_directions_with_agents(
+                    analysis.result.concept,
+                    pipeline,
+                    explanation_provider,
+                )
             )
             evidence_by_paper = _evidence_by_paper(analysis.result)
             self._update(
@@ -1087,6 +1555,13 @@ class OverviewService:
                     if reading_failures else []
                 ),
             ))
+            readings, model_reading_runs = _summarize_readings_with_agents(
+                analysis.result.concept,
+                pipeline,
+                readings,
+                explanation_provider,
+            )
+            agent_runs.extend(model_reading_runs)
             self._update(
                 overview_id,
                 generation,
@@ -1116,6 +1591,8 @@ class OverviewService:
                             {
                                 "key": plan.key,
                                 "label": plan.label,
+                                "problem": plan.problem or plan.definition,
+                                "first_principles": plan.first_principles,
                                 "definition": plan.definition,
                                 "boundary": plan.boundary,
                             }
@@ -1238,7 +1715,7 @@ class OverviewService:
                 output_paper_count=result.paper_count,
                 summary=(
                     f"完成方向归属结果、证据范围、论文叶节点与 DAG 一致性检查；"
-                    f"确认 {result.direction_count} 个方向和 {result.paper_count} 个论文叶节点。"
+                    f"确认 {result.direction_count} 个问题/方法节点和 {result.paper_count} 个论文叶节点。"
                 ),
                 warnings=(
                     ["部分方向检索失败，但成功方向的图结构通过一致性检查。"]
@@ -1254,7 +1731,7 @@ class OverviewService:
                 progress=100,
                 message=(
                     f"研究方向图{'部分' if pipeline.partial else ''}生成："
-                    f"{result.direction_count} 个方向，{result.paper_count} 篇论文"
+                    f"{result.direction_count} 个问题/方法节点，{result.paper_count} 篇论文"
                 ),
                 result=result,
                 save_state="transient",
@@ -1370,8 +1847,8 @@ def _build_overview_result(
         label=analysis_result.concept,
         summary=f"基于本次方向级检索保留的 {len(papers)} 篇学术论文生成研究方向概览。",
         explanation=(
-            "方向由主题分类规划器提出，再由方向专属检索和可审计边界规则筛选；"
-            "这不是完整学科分类，也没有把规则执行伪装成模型 Agent。"
+            "图从研究目标出发，先拆出核心问题，再归纳解决问题的方法路线，最后连接论文证据；"
+            "各分支均经过方向专属检索和可审计边界规则筛选，不代表完整学科分类。"
         ),
         node_type="concept",
         role="root",
@@ -1420,19 +1897,27 @@ def _build_overview_result(
         ][: request.papers_per_direction]
         if not group:
             continue
-        direction_id = f"direction-{direction_index}-{_slug(key)}"
+        problem_text = plan.problem or plan.definition
+        first_principles = plan.first_principles or (
+            f"目标与问题：{plan.definition} 约束与排除边界：{plan.boundary}"
+        )
+        direction_id = f"problem-{direction_index}-{_slug(key)}"
         direction_node_ids[key] = direction_id
         paper_nodes_for_visual = [_paper_node(paper, reading_by_id[paper.id], evidence_by_paper[paper.id]) for paper in group]
         direction_node = ConceptNode(
             id=direction_id,
             label=plan.label,
-            summary=f"当前检索范围内包含 {len(group)} 篇论文。",
+            summary=f"核心问题：{problem_text}"[:5000],
             explanation=(
-                f"{plan.definition} 边界：{plan.boundary} "
-                f"细分决策：{decision.decision}，{decision.reason}"
+                f"第一性原理拆解：{first_principles}\n"
+                f"常见求解思路：{plan.definition}\n"
+                f"研究边界：{plan.boundary}\n"
+                f"审查结论：{decision.decision}，{decision.reason}"
             ),
-            node_type="direction",
-            role="direction",
+            node_type="problem",
+            role="problem",
+            problem_summary=problem_text,
+            method_summary=plan.definition,
             paper_ids=[paper.id for paper in group],
             evidence_ids=list(dict.fromkeys(card.id for paper in group for card in evidence_by_paper[paper.id])),
             confidence="medium" if len(group) >= 2 else "low",
@@ -1443,7 +1928,7 @@ def _build_overview_result(
             ConceptEdge(
                 source=root_id,
                 target=direction_id,
-                relation="is_a",
+                relation="has_problem",
                 confidence="low",
                 source_kind="keyword",
                 explanation=(
@@ -1472,16 +1957,26 @@ def _build_overview_result(
             subpaper_nodes = [
                 node for node in paper_nodes_for_visual if node.paper_id in {paper.id for paper in subpapers}
             ]
+            route_methods = list(dict.fromkeys(
+                reading_by_id[paper.id].method.strip()
+                for paper in subpapers
+                if paper.id in reading_by_id and reading_by_id[paper.id].method.strip()
+            ))[:3]
+            route_summary = "；".join(route_methods)[:4000] or "当前论文摘要未提供足够的方法细节。"
             subnode = ConceptNode(
                 id=sub_id,
                 label=decision.subgroup_labels.get(subkey, "代表论文"),
-                summary=f"由 {len(subpapers)} 篇当前范围论文支撑的论文路线。",
+                summary=f"方法路线：{route_summary}"[:5000],
                 explanation=(
-                    "该路线由论文标题、摘要和已抽取章节的有限关键词归类；"
-                    f"父方向的审计决策为 {decision.decision}，边界与命名仍需研究者复核。"
+                    f"该路线用于应对：{problem_text}\n"
+                    f"归纳方法：{route_summary}\n"
+                    "路线由论文标题、摘要和已抽取章节归类；"
+                    f"父问题的审查决策为 {decision.decision}，边界与命名仍需研究者复核。"
                 ),
-                node_type="direction",
-                role="direction",
+                node_type="method",
+                role="method",
+                problem_summary=problem_text,
+                method_summary=route_summary,
                 paper_ids=[paper.id for paper in subpapers],
                 evidence_ids=list(dict.fromkeys(card.id for paper in subpapers for card in evidence_by_paper[paper.id])),
                 confidence="medium" if len(subpapers) >= 2 else "low",
@@ -1492,7 +1987,7 @@ def _build_overview_result(
                 ConceptEdge(
                     source=direction_id,
                     target=sub_id,
-                    relation="is_a",
+                    relation="uses",
                     confidence="low",
                     source_kind="keyword",
                     explanation=(
@@ -1530,7 +2025,7 @@ def _build_overview_result(
         id=graph_id,
         project_id=None,
         name=f"{analysis_result.concept} 研究方向图",
-        description="基于当前分析论文标题、摘要和证据卡生成的有界研究方向 Overview。",
+        description="按第一性原理组织为核心问题、方法路线与论文证据的有界研究 Overview。",
         root_id=root_id,
         graph_kind="research_direction",
         source_analysis_id=analysis_result.id,
@@ -1568,7 +2063,7 @@ def _build_overview_result(
         ),
         legend=legend,
         warnings=warnings,
-        direction_count=sum(node.role == "direction" for node in nodes),
+        direction_count=_research_structure_count(nodes),
         paper_count=len(kept_paper_ids),
     )
 
@@ -1600,7 +2095,7 @@ def _apply_overview_synthesis(
             target = next(
                 (
                     node for node in graph.nodes
-                    if node.role == "direction" and node.label == plan_labels[key]
+                    if node.role in {"problem", "direction"} and node.label == plan_labels[key]
                 ),
                 None,
             )
@@ -2128,6 +2623,12 @@ def _direction_visual(paper_nodes: list[ConceptNode]) -> GraphNodeVisual:
     )
 
 
+def _research_structure_count(nodes: list[ConceptNode]) -> int:
+    """Count problem/method branches while retaining legacy direction nodes."""
+
+    return sum(node.role in {"problem", "method", "direction"} for node in nodes)
+
+
 def _apply_recency(nodes: list[ConceptNode]) -> None:
     papers = [node for node in nodes if node.role == "paper"]
     years = [node.year for node in papers if node.year is not None]
@@ -2165,7 +2666,7 @@ def _refresh_direction_visuals(
         return found
 
     for node in nodes:
-        if node.role == "direction":
+        if node.role in {"problem", "method", "direction"}:
             unique = {paper.id: paper for paper in descendant_papers(node.id)}
             node.visual = _direction_visual(list(unique.values()))
 
@@ -2199,8 +2700,8 @@ def _validate_direction_graph(graph: ConceptGraph, max_depth: int) -> None:
             raise ValueError("论文只能位于叶节点")
         if node.role == "paper" and not node.paper_id:
             raise ValueError("论文叶节点必须关联 paper_id")
-        if node.role == "direction" and depths[node.id] > max_depth:
-            raise ValueError("研究方向图超过最大细分深度")
+        if node.role in {"problem", "method", "direction"} and depths[node.id] > max_depth:
+            raise ValueError("问题或方法路线超过最大细分深度")
         if not 0 <= node.visual.heat_score <= 1 or not 0 <= node.visual.recency_score <= 1:
             raise ValueError("图视觉分数必须位于 0..1")
 

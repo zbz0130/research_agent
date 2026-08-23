@@ -9,6 +9,18 @@ function edgeLineStyle(sourceKind) {
   return sourceKind === "model_inference" ? "dashed" : "solid";
 }
 
+const RELATION_LABELS = {
+  is_a: "属于",
+  part_of: "组成",
+  related_to: "相关",
+  supports: "论文证据",
+  contradicts: "反驳",
+  has_problem: "核心问题",
+  improves: "改进",
+  uses: "方法路线",
+  inspired_by: "启发自",
+};
+
 function graphElements(graph) {
   const nodes = (graph?.nodes || []).map((node) => {
     const appearance = nodeAppearance(node, graph);
@@ -42,6 +54,7 @@ function graphElements(graph) {
       source: String(edge.source),
       target: String(edge.target),
       relation: edge.relation || "related_to",
+      relationLabel: RELATION_LABELS[edge.relation] || edge.relation || "相关",
       sourceKind: edge.source_kind || "model_inference",
       lineStyle: edgeLineStyle(edge.source_kind),
       opacity: confidenceOpacity(edge.confidence),
@@ -173,7 +186,7 @@ export function createGraphRenderer(cytoscape, container, options = {}) {
           "target-arrow-shape": "triangle",
           "curve-style": "bezier",
           "line-style": "data(lineStyle)",
-          label: "data(relation)",
+          label: "data(relationLabel)",
           color: "#60758a",
           "font-size": 8,
           "text-rotation": "autorotate",

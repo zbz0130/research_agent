@@ -32,6 +32,7 @@ OverviewAgentRole = Literal[
     "topic_taxonomy_planner",
     "direction_research_coordinator",
     "direction_research_worker",
+    "direction_review_worker",
     "paper_reading",
     "direction_validation",
     "overview_synthesis",

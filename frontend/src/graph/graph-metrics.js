@@ -72,9 +72,19 @@ export function nodeAppearance(node, graph) {
     foreground = recency > 0.42 ? "#ffffff" : "#13273b";
     border = recency > 0.55 ? "#a9c5ff" : "#eef7ff";
   } else if (role === "problem") {
+    const diameter = Number.isFinite(backendRadius)
+      ? clamp(backendRadius * 2, 64, 132)
+      : 64 + (56 * Math.sqrt(heat));
+    width = diameter;
+    height = diameter;
     background = "#b46b72";
     border = "#ffd0d5";
   } else if (role === "method") {
+    const diameter = Number.isFinite(backendRadius)
+      ? clamp(backendRadius * 2, 54, 116)
+      : 54 + (46 * Math.sqrt(heat));
+    width = diameter;
+    height = diameter;
     background = "#675aa7";
     border = "#d8d0ff";
   } else if (role === "idea") {
