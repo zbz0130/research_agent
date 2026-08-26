@@ -12,6 +12,8 @@ permissions:
 jobs:
   publish-windows:
     runs-on: windows-latest
+    env:
+      HAS_WINDOWS_SIGNING_CERT: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 != '' && secrets.WINDOWS_CERTIFICATE_PASSWORD != '' }}
 
     steps:
       - name: Checkout
@@ -64,6 +66,51 @@ jobs:
             Windows x64 desktop installer for WishForge.
 
             Download `WishForge_*_x64-setup.exe`, run it, and then launch WishForge from the Start menu or desktop shortcut.
-          releaseDraft: false
+          # Keep the release private until the optional Authenticode signing
+          # step has had a chance to replace the unsigned installer.
+          releaseDraft: true
           prerelease: false
           generateReleaseNotes: true
+
+      - name: Sign Windows installer when a publisher certificate is configured
+        if: ${{ github.ref_type == 'tag' && env.HAS_WINDOWS_SIGNING_CERT == 'true' }}
+        shell: pwsh
+        env:
+          WISHFORGE_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
+          WISHFORGE_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          $certificatePath = Join-Path $env:RUNNER_TEMP "wishforge-signing.pfx"
+          [System.IO.File]::WriteAllBytes(
+            $certificatePath,
+            [System.Convert]::FromBase64String($env:WISHFORGE_CERTIFICATE_BASE64)
+          )
+          $signTool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter signtool.exe |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+          if ($null -eq $signTool) {
+            throw "signtool.exe was not found on the Windows runner."
+          }
+          $installer = Get-ChildItem "src-tauri\target\release\bundle\nsis" -Filter "WishForge_*-setup.exe" |
+            Select-Object -First 1
+          if ($null -eq $installer) {
+            throw "WishForge NSIS installer was not produced."
+          }
+          & $signTool.FullName sign /fd SHA256 /f $certificatePath /p $env:WISHFORGE_CERTIFICATE_PASSWORD /tr http://timestamp.digicert.com /td SHA256 $installer.FullName
+          if ($LASTEXITCODE -ne 0) {
+            throw "Authenticode signing failed with exit code $LASTEXITCODE."
+          }
+          "WISHFORGE_SIGNED_INSTALLER=$($installer.FullName)" | Add-Content -Path $env:GITHUB_ENV
+
+      - name: Replace the release asset with the signed installer
+        if: ${{ github.ref_type == 'tag' && env.HAS_WINDOWS_SIGNING_CERT == 'true' }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ github.ref_name }}" "$env:WISHFORGE_SIGNED_INSTALLER" --clobber
+
+      - name: Publish release
+        if: ${{ github.ref_type == 'tag' }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release edit "${{ github.ref_name }}" --draft=false

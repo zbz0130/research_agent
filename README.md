@@ -2,7 +2,7 @@
 
 面向科研人员的证据驱动研究工作台：把一个模糊想法变成有来源、能理解、可继续研究的知识。
 
-当前仓库处于 **研究图谱阶段：概念分析、真实关系图与研究方向 Overview**。现已打通“概念 → 论文检索 → 证据卡 → 主张—证据账本 → 易懂解释 → 可交互概念图”，并增加按需生成的“主题 → 研究方向 → 细分方向 → 论文叶节点”Overview，以及“研究想法 → 范围化 prior-art 判断”“三路研究 Agent Brief”“多图 → 跨领域候选”和“创新候选 → 实验方案草案”等入口。真实社交平台实时抓取、非开放论文全文、团队权限、实验执行和 Tauri 桌面外壳仍属于后续阶段。
+当前仓库处于 **研究图谱阶段：概念分析、真实关系图与研究方向 Overview**。现已打通“概念 → 多源论文检索 → 证据卡 → 主张—证据账本 → 易懂解释 → 可交互概念图”，并增加按需生成的“主题 → 研究方向 → 细分方向 → 论文叶节点”Overview，以及“研究想法 → 范围化 prior-art 判断”“三路研究 Agent Brief”“多图 → 跨领域候选”和“创新候选 → 实验方案草案”等入口。桌面版已提供首次 API Key 引导、实时 Hacker News 社区线索与新版 Release 检查；非开放论文全文、团队权限和实验执行仍属于后续阶段。
 
 功能的当前可用状态和 API/页面入口见 [已实现功能说明](docs/features.md)；逐次开发过程、失败实验和验收记录见 [开发日志](log.md)。
 
@@ -22,9 +22,9 @@ main
 在网页中输入“Attention Mechanism”“LoRA”等概念，选择一种模式：
 
 - **快速解释**：不检索论文，直接调用已配置的 OpenAI-compatible 模型生成易懂说明；未配置模型时明确回退到基础规则解释；
-- **文献解释**：通过 arXiv 官方 API 检索相关论文，由模型阅读返回的摘要并生成论文列表、摘要级证据卡、相关概念、演变过程和概念图；外部服务不可用且启用 Demo 模式时才使用明确标记的演示资料；
+- **文献解释**：默认合并 arXiv、OpenAlex 与 Crossref 的公开元数据检索；单一来源断连时保留其他来源结果。模型阅读可用摘要并生成论文列表、摘要级证据卡、相关概念、演变过程和概念图；只有用户明确启用 Demo 模式时才允许回退到明确标记的演示资料；
 - **研究线索**：在文献解释的基础上，用“限制 / future work / 方法对比”检索词做一次有预算的 prior-art 扩展，再生成探索性候选，列出最近资料、风险、可行性和最小验证步骤。
-- **三路研究 Brief**：研究模式会并行记录社区痛点 Agent、模型/启发式脑暴 Agent 和论文限制/Future Work Agent，再由综合记录汇总候选。社区内容和模型脑暴始终与学术证据分栏显示；当前没有实时 X、知乎、Reddit 连接器，也没有把摘要伪装成全文 Discussion。
+- **三路研究 Brief**：研究模式会并行记录社区痛点 Agent、模型/启发式脑暴 Agent 和论文限制/Future Work Agent，再由综合记录汇总候选。社区内容和模型脑暴始终与学术证据分栏显示；默认读取实时 Hacker News 公开讨论，X 与 Reddit 需由用户配置官方 Bearer Token，知乎不会进行未授权抓取。
 - **想法查重**：输入一段研究想法，展示实际检索词、匹配论文、摘要级证据、L0–L4 相似度分级、替代方向和最小验证步骤；结果保存到 SQLite，方便回看。
 - 查重结果可以通过人工审阅接口记录 `reviewed / dismissed / needs_review`、审阅人和备注；这只更新审阅元数据，不会把范围化检索升级成原创性结论。
 - **跨图借鉴**：保存多棵概念图后，可选择多图和节点子集，生成带关系类型、证据 ID、风险提示和验证步骤的跨领域候选；候选不会自动写回原图。
@@ -96,7 +96,7 @@ PYTHONPATH=backend python -m uvicorn app.main:app --reload
 
 ```text
 WISHFORGE_PAPER_API_KEY          # 论文检索
-WISHFORGE_COMMUNITY_API_KEY      # 社区探索（当前为 Provider 预留）
+WISHFORGE_COMMUNITY_API_KEY      # X / Reddit 社区 Provider 的 Bearer Token
 WISHFORGE_EXPLANATION_API_KEY   # 解释模型
 WISHFORGE_EXPERIMENT_API_KEY    # 实验执行
 WISHFORGE_EXPLANATION_MODEL     # 解释模型名称（默认 gpt-4.1-mini）
@@ -105,7 +105,17 @@ WISHFORGE_EXPLANATION_BASE_URL  # OpenAI-compatible 服务地址
 
 复制 [.env.example](<D:/C++/search_agent/.env.example>) 为 `.env` 后填写。网页设置面板只显示“已配置/未配置”和掩码，不会返回明文密钥。
 
-如果使用 OpenAI 兼容代理，代理地址不是填在 API Key 输入框，而是在设置页的“解释模型代理”卡片中填写；对应环境变量是 `WISHFORGE_EXPLANATION_BASE_URL`。地址填写到 `/v1` 这一层，例如 `https://proxy.example.com/v1`，后端会自动请求 `/chat/completions`。网页输入的 Provider、模型名和 Base URL 只覆盖当前 API 进程，长期部署请写入后端 `.env`。
+如果使用 OpenAI 兼容代理，代理地址不是填在 API Key 输入框，而是在设置页的“解释模型代理”卡片中填写；对应环境变量是 `WISHFORGE_EXPLANATION_BASE_URL`。地址填写到 `/v1` 这一层，例如 `https://proxy.example.com/v1`，后端会自动请求 `/chat/completions`。浏览器开发模式的网页输入只覆盖当前 API 进程；Windows 桌面版会持久化非敏感路由设置，服务器部署则应写入后端 `.env`。
+
+桌面版“配置引导”也提供一键填入。手动填写时可参考：
+
+| 服务 | Provider | 模型名称 | Base URL |
+| --- | --- | --- | --- |
+| DeepSeek V4 Flash | `openai_compatible` | `deepseek-v4-flash` | `https://api.deepseek.com` |
+| DeepSeek V4 Pro | `openai_compatible` | `deepseek-v4-pro` | `https://api.deepseek.com` |
+| OpenAI GPT-5.6 Sol | `openai` | `gpt-5.6-sol` | `https://api.openai.com/v1` |
+
+在“解释模型”卡片粘贴该服务自己的 API Key 后，先点击“保存模型路由”，再点击“保存 API Key”。论文检索默认使用无需 Key 的 arXiv、OpenAlex、Crossref 多源合并。
 
 配置状态接口：
 
@@ -127,7 +137,7 @@ Content-Type: application/json
 }
 ```
 
-接口只返回掩码和 `configured` 状态，绝不返回明文。第一版把网页输入保存在当前 API 进程的内存中，服务重启后消失；正式部署应改用操作系统密钥环或 Secret Manager。传入空字符串可清除对应槽位。
+接口只返回掩码和 `configured` 状态，绝不返回明文。浏览器开发模式下，网页输入只保存在当前 API 进程内存；Windows 桌面版会将 API Key 存入 Windows 凭据管理器，重启后仍可用。传入空字符串可清除对应槽位。
 
 当前接口没有用户登录和权限系统，网页密钥配置只适合本机或受保护的内网演示；不要把这个版本直接暴露到公网。
 
@@ -145,7 +155,7 @@ Content-Type: application/json
 }
 ```
 
-这个接口不会接收或返回 API Key；Key 仍通过 `/settings/api-keys` 单独配置。
+这个接口不会接收或返回 API Key；Key 仍通过 `/settings/api-keys` 单独配置。桌面版会把这些非敏感设置保存在应用数据目录，供下次启动时恢复。
 
 也可以不用网页，直接用 API 验收一轮：
 
@@ -231,7 +241,7 @@ Windows Release 的构建和下载说明见 [发布 Windows 桌面版](docs/rele
 
 ### Windows 桌面 App
 
-普通使用直接运行安装包 `src-tauri\target\release\bundle\nsis\WishForge_0.2.1_x64-setup.exe`，安装后从开始菜单打开 WishForge；不需要手动启动 Python、Vite 或 sidecar。GitHub Tag 页面下载的 Source code zip 仅供开发者使用，普通用户应下载 Release Assets 中的 `*-setup.exe`。
+普通使用直接运行安装包 `src-tauri\target\release\bundle\nsis\WishForge_0.2.2_x64-setup.exe`，安装后从开始菜单打开 WishForge；不需要手动启动 Python、Vite 或 sidecar。首次启动会自动打开设置并展示不含密钥的模型配置引导。GitHub Tag 页面下载的 Source code zip 仅供开发者使用，普通用户应下载 Release Assets 中的 `*-setup.exe`。
 
 ### Windows 桌面开发模式
 
@@ -265,7 +275,7 @@ cd D:\C++\search_agent\frontend
 npm.cmd run tauri:build
 ```
 
-默认生成面向普通 Windows 用户的 NSIS 一键安装程序：`src-tauri\target\release\bundle\nsis\WishForge_0.2.1_x64-setup.exe`。构建前会自动生成 sidecar，并真实调用健康接口；无法启动的 sidecar 不会进入安装包。
+默认生成面向普通 Windows 用户的 NSIS 一键安装程序：`src-tauri\target\release\bundle\nsis\WishForge_0.2.2_x64-setup.exe`。构建前会自动生成 sidecar，并真实调用健康接口；无法启动的 sidecar 不会进入安装包。
 
 ## 当前阶段验收标准
 
@@ -297,4 +307,4 @@ npm.cmd run tauri:build
 - 实验方案可以保存、重启后恢复并记录人工审阅状态；批准不会启动执行器；
 - 分析结果可以通过 `GET /api/v1/analyses/{analysis_id}/evidence-ledger` 查看主张—证据账本。
 
-下一阶段优先实现全文/用户文献库、arXiv/OpenAlex/Crossref 多源检索、真实社区连接器、Discussion/Future Work 结构化阅读、证据冲突和覆盖度驱动的自适应检索，以及更严格的 Agent 预算/重试；之后再接入经过人工批准、默认只读的隔离计算实验执行器。
+下一阶段优先实现全文/用户文献库、arXiv/OpenAlex/Crossref 多源检索、知乎等经授权的社区连接器、Discussion/Future Work 结构化阅读、证据冲突和覆盖度驱动的自适应检索，以及更严格的 Agent 预算/重试；之后再接入经过人工批准、默认只读的隔离计算实验执行器。

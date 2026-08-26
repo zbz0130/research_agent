@@ -58,7 +58,7 @@ ManualReviewStatus = Literal["needs_review", "reviewed", "dismissed"]
 ArxivCheckStatus = Literal["not_checked", "indirect_metadata", "checked", "unavailable"]
 AgentRole = Literal["community", "model_brainstorm", "future_work", "synthesis"]
 AgentRunStatus = Literal["queued", "running", "completed", "failed", "skipped"]
-CommunityPlatform = Literal["x", "知乎", "zhihu", "reddit", "other"]
+CommunityPlatform = Literal["x", "知乎", "zhihu", "reddit", "hacker_news", "other"]
 ArxivNoveltyStatus = Literal[
     "not_checked", "no_direct_match_in_scope", "matched", "unavailable", "checked"
 ]

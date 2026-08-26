@@ -16,21 +16,21 @@ class Settings(BaseSettings):
     app_name: str = "许愿机 API"
     brand_name: str = "许愿机"
     brand_name_en: str = "WishForge"
-    version: str = "0.1.0"
+    version: str = "0.2.2"
     cors_origins: str = "http://localhost:8000,http://localhost:3000"
     storage_path: str = "data/wishforge.db"
 
     # Providers are deliberately separated by responsibility. A paper-search
     # credential must never be accidentally used by the experiment runner.
-    paper_provider: str = "arxiv"
+    paper_provider: str = "multi_source"
     paper_base_url: str | None = None
     paper_model: str | None = None
     paper_enabled: bool = True
-    # Community sources (X/知乎/Reddit) are deliberately separate from
-    # academic search.  The first version ships a demo provider; production
-    # connectors can be configured later without reusing paper credentials.
-    community_provider: str = "demo"
-    community_base_url: str | None = None
+    # Community sources are deliberately separate from academic search.  The
+    # public Hacker News provider is the default real-time source; X and
+    # Reddit remain opt-in because their official APIs require credentials.
+    community_provider: str = "hacker_news"
+    community_base_url: str | None = "https://hacker-news.firebaseio.com/v0"
     community_model: str | None = None
     community_enabled: bool = True
     explanation_provider: str = "openai"
@@ -42,7 +42,9 @@ class Settings(BaseSettings):
     explanation_model: str = "gpt-4.1-mini"
     explanation_base_url: str = "https://api.openai.com/v1"
     explanation_timeout_seconds: float = 90.0
-    demo_mode: bool = True
+    # A release build must never silently replace failed live retrieval with
+    # fixtures. Demo mode remains available for local demos and tests only.
+    demo_mode: bool = False
     paper_api_key: SecretStr | None = None
     community_api_key: SecretStr | None = None
     explanation_api_key: SecretStr | None = None

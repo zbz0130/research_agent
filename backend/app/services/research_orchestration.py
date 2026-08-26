@@ -18,8 +18,13 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 import hashlib
-from typing import Protocol, Sequence
+import html
+import re
+from collections.abc import Callable
+from typing import Any, Protocol, Sequence
 from uuid import uuid4
+
+import httpx
 
 from app.config import Settings
 from app.research_schemas import (
@@ -39,11 +44,17 @@ from app.services.research_providers import (
 
 
 class CommunityProvider(Protocol):
-    """Provider boundary for X/知乎/Reddit and other community sources."""
+    """Read-only boundary for an explicitly configured community platform."""
 
     name: str
 
-    def search(self, concept: str, limit: int) -> list[CommunitySignal]:
+    def search(
+        self,
+        concept: str,
+        limit: int,
+        *,
+        query_terms: Sequence[str] = (),
+    ) -> list[CommunitySignal]:
         ...
 
 
@@ -52,7 +63,13 @@ class DemoCommunityProvider:
 
     name = "demo_community"
 
-    def search(self, concept: str, limit: int) -> list[CommunitySignal]:
+    def search(
+        self,
+        concept: str,
+        limit: int,
+        *,
+        query_terms: Sequence[str] = (),
+    ) -> list[CommunitySignal]:
         text = concept.lower()
         if any(token in text for token in ("attention", "注意力", "kv cache", "kv缓存", "paged")):
             signals = [
@@ -127,18 +144,360 @@ class DemoCommunityProvider:
         return signals[:limit]
 
 
+_DEFAULT_HACKER_NEWS_API = "https://hacker-news.firebaseio.com/v0"
+_DEFAULT_X_API = "https://api.x.com/2"
+_DEFAULT_REDDIT_API = "https://oauth.reddit.com"
+_COMMUNITY_TIMEOUT_SECONDS = 8.0
+_HN_SCAN_LIMIT = 72
+_QUERY_STOP_WORDS = {
+    "about", "and", "are", "based", "for", "from", "into", "method", "methods",
+    "model", "models", "of", "the", "this", "that", "using", "with",
+}
+
+
+def _strip_html(value: object, *, limit: int = 1200) -> str:
+    text = html.unescape(str(value or ""))
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = " ".join(text.split())
+    return text[:limit].rstrip()
+
+
+def _community_query_terms(concept: str, query_terms: Sequence[str]) -> list[str]:
+    """Retain only compact terms that can be sent to a public community API."""
+
+    values = [*query_terms, concept]
+    unique: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        normalized = " ".join(str(value or "").replace('"', " ").split())
+        key = normalized.casefold()
+        if normalized and key not in seen:
+            seen.add(key)
+            unique.append(normalized[:240])
+        if len(unique) >= 3:
+            break
+    return unique
+
+
+def _community_tokens(values: Sequence[str]) -> set[str]:
+    tokens: set[str] = set()
+    for value in values:
+        tokens.update(_tokens(value))
+    return {token for token in tokens if token not in _QUERY_STOP_WORDS}
+
+
+def _checked_json(
+    request_get: Callable[..., Any],
+    url: str,
+    *,
+    provider: str,
+    label: str,
+    headers: dict[str, str] | None = None,
+    params: dict[str, str | int] | None = None,
+) -> Any:
+    """Request bounded JSON without putting credentials in public errors."""
+
+    try:
+        response = request_get(
+            url,
+            headers=headers,
+            params=params,
+            timeout=_COMMUNITY_TIMEOUT_SECONDS,
+        )
+    except httpx.HTTPError as exc:
+        raise ProviderUnavailable(
+            f"{label} 连接失败：{exc.__class__.__name__}。请检查网络后重试。",
+            provider=provider,
+        ) from exc
+    status_code = int(getattr(response, "status_code", 200))
+    if not 200 <= status_code < 300:
+        raise ProviderUnavailable(
+            f"{label} 请求失败（HTTP {status_code}）。请检查该平台的访问权限、配额或 Token。",
+            provider=provider,
+        )
+    try:
+        return response.json()
+    except (TypeError, ValueError) as exc:
+        raise ProviderUnavailable(
+            f"{label} 返回了无法识别的数据，未把它当作社区信号。",
+            provider=provider,
+        ) from exc
+
+
+class HackerNewsCommunityProvider:
+    """Read the public Hacker News API without a credential or scraping."""
+
+    name = "hacker_news"
+
+    def __init__(
+        self,
+        base_url: str | None = None,
+        *,
+        request_get: Callable[..., Any] = httpx.get,
+    ) -> None:
+        self.base_url = (base_url or _DEFAULT_HACKER_NEWS_API).rstrip("/")
+        self._request_get = request_get
+
+    def _get(self, path: str) -> Any:
+        return _checked_json(
+            self._request_get,
+            f"{self.base_url}/{path.lstrip('/')}",
+            provider=self.name,
+            label="Hacker News 公共 API",
+        )
+
+    def search(
+        self,
+        concept: str,
+        limit: int,
+        *,
+        query_terms: Sequence[str] = (),
+    ) -> list[CommunitySignal]:
+        terms = _community_query_terms(concept, query_terms)
+        tokens = _community_tokens(terms)
+        if not tokens:
+            return []
+        story_ids = self._get("newstories.json")
+        if not isinstance(story_ids, list):
+            raise ProviderUnavailable(
+                "Hacker News 公共 API 返回的故事列表格式无效。",
+                provider=self.name,
+            )
+        candidate_ids = [item for item in story_ids if isinstance(item, int)][: _HN_SCAN_LIMIT]
+
+        def load_story(story_id: int) -> dict[str, Any] | None:
+            try:
+                item = self._get(f"item/{story_id}.json")
+            except ProviderUnavailable:
+                return None
+            return item if isinstance(item, dict) else None
+
+        stories: list[dict[str, Any]] = []
+        with ThreadPoolExecutor(max_workers=8, thread_name_prefix="wishforge-hn") as executor:
+            for item in executor.map(load_story, candidate_ids):
+                if item and item.get("type") == "story" and not item.get("deleted") and not item.get("dead"):
+                    stories.append(item)
+
+        ranked: list[tuple[int, int, CommunitySignal]] = []
+        for story in stories:
+            title = _strip_html(story.get("title"), limit=500)
+            body = _strip_html(story.get("text"), limit=1500)
+            haystack = f"{title} {body}".casefold()
+            title_text = title.casefold()
+            matched = sorted(token for token in tokens if token in haystack)
+            title_matches = [token for token in matched if token in title_text]
+            if not title_matches and len(matched) < 2:
+                continue
+            story_id = story.get("id")
+            if not isinstance(story_id, int):
+                continue
+            score = int(story.get("score") or 0)
+            comments = int(story.get("descendants") or 0)
+            created = story.get("time")
+            observed_at = (
+                datetime.fromtimestamp(created, tz=timezone.utc)
+                if isinstance(created, (int, float))
+                else _now()
+            )
+            excerpt = body or "帖子未提供正文；请打开来源和评论核对具体上下文。"
+            signal = CommunitySignal(
+                id=f"hacker-news-{story_id}",
+                platform="hacker_news",
+                title=title or f"Hacker News story {story_id}",
+                summary=(
+                    f"Hacker News 公开讨论，{score} 分、{comments} 条评论。{excerpt}"
+                )[:5000],
+                pain_point=(
+                    f"该帖与检索词 {', '.join(matched[:6]) or '相关'} 存在文本匹配；"
+                    "具体问题需打开原帖与评论人工核验。"
+                ),
+                open_question="讨论中的实践约束、失败条件和可复现证据是什么？",
+                url=f"https://news.ycombinator.com/item?id={story_id}",
+                observed_at=observed_at,
+                confidence="low",
+            )
+            ranked.append((len(title_matches) * 3 + len(matched), score + comments, signal))
+        ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        return [item[2] for item in ranked[: max(1, min(limit, 12))]]
+
+
+class XCommunityProvider:
+    """Read recent X posts through the official bearer-token endpoint."""
+
+    name = "x"
+
+    def __init__(
+        self,
+        api_key: str | None,
+        base_url: str | None = None,
+        *,
+        request_get: Callable[..., Any] = httpx.get,
+    ) -> None:
+        self.api_key = (api_key or "").strip()
+        self.base_url = (base_url or _DEFAULT_X_API).rstrip("/")
+        self._request_get = request_get
+
+    def search(
+        self,
+        concept: str,
+        limit: int,
+        *,
+        query_terms: Sequence[str] = (),
+    ) -> list[CommunitySignal]:
+        if not self.api_key:
+            raise ProviderUnavailable(
+                "X 社区检索需要在“社区检索”槽位配置 Bearer Token。",
+                provider=self.name,
+            )
+        terms = _community_query_terms(concept, query_terms)
+        query = " OR ".join(f'({term})' for term in terms[:3])
+        if not query:
+            return []
+        payload = _checked_json(
+            self._request_get,
+            f"{self.base_url}/tweets/search/recent",
+            provider=self.name,
+            label="X 最近帖子搜索",
+            headers={"Authorization": f"Bearer {self.api_key}"},
+            params={
+                "query": query,
+                "max_results": max(10, min(limit, 100)),
+                "sort_order": "relevancy",
+                "tweet.fields": "created_at,public_metrics,lang",
+            },
+        )
+        posts = payload.get("data", []) if isinstance(payload, dict) else []
+        signals: list[CommunitySignal] = []
+        for post in posts:
+            if not isinstance(post, dict) or not post.get("id"):
+                continue
+            text = _strip_html(post.get("text"), limit=2200)
+            post_id = str(post["id"])
+            metrics = post.get("public_metrics") if isinstance(post.get("public_metrics"), dict) else {}
+            engagement = int(metrics.get("like_count") or 0) + int(metrics.get("reply_count") or 0)
+            signals.append(
+                CommunitySignal(
+                    id=f"x-{post_id}",
+                    platform="x",
+                    title=(text[:150] or f"X post {post_id}"),
+                    summary=(f"X 公开帖子（互动 {engagement}）：{text}" if text else "X 公开帖子，请打开来源核对上下文。"),
+                    pain_point="该帖子是与当前主题相关的公开讨论，具体主张尚未核验。",
+                    open_question="该讨论反映的问题能否用论文、数据或最小实验复现？",
+                    url=f"https://x.com/i/web/status/{post_id}",
+                    observed_at=_now(),
+                    confidence="low",
+                )
+            )
+        return signals[:limit]
+
+
+class RedditCommunityProvider:
+    """Read Reddit search results only through its OAuth Data API endpoint."""
+
+    name = "reddit"
+
+    def __init__(
+        self,
+        api_key: str | None,
+        base_url: str | None = None,
+        *,
+        request_get: Callable[..., Any] = httpx.get,
+    ) -> None:
+        self.api_key = (api_key or "").strip()
+        self.base_url = (base_url or _DEFAULT_REDDIT_API).rstrip("/")
+        self._request_get = request_get
+
+    def search(
+        self,
+        concept: str,
+        limit: int,
+        *,
+        query_terms: Sequence[str] = (),
+    ) -> list[CommunitySignal]:
+        if not self.api_key:
+            raise ProviderUnavailable(
+                "Reddit 社区检索需要在“社区检索”槽位配置 OAuth Bearer Token。",
+                provider=self.name,
+            )
+        terms = _community_query_terms(concept, query_terms)
+        query = " OR ".join(terms[:3])
+        if not query:
+            return []
+        payload = _checked_json(
+            self._request_get,
+            f"{self.base_url}/search",
+            provider=self.name,
+            label="Reddit OAuth 搜索",
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "User-Agent": "WishForge/0.2 community-signal-reader",
+            },
+            params={"q": query, "sort": "relevance", "limit": max(1, min(limit, 25)), "type": "link"},
+        )
+        children = payload.get("data", {}).get("children", []) if isinstance(payload, dict) else []
+        signals: list[CommunitySignal] = []
+        for child in children:
+            item = child.get("data") if isinstance(child, dict) else None
+            if not isinstance(item, dict) or not item.get("id"):
+                continue
+            post_id = str(item["id"])
+            title = _strip_html(item.get("title"), limit=500)
+            body = _strip_html(item.get("selftext"), limit=1800)
+            subreddit = _strip_html(item.get("subreddit"), limit=100)
+            score = int(item.get("score") or 0)
+            comments = int(item.get("num_comments") or 0)
+            permalink = str(item.get("permalink") or "")
+            created = item.get("created_utc")
+            observed_at = (
+                datetime.fromtimestamp(created, tz=timezone.utc)
+                if isinstance(created, (int, float))
+                else _now()
+            )
+            signals.append(
+                CommunitySignal(
+                    id=f"reddit-{post_id}",
+                    platform="reddit",
+                    title=title or f"Reddit post {post_id}",
+                    summary=(
+                        f"r/{subreddit or 'unknown'} 公开讨论，{score} 分、{comments} 条评论。"
+                        f" {body or '请打开来源核对完整讨论。'}"
+                    )[:5000],
+                    pain_point="该帖子反映社区中的实践问题；它不是经同行评审的科学证据。",
+                    open_question="该问题是否能被公开数据、基线对照或论文全文证据复现？",
+                    url=f"https://www.reddit.com{permalink}" if permalink.startswith("/") else None,
+                    observed_at=observed_at,
+                    confidence="low",
+                )
+            )
+        return signals[:limit]
+
+
 def _community_provider(settings: Settings) -> CommunityProvider:
     if not getattr(settings, "community_enabled", True):
         raise ProviderUnavailable(
             "社区检索 Provider 已在设置中关闭。",
             provider=getattr(settings, "community_provider", "unknown"),
         )
-    provider = getattr(settings, "community_provider", "demo")
+    provider = str(getattr(settings, "community_provider", "hacker_news")).strip().lower()
+    base_url = getattr(settings, "community_base_url", None)
+    api_key = getattr(settings, "community_api_key", None)
+    secret = api_key.get_secret_value() if api_key is not None else None
     if provider == "demo":
         return DemoCommunityProvider()
+    if provider in {"hacker_news", "hackernews", "hn"}:
+        return HackerNewsCommunityProvider(base_url)
+    if provider == "x":
+        return XCommunityProvider(secret, base_url)
+    if provider == "reddit":
+        return RedditCommunityProvider(secret, base_url)
+    if provider in {"zhihu", "知乎"}:
+        raise ProviderUnavailable(
+            "知乎没有在本应用中配置可用的合规 API 连接器；不会进行未授权抓取。",
+            provider="zhihu",
+        )
     raise ProviderUnavailable(
-        f"未配置可用的社区 Provider：{provider}。第一版仅内置 demo 社区信号，"
-        "不会把社区检索失败误报成没有研究痛点。"
+        f"未配置可用的社区 Provider：{provider}。可使用 hacker_news、x、reddit 或 demo。",
+        provider=provider,
     )
 
 
@@ -535,6 +894,7 @@ class ResearchOrchestrator:
         existing_candidates: Sequence[InnovationCandidate] = (),
         explanation_provider: ExplanationProvider | None = None,
         language: str = "zh-CN",
+        community_query_terms: Sequence[str] = (),
     ) -> ResearchBrief:
         started = _now()
         role_order = ["community", "model_brainstorm", "future_work"]
@@ -546,16 +906,21 @@ class ResearchOrchestrator:
             run = placeholders["community"].model_copy(update={"status": "running", "started_at": _now()})
             try:
                 provider = _community_provider(settings)
-                signals = provider.search(concept, 6)
+                terms = _community_query_terms(concept, community_query_terms)
+                signals = provider.search(concept, 6, query_terms=terms)
                 done = _now()
+                is_demo = provider.name == "demo_community"
                 run = run.model_copy(
                     update={
                         "status": "completed",
                         "provider": provider.name,
-                        "query_terms": [concept, f"{concept} pain points", f"{concept} reproducibility"],
+                        "query_terms": terms,
                         "output_ids": [item.id for item in signals],
-                        "summary": f"发现 {len(signals)} 条探索性社区痛点信号。",
-                        "warnings": ["社区内容仅用于发现问题，未作为科学证据。", "当前为演示社区 Provider。"],
+                        "summary": f"从 {provider.name} 返回 {len(signals)} 条探索性社区信号。",
+                        "warnings": [
+                            "社区内容仅用于发现问题，未作为科学证据。",
+                            *(["当前为演示社区 Provider。"] if is_demo else ["已读取实时公开社区内容；请打开来源并人工核验上下文。"]),
+                        ],
                         "completed_at": done,
                         "duration_ms": _duration_ms(run.started_at or done, done),
                     }

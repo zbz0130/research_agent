@@ -33,7 +33,7 @@ WishForge 是一个面向科研人员的研究工作台。当前第一版的主�
 | --- | --- | --- | --- |
 | 快速概念解释 | 已实现 | 工作台 → 快速解释 | 不检索论文，调用解释模型或规则回退 |
 | arXiv 文献解释 | 已实现 | 工作台 → 文献解释 | 首轮检索、摘要反馈检索、证据卡和分层解释 |
-| 研究模式 | 有限实现 | 工作台 → 研究线索 | 三路研究 Agent + 综合结果；社区当前主要是 demo/占位 Provider |
+| 研究模式 | 已实现（探索性） | 工作台 → 研究线索 | 三路研究 Agent + 综合结果；默认读取实时 Hacker News 公开讨论，X/Reddit 为可选授权 Provider |
 | 原子研究主张 | 已实现 | 文献解释结果 | 一条主张只表达一个可核验事实，并绑定论文和证据 |
 | 主张—证据账本 | 已实现 | 分析结果 / ledger API | 展示支持关系、覆盖率、强度和下一步核验动作 |
 | 人工证据核验 | 已实现 | 账本按钮 / review API | 只能修改审阅元数据，不会改写原文摘要 |
@@ -88,13 +88,13 @@ WishForge 是一个面向科研人员的研究工作台。当前第一版的主�
 
 每个 Agent 的运行状态、来源和警告会写入 `ResearchBrief`。社区信号、模型假设和学术证据在页面上分栏展示，不能混成一种证据。
 
-当前研究模式的边界：X、知乎和 Reddit 的实时适配器还没有完成；论文主要来自摘要；“当前范围未发现”不能解释成“全世界没有相同工作”。
+当前研究模式的边界：Hacker News 内容是公开工程讨论；X 和 Reddit 只能使用用户提供的官方 Bearer Token；知乎不会被未授权抓取。社区内容只用于发现问题，论文主要来自摘要；“当前范围未发现”不能解释成“全世界没有相同工作”。
 
 ## 4. 检索和论文数据
 
 ### 4.1 arXiv Provider
 
-默认论文源是 arXiv 官方 Atom API：
+默认论文源是多源公开元数据检索：arXiv 官方 Atom API、OpenAlex Works 与 Crossref Works。每条记录保留各自来源标签；单一来源发生网络错误时不会把“未完成检索”误报为“没有论文”。
 
 ```text
 https://export.arxiv.org/api/query
@@ -111,7 +111,7 @@ arXiv 检索不需要 API Key。Provider 会：
 - 处理网络异常、限流、空结果和 XML 错误；
 - 在 Demo 模式下才允许明确标记的演示资料作为回退。
 
-代码中还保留了 Semantic Scholar Provider 作为可选数据源；切换到它时需要相应的论文检索 Key，并需要处理公开接口的限流（例如 HTTP 429）。当前默认配置仍然是 arXiv，因此本轮主流程不依赖 Semantic Scholar。
+代码中还保留了 Semantic Scholar Provider 作为可选数据源；切换到它时需要相应的论文检索 Key，并需要处理公开接口的限流（例如 HTTP 429）。默认 `multi_source` 不依赖 Semantic Scholar Key。
 
 ### 4.2 论文记录
 
@@ -123,7 +123,7 @@ arXiv 检索不需要 API Key。Provider 会：
 - `source_kind` 和 `access_type`；
 - `retrieved_at`。
 
-数据结构允许未来接入 OpenAlex、Crossref、Semantic Scholar 或期刊版本，而不需要重写上层分析结果。
+数据结构已接入 OpenAlex、Crossref；后续可以继续接入 Semantic Scholar、期刊版本和用户合法上传的全文，而不需要重写上层分析结果。
 
 ## 5. 证据和主张治理
 
@@ -338,7 +338,7 @@ arXiv Provider 默认不需要论文 Key。解释模型使用 OpenAI-compatible 
 
 - `WISHFORGE_PAPER_PROVIDER`：默认 `arxiv`，也可选择已实现的其他 Provider；
 - `WISHFORGE_PAPER_BASE_URL`、`WISHFORGE_PAPER_MODEL`、`WISHFORGE_PAPER_ENABLED`；
-- `WISHFORGE_COMMUNITY_PROVIDER`：当前默认 `demo`；
+- `WISHFORGE_COMMUNITY_PROVIDER`：默认 `hacker_news`（公开只读、无需 Key）；也可设为 `x` 或 `reddit` 并在 `WISHFORGE_COMMUNITY_API_KEY` 填写各自的 Bearer Token；
 - `WISHFORGE_COMMUNITY_BASE_URL`、`WISHFORGE_COMMUNITY_MODEL`、`WISHFORGE_COMMUNITY_ENABLED`；
 - `WISHFORGE_EXPLANATION_PROVIDER`、`WISHFORGE_EXPLANATION_MODEL`；
 - `WISHFORGE_EXPLANATION_BASE_URL`、`WISHFORGE_EXPLANATION_TIMEOUT_SECONDS`、`WISHFORGE_EXPLANATION_ENABLED`；
@@ -458,7 +458,7 @@ Windows 验收时建议先确认 8000 端口没有旧的 Uvicorn parent/reloader
 
 - PDF 全文 Method、Experiment、Discussion 和页码级证据；
 - Connected Papers 式引用、共引、bibliographic coupling 或嵌入网络；
-- X、知乎、Reddit 的真实实时适配器；
+- 知乎等经授权的社区适配器；
 - 对全球论文、期刊、专利、非英文论文和工业报告的完整查重；
 - “arXiv 没搜到”到“世界上没有相同工作”的推理；
 - 自动判断创新性并替代研究者；

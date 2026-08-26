@@ -13,6 +13,9 @@ import {
 } from "./src/research/overview-workflow.js";
 
 const healthEl = document.querySelector("#health");
+const updateNoticeEl = document.querySelector("#update-notice");
+const onboardingEl = document.querySelector("#onboarding-popover");
+const openOnboardingButton = document.querySelector("#open-onboarding");
 const apiKeysEl = document.querySelector("#api-keys");
 const apiKeyForm = document.querySelector("#api-key-form");
 const apiKeyMessageEl = document.querySelector("#api-key-message");
@@ -614,6 +617,9 @@ const displayLabels = {
   demo: "示例资料",
   official: "官方资料",
   community: "社区信号",
+  hacker_news: "Hacker News",
+  x: "X",
+  reddit: "Reddit",
   open_access: "开放全文",
   abstract_only: "仅有摘要",
   metadata_only: "仅有元数据",
@@ -761,7 +767,7 @@ function renderApiKeys(slots) {
     },
     community_search: {
       icon: "◌",
-      description: "用于探索性社区信号；是否实际调用取决于后端连接器。",
+      description: "用于探索性社区信号；Hacker News 无需密钥，X 和 Reddit 需要各自的 Bearer Token。",
       scope: "社区讨论服务",
     },
     explanation_model: {
@@ -883,7 +889,7 @@ function renderModelSettings(settings) {
 
 const providerSlotDetails = {
   paper_search: { icon: "⌕", hint: "用于 arXiv、Semantic Scholar 等学术资料检索。" },
-  community_search: { icon: "◌", hint: "用于 X、知乎、Reddit 等探索性讨论信号。" },
+  community_search: { icon: "◌", hint: "默认 hacker_news 读取公开实时讨论；x 与 reddit 需填写各自 Bearer Token。知乎不会进行未授权抓取。" },
   explanation_model: { icon: "✦", hint: "用于概念解释、论文节点摘要和研究简报。" },
   experiment_runner: { icon: "▣", hint: "预留给实验执行器；当前只生成方案，不执行代码。" },
 };
@@ -913,7 +919,7 @@ function renderProviderRuntimeSlots(slots) {
           <span class="tag ${slot.enabled ? "tag-configured" : "tag-missing"}">${slot.enabled ? "已启用" : "已关闭"}</span>
         </div>
         <div class="provider-runtime-form-grid">
-          <label>Provider<input data-provider-field="provider" value="${escapeHtml(slot.provider || "")}" maxlength="100" /></label>
+          <label>Provider<input data-provider-field="provider" list="provider-options" value="${escapeHtml(slot.provider || "")}" maxlength="100" /></label>
           <label>模型名称<input data-provider-field="model" value="${escapeHtml(slot.model || "")}" maxlength="200" placeholder="可留空" /></label>
           <label class="provider-base-url-field">Base URL<input data-provider-field="base_url" value="${escapeHtml(slot.base_url || "")}" type="url" placeholder="https://…/v1" /></label>
         </div>
@@ -971,7 +977,11 @@ providerRuntimeSlotsEl?.addEventListener("click", async (event) => {
   button.disabled = true;
   try {
     if (button.dataset.providerAction === "save") {
-      const data = await updateProviderRuntimeSlot(slotId, providerSlotPayload(card));
+      const payload = providerSlotPayload(card);
+      if (window.WishForgeDesktop?.isDesktop) {
+        await window.WishForgeDesktop.saveProviderRuntimeSettings(slotId, payload);
+      }
+      const data = await updateProviderRuntimeSlot(slotId, payload);
       renderProviderRuntimeSlots(data.slots);
       setProviderRuntimeMessage("用途配置已保存；没有提交任何 API Key。", "");
     } else {
@@ -1086,6 +1096,13 @@ apiKeyForm.addEventListener("submit", async (event) => {
     setApiKeyMessage(window.WishForgeDesktop?.isDesktop
       ? "已保存到 Windows Credential Manager，并同步到本次 sidecar 会话。"
       : "已保存。密钥只保存在当前 API 进程内，响应中不会返回明文。", "");
+    if (
+      payload.explanation_model
+      && window.WishForgeDesktop?.isDesktop
+      && !hasCompletedOnboarding()
+    ) {
+      showOnboardingNextSteps();
+    }
   } catch (error) {
     setApiKeyMessage(`保存失败：${error.message}`, "error-text");
   } finally {
@@ -1842,9 +1859,12 @@ function renderResearchBrief(result) {
     <div class="brief-columns">
       <section>
         <p class="section-label">社区痛点（非科学证据）</p>
-        ${(brief.community_signals || []).map((signal) => `
-          <article class="brief-signal"><strong>${escapeHtml(signal.title)}</strong><span>${escapeHtml(signal.platform)} · ${escapeHtml(signal.pain_point || signal.summary)}</span><small>${escapeHtml(signal.open_question || "暂无开放问题")}</small></article>
-        `).join("") || '<p class="empty">没有社区信号。</p>'}
+        ${(brief.community_signals || []).map((signal) => {
+          const sourceUrl = safeExternalUrl(signal.url);
+          return `
+            <article class="brief-signal"><strong>${escapeHtml(signal.title)}</strong><span>${escapeHtml(displayLabel(signal.platform))} · ${escapeHtml(signal.pain_point || signal.summary)}</span><small>${escapeHtml(signal.open_question || "暂无开放问题")}</small>${sourceUrl ? `<a class="inline-source-link" href="${escapeHtml(sourceUrl)}" target="_blank" rel="noopener noreferrer">打开社区来源 ↗</a>` : ""}</article>
+          `;
+        }).join("") || '<p class="empty">没有社区信号。</p>'}
       </section>
       <section>
         <p class="section-label">论文限制 / Future Work 线索</p>
@@ -2065,7 +2085,9 @@ function renderGraph(graph) {
             <option value="note">注释</option>
           </select>
         </label>
+        <button type="button" class="secondary" data-concept-graph-zoom-out aria-label="缩小概念图">缩小</button>
         <button type="button" class="secondary" data-concept-graph-fit>适应画布</button>
+        <button type="button" class="secondary" data-concept-graph-zoom-in aria-label="放大概念图">放大</button>
         <button type="button" class="secondary" data-concept-graph-save-layout ${saved ? "" : "disabled"}>保存布局</button>
         <button type="button" class="secondary" data-concept-graph-edit>编辑模式</button>
         <button type="button" class="secondary" data-concept-graph-low-confidence aria-pressed="true">隐藏低置信边</button>
@@ -2123,7 +2145,9 @@ function renderGraph(graph) {
       setGraphMessage(count ? `找到 ${count} 个匹配节点。` : "没有找到匹配节点。", count ? "" : "error-text");
     });
     graphEl.querySelector("[data-concept-graph-role]")?.addEventListener("change", applyGraphFilter);
+    graphEl.querySelector("[data-concept-graph-zoom-out]")?.addEventListener("click", () => state.conceptGraphRenderer?.zoomBy?.(0.8));
     graphEl.querySelector("[data-concept-graph-fit]")?.addEventListener("click", () => state.conceptGraphRenderer?.fit());
+    graphEl.querySelector("[data-concept-graph-zoom-in]")?.addEventListener("click", () => state.conceptGraphRenderer?.zoomBy?.(1.25));
     graphEl.querySelector("[data-concept-graph-edit]")?.addEventListener("click", (event) => {
       const panel = graphEl.querySelector("[data-graph-editor-form]");
       const opening = panel?.classList.contains("hidden");
@@ -3249,6 +3273,131 @@ async function waitForOverviewCompletion(id) {
   }
 }
 
+const ONBOARDING_STORAGE_KEY = "wishforge-onboarding-v0.2.2-complete";
+const APP_VERSION = "0.2.2";
+const RELEASES_ENDPOINT = "https://api.github.com/repos/zbz0130/research_agent/releases/latest";
+const MODEL_SETUP_TEMPLATES = {
+  "deepseek-v4-flash": { provider: "openai_compatible", model: "deepseek-v4-flash", baseUrl: "https://api.deepseek.com", label: "DeepSeek V4 Flash" },
+  "deepseek-v4-pro": { provider: "openai_compatible", model: "deepseek-v4-pro", baseUrl: "https://api.deepseek.com", label: "DeepSeek V4 Pro" },
+  "gpt-5.6-sol": { provider: "openai", model: "gpt-5.6-sol", baseUrl: "https://api.openai.com/v1", label: "GPT-5.6 Sol" },
+};
+
+function hasCompletedOnboarding() {
+  try {
+    return window.localStorage.getItem(ONBOARDING_STORAGE_KEY) === "true";
+  } catch (error) {
+    return false;
+  }
+}
+
+function hideOnboarding({ complete = false } = {}) {
+  onboardingEl?.classList.add("hidden");
+  if (!complete) return;
+  try {
+    window.localStorage.setItem(ONBOARDING_STORAGE_KEY, "true");
+  } catch (error) {
+    // The guide remains usable when browser storage is disabled.
+  }
+}
+
+function resetOnboardingContent() {
+  if (!onboardingEl) return;
+  const title = onboardingEl.querySelector("#onboarding-title");
+  const description = onboardingEl.querySelector("#onboarding-description");
+  if (title) title.textContent = "先绑定解释模型 API Key";
+  if (description) {
+    description.textContent = "论文检索和 Hacker News 可直接使用；概念解释、研究简报和研究方向图需要你自己的模型服务。";
+  }
+  onboardingEl.querySelector(".onboarding-templates")?.classList.remove("hidden");
+  onboardingEl.querySelector('[data-onboarding-action="key"]')?.classList.remove("hidden");
+}
+
+function showOnboardingNextSteps() {
+  if (!onboardingEl) return;
+  const title = onboardingEl.querySelector("#onboarding-title");
+  const description = onboardingEl.querySelector("#onboarding-description");
+  if (title) title.textContent = "API Key 已绑定，可以开始探索了";
+  if (description) {
+    description.textContent = "先在工作台输入一个概念并完成文献解释；再到研究方向图查看可继续推进的细分主题。";
+  }
+  onboardingEl.querySelector(".onboarding-templates")?.classList.add("hidden");
+  onboardingEl.querySelector('[data-onboarding-action="key"]')?.classList.add("hidden");
+  onboardingEl.classList.remove("hidden");
+}
+
+function showOnboarding({ force = false } = {}) {
+  if (!onboardingEl || (!force && hasCompletedOnboarding())) return;
+  resetOnboardingContent();
+  navigateTo("settings");
+  onboardingEl.classList.remove("hidden");
+}
+
+function focusExplanationKey() {
+  navigateTo("settings");
+  window.requestAnimationFrame(() => {
+    const card = document.querySelector('[data-api-key-slot="explanation_model"]');
+    card?.scrollIntoView({ behavior: "smooth", block: "center" });
+    window.setTimeout(() => card?.querySelector("[data-api-key-input]")?.focus(), 280);
+  });
+}
+
+onboardingEl?.addEventListener("click", (event) => {
+  const templateButton = event.target.closest("[data-onboarding-template]");
+  if (templateButton) {
+    const template = MODEL_SETUP_TEMPLATES[templateButton.dataset.onboardingTemplate];
+    if (!template) return;
+    modelProviderInput.value = template.provider;
+    modelNameInput.value = template.model;
+    modelBaseUrlInput.value = template.baseUrl;
+    setModelSettingsMessage(`已填入 ${template.label} 的模型路由；点击“保存模型路由”后再填写 API Key。`, "");
+    document.querySelector("#model-settings-form")?.scrollIntoView({ behavior: "smooth", block: "center" });
+    return;
+  }
+  const actionButton = event.target.closest("[data-onboarding-action]");
+  if (!actionButton) return;
+  const action = actionButton.dataset.onboardingAction;
+  if (action === "key") {
+    focusExplanationKey();
+  } else if (action === "workspace") {
+    hideOnboarding({ complete: true });
+    navigateTo("workspace");
+  } else if (action === "overview") {
+    hideOnboarding({ complete: true });
+    navigateTo("research-overview");
+  } else if (action === "later") {
+    hideOnboarding();
+  }
+});
+
+openOnboardingButton?.addEventListener("click", () => showOnboarding({ force: true }));
+
+function compareVersions(left, right) {
+  const toParts = (value) => String(value || "").replace(/^v/i, "").split(".").map((part) => Number.parseInt(part, 10) || 0);
+  const leftParts = toParts(left);
+  const rightParts = toParts(right);
+  for (let index = 0; index < Math.max(leftParts.length, rightParts.length); index += 1) {
+    if ((leftParts[index] || 0) !== (rightParts[index] || 0)) return (leftParts[index] || 0) - (rightParts[index] || 0);
+  }
+  return 0;
+}
+
+async function checkForDesktopUpdate() {
+  if (!window.WishForgeDesktop?.isDesktop || !updateNoticeEl) return;
+  try {
+    const response = await fetch(RELEASES_ENDPOINT, { headers: { Accept: "application/vnd.github+json" } });
+    if (!response.ok) return;
+    const release = await response.json();
+    const latest = String(release?.tag_name || "").replace(/^v/i, "");
+    const current = window.WISHFORGE_RUNTIME_CONFIG?.appVersion || APP_VERSION;
+    if (!latest || compareVersions(latest, current) <= 0 || !release?.html_url) return;
+    updateNoticeEl.href = release.html_url;
+    updateNoticeEl.textContent = `发现 v${latest} · 下载更新`;
+    updateNoticeEl.classList.remove("hidden");
+  } catch (error) {
+    // Update checks are optional; a network failure must not affect local research work.
+  }
+}
+
 async function waitForTopicAnalysis(analysisId) {
   while (true) {
     const response = await apiFetch(`/api/v1/analyses/${encodeURIComponent(analysisId)}`);
@@ -3684,3 +3833,7 @@ loadHealth();
 loadProjects();
 loadApiKeys();
 loadModelSettings();
+checkForDesktopUpdate();
+if (window.WishForgeDesktop?.isDesktop && !hasCompletedOnboarding()) {
+  window.setTimeout(() => showOnboarding(), 420);
+}

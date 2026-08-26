@@ -50,6 +50,7 @@ struct PersistedRuntimeSettings {
 #[derive(Debug, Clone, Serialize)]
 struct DesktopRuntimeConfig {
     desktop: bool,
+    version: String,
     api_base_url: String,
     data_dir: String,
     explanation_provider: Option<String>,
@@ -76,6 +77,7 @@ impl Default for AppState {
             sidecar: Mutex::new(None),
             config: Mutex::new(DesktopRuntimeConfig {
                 desktop: true,
+                version: env!("CARGO_PKG_VERSION").to_string(),
                 api_base_url: String::new(),
                 data_dir: String::new(),
                 explanation_provider: None,
@@ -323,6 +325,7 @@ fn start_sidecar(app: &AppHandle, state: &AppState) -> Result<(), String> {
         .lock()
         .map_err(|_| "运行时配置锁不可用".to_string())?;
     runtime.api_base_url = base_url;
+    runtime.version = app.package_info().version.to_string();
     runtime.data_dir = data_dir.to_string_lossy().to_string();
     runtime.explanation_provider = settings.explanation_provider;
     runtime.explanation_model = settings.explanation_model;
@@ -413,33 +416,102 @@ fn save_desktop_runtime_settings(
         .map_err(|_| "应用数据目录状态锁不可用".to_string())?
         .clone()
         .ok_or_else(|| "sidecar 尚未启动".to_string())?;
-    let persisted = PersistedRuntimeSettings {
-        paper_provider: None,
-        paper_base_url: None,
-        paper_model: None,
-        paper_enabled: None,
-        community_provider: None,
-        community_base_url: None,
-        community_model: None,
-        community_enabled: None,
-        explanation_provider: Some(provider.clone()),
-        explanation_model: Some(model.clone()),
-        explanation_base_url: Some(base_url.clone()),
-        explanation_enabled: None,
-        experiment_provider: None,
-        experiment_base_url: None,
-        experiment_model: None,
-        experiment_enabled: None,
-        demo_mode,
-    };
+    let mut persisted = load_runtime_settings(&data_dir);
+    persisted.explanation_provider = Some(provider.clone());
+    persisted.explanation_model = Some(model.clone());
+    persisted.explanation_base_url = Some(base_url.clone());
+    if demo_mode.is_some() {
+        persisted.demo_mode = demo_mode;
+    }
     persist_runtime_settings(&data_dir, &persisted)?;
     let mut config = state
         .config
         .lock()
         .map_err(|_| "运行时配置锁不可用".to_string())?;
-    config.explanation_provider = Some(persisted.explanation_provider.unwrap_or(provider));
-    config.explanation_model = Some(persisted.explanation_model.unwrap_or(model));
-    config.explanation_base_url = Some(persisted.explanation_base_url.unwrap_or(base_url));
+    config.explanation_provider = Some(provider);
+    config.explanation_model = Some(model);
+    config.explanation_base_url = Some(base_url);
+    Ok(config.clone())
+}
+
+#[tauri::command]
+fn save_desktop_provider_settings(
+    slot: String,
+    provider: String,
+    model: Option<String>,
+    base_url: Option<String>,
+    enabled: bool,
+    state: State<'_, AppState>,
+) -> Result<DesktopRuntimeConfig, String> {
+    let provider = provider.trim().to_string();
+    if provider.is_empty() {
+        return Err("Provider 不能为空".to_string());
+    }
+    let base_url = base_url
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    if let Some(value) = base_url.as_deref() {
+        let parsed = value
+            .parse::<url::Url>()
+            .map_err(|_| "Base URL 必须是完整 URL".to_string())?;
+        if !matches!(parsed.scheme(), "http" | "https")
+            || parsed.host_str().is_none()
+            || parsed.query().is_some()
+            || parsed.fragment().is_some()
+        {
+            return Err(
+                "Base URL 必须是完整的 http:// 或 https:// 地址，且不能包含 query 或 fragment"
+                    .to_string(),
+            );
+        }
+    }
+    let model = model
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let data_dir = state
+        .data_dir
+        .lock()
+        .map_err(|_| "应用数据目录状态锁不可用".to_string())?
+        .clone()
+        .ok_or_else(|| "sidecar 尚未启动".to_string())?;
+    let mut persisted = load_runtime_settings(&data_dir);
+    match slot.as_str() {
+        "paper_search" => {
+            persisted.paper_provider = Some(provider.clone());
+            persisted.paper_base_url = base_url.clone();
+            persisted.paper_model = model.clone();
+            persisted.paper_enabled = Some(enabled);
+        }
+        "community_search" => {
+            persisted.community_provider = Some(provider.clone());
+            persisted.community_base_url = base_url.clone();
+            persisted.community_model = model.clone();
+            persisted.community_enabled = Some(enabled);
+        }
+        "explanation_model" => {
+            persisted.explanation_provider = Some(provider.clone());
+            persisted.explanation_base_url = base_url.clone();
+            persisted.explanation_model = model.clone();
+            persisted.explanation_enabled = Some(enabled);
+        }
+        "experiment_runner" => {
+            persisted.experiment_provider = Some(provider.clone());
+            persisted.experiment_base_url = base_url.clone();
+            persisted.experiment_model = model.clone();
+            persisted.experiment_enabled = Some(enabled);
+        }
+        _ => return Err("未知的 Provider 用途".to_string()),
+    }
+    persist_runtime_settings(&data_dir, &persisted)?;
+    let mut config = state
+        .config
+        .lock()
+        .map_err(|_| "运行时配置锁不可用".to_string())?;
+    if slot == "explanation_model" {
+        config.explanation_provider = Some(provider);
+        config.explanation_model = model;
+        config.explanation_base_url = base_url;
+    }
     Ok(config.clone())
 }
 
@@ -497,7 +569,8 @@ fn main() {
             get_runtime_config,
             set_credential,
             get_credential_status,
-            save_desktop_runtime_settings
+            save_desktop_runtime_settings,
+            save_desktop_provider_settings
         ])
         .setup(|app| {
             let state = app.state::<AppState>();

@@ -22,6 +22,20 @@ def test_arxiv_paper_search_is_ready_without_a_credential() -> None:
         app.dependency_overrides.clear()
 
 
+def test_multi_source_paper_search_is_ready_without_a_credential() -> None:
+    settings = Settings(paper_provider="multi_source", paper_api_key=None, _env_file=None)
+    app.dependency_overrides[get_settings] = lambda: settings
+    try:
+        response = client.post("/api/v1/settings/providers/paper_search/test", json={})
+        assert response.status_code == 200
+        body = response.json()
+        assert body["provider"] == "multi_source"
+        assert body["ok"] is True
+        assert "OpenAlex" in body["message"]
+    finally:
+        app.dependency_overrides.clear()
+
+
 def test_runtime_api_key_update_is_masked_and_separated() -> None:
     settings = Settings(
         paper_provider="semantic_scholar",

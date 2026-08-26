@@ -47,9 +47,12 @@ from app.services.graph_service import GraphConflict, graph_service
 from app.services.research_orchestration import research_orchestrator
 from app.services.research_providers import (
     ArxivSearchProvider,
+    CrossrefSearchProvider,
     DemoSearchProvider,
     ExplanationProvider,
+    MultiSourceSearchProvider,
     OpenAICompatibleExplanationProvider,
+    OpenAlexSearchProvider,
     ProviderUnavailable,
     RuleBasedExplanationProvider,
     SearchProvider,
@@ -762,7 +765,7 @@ class ResearchService:
                 retrieval_queries = _dedupe_query_plan(retrieval_queries)[:3]
                 transition(
                     "initial_paper_search",
-                    "首轮 arXiv 检索",
+                    "首轮论文检索",
                     22,
                     f"已规划 {len(retrieval_queries)} 个首轮检索角度，准备查询 {search_provider.name}",
                 )
@@ -789,6 +792,9 @@ class ResearchService:
                     )
                     try:
                         paper_groups.append(search_provider.search(query, per_query_limit))
+                        for provider_warning in getattr(search_provider, "last_warnings", []):
+                            if provider_warning not in warnings:
+                                warnings.append(provider_warning)
                     except ProviderUnavailable as exc:
                         retrieval_interrupted = True
                         if not settings.demo_mode and index == 0:
@@ -839,7 +845,7 @@ class ResearchService:
                     if feedback_queries:
                         transition(
                             "feedback_paper_search",
-                            "第二轮 arXiv 补充检索",
+                        "第二轮论文补充检索",
                             42,
                             f"已发现 {len(feedback_queries)} 个补充术语，开始第二轮检索",
                         )
@@ -863,6 +869,9 @@ class ResearchService:
                                 paper_groups.append(
                                     search_provider.search(query_item.query, feedback_limit)
                                 )
+                                for provider_warning in getattr(search_provider, "last_warnings", []):
+                                    if provider_warning not in warnings:
+                                        warnings.append(provider_warning)
                             except ProviderUnavailable as exc:
                                 retrieval_interrupted = True
                                 warnings.append(str(exc))
@@ -995,6 +1004,7 @@ class ResearchService:
                     settings,
                     explanation_provider=explanation_provider,
                     language=payload.language,
+                    community_query_terms=[item.query for item in retrieval_queries],
                     existing_candidates=baseline_candidates,
                 )
                 innovation_candidates = research_brief.innovation_candidates
@@ -1079,6 +1089,12 @@ def _search_provider(settings: Settings) -> SearchProvider:
         return DemoSearchProvider()
     if settings.paper_provider == "arxiv":
         return ArxivSearchProvider(endpoint=getattr(settings, "paper_base_url", None))
+    if settings.paper_provider == "openalex":
+        return OpenAlexSearchProvider(endpoint=getattr(settings, "paper_base_url", None))
+    if settings.paper_provider == "crossref":
+        return CrossrefSearchProvider(endpoint=getattr(settings, "paper_base_url", None))
+    if settings.paper_provider in {"multi_source", "multisource"}:
+        return MultiSourceSearchProvider()
     if settings.paper_provider == "semantic_scholar":
         api_key = settings.paper_api_key.get_secret_value() if settings.paper_api_key else None
         return SemanticScholarProvider(

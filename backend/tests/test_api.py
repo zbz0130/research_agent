@@ -134,6 +134,7 @@ def test_settings_load_separate_environment_keys(monkeypatch) -> None:
 def test_concept_analysis_creates_evidence_and_graph() -> None:
     app.dependency_overrides[get_settings] = lambda: Settings(
         paper_provider="demo",
+        community_provider="demo",
         explanation_provider="rule_based",
         demo_mode=True,
     )
@@ -717,6 +718,7 @@ def test_locked_node_cannot_be_updated() -> None:
 def test_research_mode_exposes_cautious_innovation_candidate() -> None:
     app.dependency_overrides[get_settings] = lambda: Settings(
         paper_provider="demo",
+        community_provider="demo",
         explanation_provider="rule_based",
         demo_mode=True,
     )

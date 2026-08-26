@@ -1,29 +1,29 @@
 # 发布 Windows 桌面版
 
 本项目使用 Tauri 生成 Windows NSIS 安装程序。发布工作流位于
-`.github/workflows/release.yml`，推送形如 `v0.2.1` 的版本标签后会自动运行。
+`.github/workflows/release.yml`，推送形如 `v0.2.2` 的版本标签后会自动运行。
 
 ## 首次发布
 
-当前项目版本是 `0.2.1`。提交代码和图标后，在仓库根目录执行：
+当前项目版本是 `0.2.2`。提交代码和图标后，在仓库根目录执行：
 
 ```powershell
 git add .
-git commit -m "fix: release WishForge v0.2.1"
+git commit -m "release: WishForge v0.2.2"
 git push origin main
-git tag v0.2.1
-git push origin v0.2.1
+git tag v0.2.2
+git push origin v0.2.2
 ```
 
 然后在 GitHub 的 **Actions** 页面查看 `Release Windows app`。构建成功后，
-GitHub 会自动创建 `WishForge v0.2.1` Release，并上传 Windows 安装包。
+GitHub 会自动创建 `WishForge v0.2.2` Release，并上传 Windows 安装包。
 
 ## 用户下载和运行
 
 用户应下载 Release 的：
 
 ```text
-WishForge_0.2.1_x64-setup.exe
+WishForge_0.2.2_x64-setup.exe
 ```
 
 这是安装程序，不是源码压缩包。用户双击安装程序完成安装，再从开始菜单或桌面
@@ -60,6 +60,9 @@ git push origin v0.3.0
 ## 注意事项
 
 - 不要上传 API Key；应用运行时再由用户配置。
-- 未签名的 Windows 安装程序可能触发 SmartScreen 提示。正式对外发布时，建议
-  使用代码签名证书签名。
+- 发布工作流会在配置 `WINDOWS_CERTIFICATE_BASE64` 与 `WINDOWS_CERTIFICATE_PASSWORD`
+  两个 GitHub Secrets 后对安装包进行 Authenticode 签名；未配置证书时会明确发布未签名安装包，
+  Windows 可能显示 SmartScreen 提示。不要把 PFX、密码或任何 API Key 提交到仓库。
+- 桌面应用会检查 GitHub 上是否存在更高版本，并提供官方 Release 下载链接；静默自动安装需要
+  额外配置 Tauri 更新签名私钥，当前不会在没有私钥时伪造更新签名。
 - 当前 sidecar 和发布工作流只构建 Windows x64，不会生成 macOS/Linux 安装包。

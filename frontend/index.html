@@ -16,37 +16,40 @@
           <h1>许愿机 <span>/ WishForge</span></h1>
           <p class="subtitle">从模糊想法到可追溯的研究线索。</p>
         </div>
+        <nav class="app-nav" aria-label="许愿机主要功能">
+          <a class="nav-link" href="#workspace" data-route-link="workspace"><span>工作台</span></a>
+          <a class="nav-link" href="#concept-graphs" data-route-link="concept-graphs"><span>概念图</span></a>
+          <a class="nav-link" href="#research-overview" data-route-link="research-overview"><span>研究方向图</span></a>
+          <a class="nav-link" href="#innovations" data-route-link="innovations"><span>创新与查重</span></a>
+          <a class="nav-link" href="#experiments" data-route-link="experiments"><span>实验方案</span></a>
+          <a class="nav-link" href="#settings" data-route-link="settings"><span>设置</span></a>
+        </nav>
         <div class="topbar-actions">
+          <a id="update-notice" class="update-notice hidden" href="#" target="_blank" rel="noopener noreferrer"></a>
           <div id="health" class="status-pill status-pending" role="status">连接中…</div>
         </div>
       </header>
 
-      <nav class="app-nav" aria-label="许愿机主要功能">
-        <a class="nav-link" href="#workspace" data-route-link="workspace">
-          <span class="nav-link-kicker">01</span>
-          <span>工作台</span>
-        </a>
-        <a class="nav-link" href="#concept-graphs" data-route-link="concept-graphs">
-          <span class="nav-link-kicker">02</span>
-          <span>概念图</span>
-        </a>
-        <a class="nav-link" href="#research-overview" data-route-link="research-overview">
-          <span class="nav-link-kicker">03</span>
-          <span>研究方向图</span>
-        </a>
-        <a class="nav-link" href="#innovations" data-route-link="innovations">
-          <span class="nav-link-kicker">04</span>
-          <span>创新与查重</span>
-        </a>
-        <a class="nav-link" href="#experiments" data-route-link="experiments">
-          <span class="nav-link-kicker">05</span>
-          <span>实验方案</span>
-        </a>
-        <a class="nav-link" href="#settings" data-route-link="settings">
-          <span class="nav-link-kicker">06</span>
-          <span>设置</span>
-        </a>
-      </nav>
+      <aside id="onboarding-popover" class="onboarding-popover hidden" role="dialog" aria-modal="false" aria-labelledby="onboarding-title">
+        <div class="onboarding-title-row">
+          <span class="onboarding-icon" aria-hidden="true">✦</span>
+          <button type="button" class="onboarding-dismiss" data-onboarding-action="later" aria-label="暂时关闭引导">×</button>
+        </div>
+        <p class="eyebrow">WELCOME TO WISHFORGE</p>
+        <h2 id="onboarding-title">先绑定解释模型 API Key</h2>
+        <p id="onboarding-description">论文检索和 Hacker News 可直接使用；概念解释、研究简报和研究方向图需要你自己的模型服务。</p>
+        <div class="onboarding-templates" aria-label="模型配置示例">
+          <article><strong>DeepSeek V4 Flash</strong><code>openai_compatible · deepseek-v4-flash</code><small>https://api.deepseek.com</small><button type="button" class="secondary" data-onboarding-template="deepseek-v4-flash">填入此配置</button></article>
+          <article><strong>DeepSeek V4 Pro</strong><code>openai_compatible · deepseek-v4-pro</code><small>https://api.deepseek.com</small><button type="button" class="secondary" data-onboarding-template="deepseek-v4-pro">填入此配置</button></article>
+          <article><strong>GPT-5.6 Sol</strong><code>openai · gpt-5.6-sol</code><small>https://api.openai.com/v1</small><button type="button" class="secondary" data-onboarding-template="gpt-5.6-sol">填入此配置</button></article>
+        </div>
+        <div class="onboarding-actions">
+          <button type="button" data-onboarding-action="key">去填写 API Key</button>
+          <button type="button" class="secondary" data-onboarding-action="workspace">随后去工作台</button>
+          <button type="button" class="secondary" data-onboarding-action="overview">查看研究方向图</button>
+        </div>
+        <p class="onboarding-footnote">密钥只保存在 Windows Credential Manager，页面不会再次显示明文。</p>
+      </aside>
 
       <section class="app-view is-active" data-view="workspace" aria-labelledby="workspace-title">
         <header class="view-heading">
@@ -573,7 +576,10 @@
             <h2 id="settings-title">服务连接与 API Key</h2>
             <p>每种能力使用独立凭据：论文检索、社区信号、解释模型和实验执行不会共享同一把 Key。桌面 App 会把密钥交给系统凭据库管理。</p>
           </div>
-          <button id="refresh-settings" class="secondary" type="button">刷新状态</button>
+          <div class="settings-heading-actions">
+            <button id="open-onboarding" class="secondary" type="button">配置引导</button>
+            <button id="refresh-settings" class="secondary" type="button">刷新状态</button>
+          </div>
         </header>
 
         <div id="desktop-runtime-status" class="desktop-runtime-status" role="status" aria-live="polite"></div>
@@ -720,6 +726,19 @@
         </section>
       </section>
     </main>
+    <datalist id="provider-options">
+      <option value="arxiv" label="arXiv（论文）"></option>
+      <option value="semantic_scholar" label="Semantic Scholar（论文）"></option>
+      <option value="multi_source" label="多源论文检索（arXiv + OpenAlex + Crossref）"></option>
+      <option value="openalex" label="OpenAlex（论文元数据）"></option>
+      <option value="crossref" label="Crossref（论文元数据）"></option>
+      <option value="hacker_news" label="Hacker News（公开社区，无需 Key）"></option>
+      <option value="x" label="X 最近帖子（Bearer Token）"></option>
+      <option value="reddit" label="Reddit OAuth（Bearer Token）"></option>
+      <option value="demo" label="演示资料"></option>
+      <option value="rule_based" label="规则解释"></option>
+      <option value="local" label="本地执行器"></option>
+    </datalist>
     <dialog id="graph-save-dialog" class="action-sheet-dialog" aria-labelledby="graph-save-dialog-title" aria-describedby="graph-save-dialog-description">
       <form method="dialog" class="action-sheet-content">
         <button type="button" class="dialog-close" data-dialog-close="graph-save" aria-label="关闭保存提示">×</button>

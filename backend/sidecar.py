@@ -48,9 +48,22 @@ def main() -> None:
     )
     os.environ["WISHFORGE_APP_DATA_DIR"] = str(data_dir)
     config_env = {
+        "paper_provider": "WISHFORGE_PAPER_PROVIDER",
+        "paper_base_url": "WISHFORGE_PAPER_BASE_URL",
+        "paper_model": "WISHFORGE_PAPER_MODEL",
+        "paper_enabled": "WISHFORGE_PAPER_ENABLED",
+        "community_provider": "WISHFORGE_COMMUNITY_PROVIDER",
+        "community_base_url": "WISHFORGE_COMMUNITY_BASE_URL",
+        "community_model": "WISHFORGE_COMMUNITY_MODEL",
+        "community_enabled": "WISHFORGE_COMMUNITY_ENABLED",
         "explanation_provider": "WISHFORGE_EXPLANATION_PROVIDER",
         "explanation_model": "WISHFORGE_EXPLANATION_MODEL",
         "explanation_base_url": "WISHFORGE_EXPLANATION_BASE_URL",
+        "explanation_enabled": "WISHFORGE_EXPLANATION_ENABLED",
+        "experiment_provider": "WISHFORGE_EXPERIMENT_PROVIDER",
+        "experiment_base_url": "WISHFORGE_EXPERIMENT_BASE_URL",
+        "experiment_model": "WISHFORGE_EXPERIMENT_MODEL",
+        "experiment_enabled": "WISHFORGE_EXPERIMENT_ENABLED",
         "demo_mode": "WISHFORGE_DEMO_MODE",
     }
     for config_key, env_key in config_env.items():

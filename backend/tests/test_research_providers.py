@@ -9,7 +9,10 @@ from app.research_schemas import EvidenceCard, PaperRecord, SearchQueryPlan
 from app.services import research_providers
 from app.services.research_providers import (
     ArxivSearchProvider,
+    CrossrefSearchProvider,
+    MultiSourceSearchProvider,
     OpenAICompatibleExplanationProvider,
+    OpenAlexSearchProvider,
     ProviderRateLimited,
     ProviderUnavailable,
     RuleBasedExplanationProvider,
@@ -213,6 +216,120 @@ def test_arxiv_provider_spaces_multiple_calls_without_real_wait(monkeypatch) -> 
     provider.search("efficient self attention", 2)
 
     assert waits == [2.5]
+
+
+def test_arxiv_search_retries_a_transient_connection_reset(monkeypatch) -> None:
+    attempts = 0
+    waits: list[float] = []
+
+    def fake_get(url: str, **kwargs: object) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise httpx.ConnectError("connection reset", request=httpx.Request("GET", url))
+        return httpx.Response(200, content=ARXIV_FEED, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(research_providers.httpx, "get", fake_get)
+
+    papers = ArxivSearchProvider(
+        max_retries=2,
+        retry_backoff_seconds=0.25,
+        sleep=waits.append,
+    ).search("attention mechanism", 2)
+
+    assert attempts == 2
+    assert waits == [0.25]
+    assert papers[0].source == "arxiv"
+
+
+def test_openalex_and_crossref_normalize_public_metadata(monkeypatch) -> None:
+    def fake_get(url: str, **kwargs: object) -> httpx.Response:
+        request = httpx.Request("GET", url)
+        if "openalex" in url:
+            return httpx.Response(
+                200,
+                json={
+                    "results": [{
+                        "id": "https://openalex.org/W123",
+                        "doi": "https://doi.org/10.1000/openalex",
+                        "title": "OpenAlex Attention Work",
+                        "publication_year": 2024,
+                        "authorships": [{"author": {"display_name": "Ada Lovelace"}}],
+                        "primary_location": {
+                            "landing_page_url": "https://example.test/openalex",
+                            "source": {"display_name": "Open Journal"},
+                        },
+                        "abstract_inverted_index": {"attention": [0], "works": [1]},
+                        "open_access": {"is_oa": True},
+                        "cited_by_count": 42,
+                    }],
+                },
+                request=request,
+            )
+        return httpx.Response(
+            200,
+            json={
+                "message": {
+                    "items": [{
+                        "DOI": "10.1000/crossref",
+                        "title": ["Crossref Attention Work"],
+                        "author": [{"given": "Grace", "family": "Hopper"}],
+                        "container-title": ["Metadata Journal"],
+                        "issued": {"date-parts": [[2023, 1, 1]]},
+                        "abstract": "<jats:p>Metadata abstract</jats:p>",
+                        "URL": "https://doi.org/10.1000/crossref",
+                        "is-referenced-by-count": 7,
+                    }],
+                },
+            },
+            request=request,
+        )
+
+    monkeypatch.setattr(research_providers.httpx, "get", fake_get)
+
+    openalex = OpenAlexSearchProvider().search("attention", 2)[0]
+    crossref = CrossrefSearchProvider().search("attention", 2)[0]
+
+    assert openalex.doi == "10.1000/openalex"
+    assert openalex.abstract == "attention works"
+    assert openalex.access_type == "open_access"
+    assert crossref.doi == "10.1000/crossref"
+    assert crossref.authors == ["Grace Hopper"]
+    assert crossref.abstract == "Metadata abstract"
+
+
+def test_multi_source_keeps_available_results_and_deduplicates() -> None:
+    class StaticProvider:
+        def __init__(self, name: str, records: list[PaperRecord] | None = None) -> None:
+            self.name = name
+            self.records = records or []
+
+        def search(self, concept: str, limit: int) -> list[PaperRecord]:
+            if self.name == "offline":
+                raise ProviderUnavailable("temporary outage", provider=self.name)
+            return self.records[:limit]
+
+    first = PaperRecord(
+        id="arxiv:1", title="Shared Work", doi="10.1000/shared", source="arxiv", source_kind="academic", access_type="open_access"
+    )
+    duplicate = PaperRecord(
+        id="openalex:1", title="Shared Work", doi="10.1000/shared", source="openalex", source_kind="academic", access_type="metadata_only"
+    )
+    distinct = PaperRecord(
+        id="crossref:2", title="Distinct Work", doi="10.1000/distinct", source="crossref", source_kind="academic", access_type="metadata_only"
+    )
+
+    provider = MultiSourceSearchProvider([
+        StaticProvider("arxiv", [first]),
+        StaticProvider("offline"),
+        StaticProvider("crossref", [duplicate, distinct]),
+    ])
+    papers = provider.search("attention", 4)
+
+    assert [paper.title for paper in papers] == ["Shared Work", "Distinct Work"]
+    assert provider.last_warnings == [
+        "offline 暂时不可用；已保留其他论文来源的检索结果，可稍后重试。"
+    ]
 
 
 def test_compatible_model_distinguishes_quick_and_abstract_modes(monkeypatch) -> None:
@@ -910,6 +1027,7 @@ def test_analysis_rate_limit_falls_back_to_transparent_demo_without_empty_result
     monkeypatch.setattr(SemanticScholarProvider, "search", raise_rate_limit)
     app.dependency_overrides[get_settings] = lambda: Settings(
         paper_provider="semantic_scholar",
+        community_provider="demo",
         explanation_provider="rule_based",
         demo_mode=True,
     )
@@ -966,6 +1084,7 @@ def test_research_analysis_never_labels_an_interrupted_empty_search_as_no_result
     )
     app.dependency_overrides[get_settings] = lambda: Settings(
         paper_provider="semantic_scholar",
+        community_provider="demo",
         explanation_provider="rule_based",
         demo_mode=False,
     )

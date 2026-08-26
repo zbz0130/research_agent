@@ -15,6 +15,7 @@ const browserBridge = Object.freeze({
   async setCredential() { return null; },
   async getCredentialStatus() { return null; },
   async saveRuntimeSettings() { return null; },
+  async saveProviderRuntimeSettings() { return null; },
 });
 
 function hasTauriRuntime() {
@@ -27,6 +28,7 @@ function applyRuntimeConfig(config) {
   window.WISHFORGE_RUNTIME_CONFIG = Object.freeze({
     ...current,
     apiBaseUrl,
+    appVersion: String(config?.version || current.appVersion || ""),
     desktop: true,
   });
   window.WISHFORGE_API_BASE_URL = apiBaseUrl;
@@ -52,6 +54,10 @@ async function createDesktopBridge() {
       saveRuntimeSettings: async ({ provider, model, baseUrl, demoMode = null }) => invoke(
         "save_desktop_runtime_settings",
         { provider, model, baseUrl, demoMode },
+      ),
+      saveProviderRuntimeSettings: async (slot, { provider, model, base_url: baseUrl, enabled }) => invoke(
+        "save_desktop_provider_settings",
+        { slot, provider, model, baseUrl, enabled },
       ),
     });
     window.WishForgeDesktop = desktopBridge;

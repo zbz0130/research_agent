@@ -2,6 +2,7 @@ import json
 import logging
 import re
 import hashlib
+import html
 import math
 import time
 import xml.etree.ElementTree as ET
@@ -219,6 +220,16 @@ class ArxivSearchProvider:
     endpoint = "https://export.arxiv.org/api/query"
     _ATOM = "{http://www.w3.org/2005/Atom}"
     _ARXIV = "{http://arxiv.org/schemas/atom}"
+    _DEFAULT_MAX_RETRIES = 2
+    _DEFAULT_RETRY_BACKOFF_SECONDS = 0.6
+    _DEFAULT_MAX_RETRY_WAIT_SECONDS = 3.0
+    _RETRYABLE_STATUS_CODES = {
+        httpx.codes.TOO_MANY_REQUESTS,
+        httpx.codes.INTERNAL_SERVER_ERROR,
+        httpx.codes.BAD_GATEWAY,
+        httpx.codes.SERVICE_UNAVAILABLE,
+        httpx.codes.GATEWAY_TIMEOUT,
+    }
 
     def __init__(
         self,
@@ -226,14 +237,22 @@ class ArxivSearchProvider:
         minimum_interval_seconds: float = 3.0,
         *,
         endpoint: str | None = None,
+        max_retries: int = _DEFAULT_MAX_RETRIES,
+        retry_backoff_seconds: float = _DEFAULT_RETRY_BACKOFF_SECONDS,
+        max_retry_wait_seconds: float = _DEFAULT_MAX_RETRY_WAIT_SECONDS,
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
+        if max_retries < 0 or retry_backoff_seconds < 0 or max_retry_wait_seconds < 0:
+            raise ValueError("arXiv 重试参数不能小于 0")
         self.timeout = timeout
         # An explicit proxy endpoint is optional; retaining the class default
         # keeps existing callers and tests deterministic.
         self.endpoint = (endpoint or self.endpoint).rstrip("/")
         self.minimum_interval_seconds = max(0.0, minimum_interval_seconds)
+        self.max_retries = max_retries
+        self.retry_backoff_seconds = retry_backoff_seconds
+        self.max_retry_wait_seconds = max_retry_wait_seconds
         self._sleep = sleep
         self._clock = clock
         self._last_request_started_at: float | None = None
@@ -255,19 +274,7 @@ class ArxivSearchProvider:
             if remaining > 0:
                 self._sleep(remaining)
         self._last_request_started_at = self._clock()
-        try:
-            response = httpx.get(
-                self.endpoint,
-                params=params,
-                headers={"User-Agent": "WishForge/0.1 (research concept explorer)"},
-                timeout=self.timeout,
-                follow_redirects=True,
-            )
-            response.raise_for_status()
-        except httpx.HTTPError as exc:
-            raise ProviderUnavailable(
-                f"arXiv 暂时不可用：{exc}", provider=self.name
-            ) from exc
+        response = self._request_with_retry(params)
 
         try:
             root = ET.fromstring(response.content)
@@ -282,6 +289,51 @@ class ArxivSearchProvider:
             if record is not None:
                 records.append(record)
         return records[:limit]
+
+    def _request_with_retry(self, params: dict[str, object]) -> httpx.Response:
+        """Retry only transient arXiv failures with a small, explicit budget."""
+
+        total_wait_seconds = 0.0
+        last_error = ""
+        for attempt in range(self.max_retries + 1):
+            try:
+                response = httpx.get(
+                    self.endpoint,
+                    params=params,
+                    headers={"User-Agent": "WishForge/0.2 (research concept explorer)"},
+                    timeout=self.timeout,
+                    follow_redirects=True,
+                )
+            except httpx.TransportError as exc:
+                response = None
+                last_error = exc.__class__.__name__
+            else:
+                if response.status_code not in self._RETRYABLE_STATUS_CODES:
+                    try:
+                        response.raise_for_status()
+                    except httpx.HTTPError as exc:
+                        raise ProviderUnavailable(
+                            f"arXiv 请求失败（HTTP {response.status_code}）。请检查网络或稍后重试。",
+                            provider=self.name,
+                        ) from exc
+                    return response
+                last_error = f"HTTP {response.status_code}"
+
+            if attempt >= self.max_retries:
+                break
+            delay = self.retry_backoff_seconds * (2**attempt)
+            if total_wait_seconds + delay > self.max_retry_wait_seconds:
+                break
+            if delay:
+                self._sleep(delay)
+                total_wait_seconds += delay
+
+        raise ProviderUnavailable(
+            "arXiv 暂时无法连接（已重试 "
+            f"{self.max_retries} 次，最后一次：{last_error or '连接失败'}）。"
+            "这不表示没有相关论文；请稍后重试或切换到多源检索。",
+            provider=self.name,
+        )
 
     def _parse_entry(self, entry: ET.Element) -> PaperRecord | None:
         entry_url = self._text(entry, "id")
@@ -489,6 +541,245 @@ class SemanticScholarProvider:
                 )
             )
         return records
+
+
+def _clean_markup(value: object) -> str:
+    text = html.unescape(str(value or ""))
+    text = re.sub(r"<[^>]+>", " ", text)
+    return " ".join(text.split())
+
+
+def _normalized_doi(value: object) -> str | None:
+    doi = str(value or "").strip()
+    if doi.lower().startswith("https://doi.org/"):
+        doi = doi[16:]
+    if doi.lower().startswith("http://doi.org/"):
+        doi = doi[15:]
+    return doi.casefold() or None
+
+
+def _year_from_date_parts(value: object) -> int | None:
+    if not isinstance(value, dict):
+        return None
+    parts = value.get("date-parts")
+    if not isinstance(parts, list) or not parts or not isinstance(parts[0], list) or not parts[0]:
+        return None
+    year = parts[0][0]
+    return year if isinstance(year, int) and 1000 <= year <= 9999 else None
+
+
+class OpenAlexSearchProvider:
+    """Read public OpenAlex work metadata without an API key."""
+
+    name = "openalex"
+    endpoint = "https://api.openalex.org/works"
+
+    def __init__(self, *, endpoint: str | None = None, timeout: float = 20.0) -> None:
+        self.endpoint = (endpoint or self.endpoint).rstrip("/")
+        self.timeout = timeout
+
+    def search(self, concept: str, limit: int) -> list[PaperRecord]:
+        try:
+            response = httpx.get(
+                self.endpoint,
+                params={"search": concept, "per-page": max(1, min(limit, 25))},
+                headers={"User-Agent": "WishForge/0.2 (research concept explorer)"},
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except (httpx.HTTPError, TypeError, ValueError) as exc:
+            raise ProviderUnavailable(
+                f"OpenAlex 暂时不可用：{exc.__class__.__name__}。",
+                provider=self.name,
+            ) from exc
+        results = payload.get("results") if isinstance(payload, dict) else None
+        if not isinstance(results, list):
+            raise ProviderUnavailable("OpenAlex 返回格式不符合预期。", provider=self.name)
+
+        records: list[PaperRecord] = []
+        for item in results:
+            if not isinstance(item, dict):
+                continue
+            title = _clean_markup(item.get("title"))
+            if not title:
+                continue
+            record_id = str(item.get("id") or item.get("doi") or title)
+            authors = [
+                _clean_markup((authorship.get("author") or {}).get("display_name"))
+                for authorship in item.get("authorships", [])
+                if isinstance(authorship, dict) and isinstance(authorship.get("author"), dict)
+            ]
+            location = item.get("primary_location") if isinstance(item.get("primary_location"), dict) else {}
+            source = location.get("source") if isinstance(location.get("source"), dict) else {}
+            abstract_index = item.get("abstract_inverted_index")
+            inverted_terms: list[tuple[int, str]] = []
+            if isinstance(abstract_index, dict):
+                for word, positions in abstract_index.items():
+                    if isinstance(positions, list):
+                        inverted_terms.extend(
+                            (position, str(word)) for position in positions if isinstance(position, int)
+                        )
+            abstract = " ".join(word for _, word in sorted(inverted_terms))
+            doi = _normalized_doi(item.get("doi"))
+            records.append(
+                PaperRecord(
+                    id=f"openalex:{record_id.rsplit('/', 1)[-1]}",
+                    provider_id=record_id,
+                    canonical_id=f"doi:{doi}" if doi else record_id,
+                    title=title,
+                    authors=[author for author in authors if author],
+                    year=item.get("publication_year") if isinstance(item.get("publication_year"), int) else None,
+                    venue=_clean_markup(source.get("display_name")) or None,
+                    abstract=abstract,
+                    url=location.get("landing_page_url") or item.get("doi"),
+                    doi=doi,
+                    citation_count=item.get("cited_by_count") if isinstance(item.get("cited_by_count"), int) else None,
+                    source=self.name,
+                    source_kind="academic",
+                    access_type="open_access" if bool((item.get("open_access") or {}).get("is_oa")) else "metadata_only",
+                    retrieved_at=datetime.now(timezone.utc),
+                )
+            )
+        return records[:limit]
+
+
+class CrossrefSearchProvider:
+    """Read public Crossref work metadata without treating metadata as full text."""
+
+    name = "crossref"
+    endpoint = "https://api.crossref.org/works"
+
+    def __init__(self, *, endpoint: str | None = None, timeout: float = 20.0) -> None:
+        self.endpoint = (endpoint or self.endpoint).rstrip("/")
+        self.timeout = timeout
+
+    def search(self, concept: str, limit: int) -> list[PaperRecord]:
+        try:
+            response = httpx.get(
+                self.endpoint,
+                params={"query": concept, "rows": max(1, min(limit, 25))},
+                headers={"User-Agent": "WishForge/0.2 (research concept explorer)"},
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except (httpx.HTTPError, TypeError, ValueError) as exc:
+            raise ProviderUnavailable(
+                f"Crossref 暂时不可用：{exc.__class__.__name__}。",
+                provider=self.name,
+            ) from exc
+        message = payload.get("message") if isinstance(payload, dict) else None
+        items = message.get("items") if isinstance(message, dict) else None
+        if not isinstance(items, list):
+            raise ProviderUnavailable("Crossref 返回格式不符合预期。", provider=self.name)
+
+        records: list[PaperRecord] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            titles = item.get("title")
+            title = _clean_markup(titles[0]) if isinstance(titles, list) and titles else ""
+            if not title:
+                continue
+            doi = _normalized_doi(item.get("DOI"))
+            authors = []
+            for author in item.get("author", []):
+                if not isinstance(author, dict):
+                    continue
+                name = " ".join(
+                    part for part in (_clean_markup(author.get("given")), _clean_markup(author.get("family"))) if part
+                )
+                if name:
+                    authors.append(name)
+            container_titles = item.get("container-title")
+            venue = _clean_markup(container_titles[0]) if isinstance(container_titles, list) and container_titles else None
+            year = next(
+                (
+                    candidate
+                    for candidate in (
+                        _year_from_date_parts(item.get("published-print")),
+                        _year_from_date_parts(item.get("published-online")),
+                        _year_from_date_parts(item.get("issued")),
+                    )
+                    if candidate is not None
+                ),
+                None,
+            )
+            record_id = doi or str(item.get("URL") or title)
+            records.append(
+                PaperRecord(
+                    id=f"crossref:{record_id}",
+                    provider_id=doi or record_id,
+                    canonical_id=f"doi:{doi}" if doi else record_id,
+                    title=title,
+                    authors=authors,
+                    year=year,
+                    venue=venue,
+                    abstract=_clean_markup(item.get("abstract")),
+                    url=item.get("URL") or (f"https://doi.org/{doi}" if doi else None),
+                    doi=doi,
+                    citation_count=item.get("is-referenced-by-count") if isinstance(item.get("is-referenced-by-count"), int) else None,
+                    source=self.name,
+                    source_kind="academic",
+                    access_type="metadata_only",
+                    retrieved_at=datetime.now(timezone.utc),
+                )
+            )
+        return records[:limit]
+
+
+class MultiSourceSearchProvider:
+    """Merge public scholarly metadata while keeping each source transparent."""
+
+    name = "multi_source"
+
+    def __init__(self, providers: Sequence[SearchProvider] | None = None) -> None:
+        self.providers = list(providers or [
+            ArxivSearchProvider(),
+            OpenAlexSearchProvider(),
+            CrossrefSearchProvider(),
+        ])
+        # 编排层据此提示局部失败，而不是因某一数据源临时不可用而丢掉其他结果。
+        self.last_warnings: list[str] = []
+
+    def search(self, concept: str, limit: int) -> list[PaperRecord]:
+        per_source_limit = max(2, min(6, math.ceil(max(1, limit) / max(1, len(self.providers))) + 1))
+        merged: list[PaperRecord] = []
+        failures: list[str] = []
+        self.last_warnings = []
+        for provider in self.providers:
+            try:
+                merged.extend(provider.search(concept, per_source_limit))
+            except ProviderUnavailable as exc:
+                failures.append(f"{provider.name}：{exc}")
+        if not merged and failures:
+            raise ProviderUnavailable(
+                "多源论文检索均未成功：" + "；".join(failures),
+                provider=self.name,
+            )
+        if failures:
+            unavailable_sources = "、".join(
+                failure.split("：", 1)[0] for failure in failures
+            )
+            self.last_warnings.append(
+                f"{unavailable_sources} 暂时不可用；已保留其他论文来源的检索结果，可稍后重试。"
+            )
+
+        deduplicated: list[PaperRecord] = []
+        seen_dois: set[str] = set()
+        seen_titles: set[str] = set()
+        for record in merged:
+            doi = _normalized_doi(record.doi)
+            title_key = re.sub(r"\W+", "", record.title.casefold())
+            if (doi and doi in seen_dois) or (title_key and title_key in seen_titles):
+                continue
+            if doi:
+                seen_dois.add(doi)
+            if title_key:
+                seen_titles.add(title_key)
+            deduplicated.append(record)
+        return deduplicated[:limit]
 
 
 class DemoSearchProvider:

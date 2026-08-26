@@ -89,9 +89,9 @@ def _secret_value(settings: Settings, slot_id: ProviderSlotId) -> str | None:
 def _credential_required(slot_id: ProviderSlotId, provider: str) -> bool:
     # Public arXiv, the explicit demo fixtures, the local draft-only
     # experiment service and rule fallback do not need credentials.
-    if slot_id == "paper_search" and provider in {"arxiv", "demo"}:
+    if slot_id == "paper_search" and provider in {"arxiv", "openalex", "crossref", "multi_source", "demo"}:
         return False
-    if slot_id == "community_search" and provider == "demo":
+    if slot_id == "community_search" and provider in {"demo", "hacker_news"}:
         return False
     if slot_id == "explanation_model" and provider == "rule_based":
         return False
@@ -322,7 +322,16 @@ def test_provider_connection(
             status="missing_credential",
             message="该 Provider 需要对应用途的 API Key；密钥不会在连接测试中回显。",
         )
-    if provider in {"demo", "rule_based", "local"}:
+    if slot_id == "paper_search" and provider == "multi_source":
+        return ProviderConnectionTestResponse(
+            slot=slot_id,
+            provider=provider,
+            enabled=True,
+            ok=True,
+            status="ready",
+            message="多源论文检索已配置；实际运行会使用公开 arXiv、OpenAlex 和 Crossref 元数据，并在单一来源暂时不可用时保留其他来源结果。",
+        )
+    if provider in {"demo", "hacker_news", "openalex", "crossref", "rule_based", "local"}:
         return ProviderConnectionTestResponse(
             slot=slot_id,
             provider=provider,
@@ -339,6 +348,15 @@ def test_provider_connection(
             ok=True,
             status="ready",
             message="arXiv 公共检索已配置；实际检索仍会遵守限流和 Provider 状态。",
+        )
+    if slot_id == "community_search" and provider == "hacker_news":
+        return ProviderConnectionTestResponse(
+            slot=slot_id,
+            provider=provider,
+            enabled=True,
+            ok=True,
+            status="ready",
+            message="Hacker News 公共社区信号已配置；无需 API Key，实际运行会读取公开帖子。",
         )
     if not base_url:
         return ProviderConnectionTestResponse(

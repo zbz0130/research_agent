@@ -37,13 +37,14 @@ FastAPI API (/api/v1)
   ├── ProjectService       研究项目（SQLite）
   ├── ResearchService      分析任务编排与进度
   │     ├── SearchProvider
-  │     │     ├── SemanticScholarProvider
-  │     │     └── DemoSearchProvider
+  │     │     ├── MultiSourceSearchProvider（arXiv / OpenAlex / Crossref）
+  │     │     ├── SemanticScholarProvider（可选）
+  │     │     └── DemoSearchProvider（仅显式 Demo 模式）
   │     └── ExplanationProvider
   │           ├── OpenAICompatibleExplanationProvider
   │           └── RuleBasedExplanationProvider
   ├── ResearchOrchestrator（research 模式）
-  │     ├── Community Agent（X / 知乎 / Reddit Provider 边界，当前 demo）
+  │     ├── Community Agent（默认 Hacker News；X / Reddit 需官方 Token；知乎不抓取）
   │     ├── Model Brainstorm Agent（模型或透明启发式回退）
   │     ├── Paper Future Work Agent（当前摘要级限制线索）
   │     └── Synthesis Agent（来源分层、候选去重和范围化 arXiv 检查）
@@ -58,7 +59,7 @@ FastAPI API (/api/v1)
 ### Provider 边界
 
 - `WISHFORGE_PAPER_API_KEY` 只交给论文检索 Provider；
-- `WISHFORGE_COMMUNITY_API_KEY` 只交给社区 Provider（当前研究模式仍使用明确标记的 Demo provider）；
+- `WISHFORGE_COMMUNITY_API_KEY` 只交给 X / Reddit 社区 Provider；默认 Hacker News 不需要 Key；
 - `WISHFORGE_EXPLANATION_API_KEY` 只交给解释模型 Provider；
 - `WISHFORGE_EXPERIMENT_API_KEY` 预留给未来执行器，本阶段不会使用；
 - 网页 `PATCH /api/v1/settings/api-keys` 写入的四个槽位只覆盖当前进程内的 `Settings`；桌面 Tauri 先把密钥写入 Windows Credential Manager，再注入 sidecar 环境，永远不进入 SQLite、构建资源或普通日志；
@@ -226,7 +227,7 @@ GraphService 校验 root / locked node / edge / base_version
 
 为保证比赛首版稳定，下列能力先不成为主流程的硬依赖：
 
-- X、知乎、Reddit 的实时爬取（当前仅有明确标记的 demo 社区 Provider 和可替换接口）；
+- 知乎等尚无合规 API 配置的社区连接器；
 - “确保 arXiv 没有相同论文”或任何绝对新颖性承诺；
 - 全量 PDF 图表理解和商业数据库的版权内容；
 - 真实仪器控制、耗材管理和任意代码执行；
