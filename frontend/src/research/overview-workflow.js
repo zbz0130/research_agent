@@ -26,3 +26,7 @@ export function completedAnalysisHasPapers(job) {
 export function overviewGenerationSucceeded(job) {
   return ["succeeded", "partial"].includes(job?.status) && Boolean(job?.result?.graph?.nodes?.length);
 }
+
+export function overviewGenerationFinished(job) {
+  return ["succeeded", "partial", "failed", "interrupted"].includes(job?.status);
+}

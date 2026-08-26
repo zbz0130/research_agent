@@ -5,6 +5,7 @@ import {
   completedAnalysisHasPapers,
   createResearchOverviewPayload,
   createTopicAnalysisPayload,
+  overviewGenerationFinished,
   overviewGenerationSucceeded,
 } from "./overview-workflow.js";
 
@@ -33,4 +34,12 @@ test("workflow success requires real papers and a non-empty graph", () => {
   assert.equal(completedAnalysisHasPapers({ status: "completed", result: { papers: [] } }), false);
   assert.equal(overviewGenerationSucceeded({ status: "partial", result: { graph: { nodes: [{}] } } }), true);
   assert.equal(overviewGenerationSucceeded({ status: "succeeded", result: { graph: { nodes: [] } } }), false);
+});
+
+test("running overview work is not treated as a finished generation", () => {
+  assert.equal(overviewGenerationFinished({ status: "queued" }), false);
+  assert.equal(overviewGenerationFinished({ status: "running" }), false);
+  assert.equal(overviewGenerationFinished({ status: "succeeded" }), true);
+  assert.equal(overviewGenerationFinished({ status: "partial" }), true);
+  assert.equal(overviewGenerationFinished({ status: "failed" }), true);
 });

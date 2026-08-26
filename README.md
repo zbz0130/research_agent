@@ -227,6 +227,8 @@ docker compose up --build
 
 GitHub Pages 不再作为产品部署目标。当前产品同时支持浏览器开发模式和 Tauri Windows 桌面 App。桌面 App 启动时会自动拉起本地 Python sidecar，不需要单独启动 FastAPI。
 
+Windows Release 的构建和下载说明见 [发布 Windows 桌面版](docs/releasing.md)。
+
 ### Windows 桌面 App
 
 普通使用直接运行安装包 `src-tauri\target\release\bundle\nsis\WishForge_0.2.0_x64-setup.exe`，安装后从开始菜单打开 WishForge；不需要手动启动 Python、Vite 或 sidecar。

@@ -8,6 +8,7 @@ import {
   completedAnalysisHasPapers,
   createResearchOverviewPayload,
   createTopicAnalysisPayload,
+  overviewGenerationFinished,
   overviewGenerationSucceeded,
 } from "./src/research/overview-workflow.js";
 
@@ -3233,6 +3234,15 @@ function waitFor(milliseconds) {
   return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
 }
 
+async function waitForOverviewCompletion(id) {
+  while (true) {
+    const job = await pollOverview(id, { scheduleNext: false });
+    if (!job || String(id) !== String(state.overviewId)) return job;
+    if (overviewGenerationFinished(job)) return job;
+    await waitFor(900);
+  }
+}
+
 async function waitForTopicAnalysis(analysisId) {
   while (true) {
     const response = await apiFetch(`/api/v1/analyses/${encodeURIComponent(analysisId)}`);
@@ -3285,7 +3295,7 @@ async function createTopicOverview(topic) {
     state.overviewHistoryLoaded = true;
     renderOverviewHistory();
     renderOverviewStatus(overviewJob);
-    await pollOverview(state.overviewId);
+    await waitForOverviewCompletion(state.overviewId);
     if (!overviewGenerationSucceeded(state.overviewJob)) {
       throw new Error(state.overviewJob?.error || "研究方向图未能生成");
     }
@@ -3298,9 +3308,9 @@ async function createTopicOverview(topic) {
   }
 }
 
-async function pollOverview(id) {
+async function pollOverview(id, { scheduleNext = true } = {}) {
   if (!id || String(id) !== String(state.overviewId)) return;
-  if (state.overviewPollTimer) window.clearTimeout(state.overviewPollTimer);
+  stopOverviewPolling();
   const response = await apiFetch(`/api/v1/overviews/${encodeURIComponent(id)}`);
   if (!response.ok) throw new Error(await response.text());
   const job = await response.json();
@@ -3316,14 +3326,17 @@ async function pollOverview(id) {
   if (["succeeded", "partial", "failed", "interrupted"].includes(job.status)) {
     state.overviewPollTimer = null;
     maybePromptOverviewSave(job);
-    return;
+    return job;
   }
-  state.overviewPollTimer = window.setTimeout(() => {
-    pollOverview(id).catch((error) => {
-      setOverviewActionMessage(`无法读取 Overview 进度：${error.message}`, "error-text");
-      overviewRetryButton?.classList.remove("hidden");
-    });
-  }, 900);
+  if (scheduleNext) {
+    state.overviewPollTimer = window.setTimeout(() => {
+      pollOverview(id).catch((error) => {
+        setOverviewActionMessage(`无法读取 Overview 进度：${error.message}`, "error-text");
+        overviewRetryButton?.classList.remove("hidden");
+      });
+    }, 900);
+  }
+  return job;
 }
 
 async function createOverview({ force = false } = {}) {

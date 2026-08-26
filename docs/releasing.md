@@ -1,0 +1,64 @@
+# 发布 Windows 桌面版
+
+本项目使用 Tauri 生成 Windows NSIS 安装程序。发布工作流位于
+`.github/workflows/release.yml`，推送形如 `v0.2.0` 的版本标签后会自动运行。
+
+## 首次发布
+
+当前项目版本是 `0.2.0`。提交代码和图标后，在仓库根目录执行：
+
+```powershell
+git add .
+git commit -m "chore: prepare WishForge v0.2.0"
+git push origin main
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+然后在 GitHub 的 **Actions** 页面查看 `Release Windows app`。构建成功后，
+GitHub 会自动创建 `WishForge v0.2.0` Release，并上传 Windows 安装包。
+
+## 用户下载和运行
+
+用户应下载 Release 的：
+
+```text
+WishForge_0.2.0_x64-setup.exe
+```
+
+这是安装程序，不是源码压缩包。用户双击安装程序完成安装，再从开始菜单或桌面
+快捷方式点击 WishForge 图标即可运行。当前构建目标是 Windows x64。
+
+首次安装时，如果系统没有 WebView2，安装程序会联网下载安装 WebView2；这是当前
+`tauri.conf.json` 中 `downloadBootstrapper` 的设置。
+
+## 发布新版本
+
+修改版本号时，保持下面三个文件中的版本一致：
+
+- `src-tauri/tauri.conf.json`
+- `src-tauri/Cargo.toml`
+- `frontend/package.json`
+
+同时更新 `frontend/package-lock.json` 中的根版本，然后提交并推送新的标签，例如：
+
+```powershell
+git add .
+git commit -m "chore: release v0.3.0"
+git push origin main
+git tag v0.3.0
+git push origin v0.3.0
+```
+
+## 图标
+
+`images/eb85be0c-2d4b-4623-ab00-0a8840c9e9e8.png` 已生成到
+`src-tauri/icons/`。Windows 安装程序和安装后的快捷方式使用其中的
+`src-tauri/icons/icon.ico`。
+
+## 注意事项
+
+- 不要上传 API Key；应用运行时再由用户配置。
+- 未签名的 Windows 安装程序可能触发 SmartScreen 提示。正式对外发布时，建议
+  使用代码签名证书签名。
+- 当前 sidecar 和发布工作流只构建 Windows x64，不会生成 macOS/Linux 安装包。
