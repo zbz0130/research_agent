@@ -1,33 +1,34 @@
 # 发布 Windows 桌面版
 
 本项目使用 Tauri 生成 Windows NSIS 安装程序。发布工作流位于
-`.github/workflows/release.yml`，推送形如 `v0.2.0` 的版本标签后会自动运行。
+`.github/workflows/release.yml`，推送形如 `v0.2.1` 的版本标签后会自动运行。
 
 ## 首次发布
 
-当前项目版本是 `0.2.0`。提交代码和图标后，在仓库根目录执行：
+当前项目版本是 `0.2.1`。提交代码和图标后，在仓库根目录执行：
 
 ```powershell
 git add .
-git commit -m "chore: prepare WishForge v0.2.0"
+git commit -m "fix: release WishForge v0.2.1"
 git push origin main
-git tag v0.2.0
-git push origin v0.2.0
+git tag v0.2.1
+git push origin v0.2.1
 ```
 
 然后在 GitHub 的 **Actions** 页面查看 `Release Windows app`。构建成功后，
-GitHub 会自动创建 `WishForge v0.2.0` Release，并上传 Windows 安装包。
+GitHub 会自动创建 `WishForge v0.2.1` Release，并上传 Windows 安装包。
 
 ## 用户下载和运行
 
 用户应下载 Release 的：
 
 ```text
-WishForge_0.2.0_x64-setup.exe
+WishForge_0.2.1_x64-setup.exe
 ```
 
 这是安装程序，不是源码压缩包。用户双击安装程序完成安装，再从开始菜单或桌面
-快捷方式点击 WishForge 图标即可运行。当前构建目标是 Windows x64。
+快捷方式点击 WishForge 图标即可运行。不要下载 Tag 页面提供的 Source code zip；
+它是给开发者使用的源码，不能作为普通用户的安装包。当前构建目标是 Windows x64。
 
 首次安装时，如果系统没有 WebView2，安装程序会联网下载安装 WebView2；这是当前
 `tauri.conf.json` 中 `downloadBootstrapper` 的设置。

@@ -186,16 +186,25 @@ fn sidecar_command(
             .resource_dir()
             .map_err(|error| format!("读取应用资源目录失败：{error}"))?;
         let target_name = format!("{}.exe", sidecar_binary_name());
-        let candidates = [
+        let mut candidates = vec![
             resource_dir.join("bin").join(&target_name),
             resource_dir.join(&target_name),
             resource_dir.join("bin").join("wishforge-sidecar.exe"),
+            // Tauri's NSIS externalBin bundle places this executable beside
+            // the main application and removes the target-triple suffix.
+            resource_dir.join("wishforge-sidecar.exe"),
         ];
+        if let Ok(executable) = env::current_exe() {
+            if let Some(executable_dir) = executable.parent() {
+                candidates.push(executable_dir.join(&target_name));
+                candidates.push(executable_dir.join("wishforge-sidecar.exe"));
+            }
+        }
         let binary = candidates
             .iter()
             .find(|path| path.exists())
             .ok_or_else(|| {
-                "找不到 WishForge Python sidecar；请先运行 scripts\\build-sidecar.ps1".to_string()
+                "找不到 WishForge Python sidecar；安装包可能不完整，请重新安装。".to_string()
             })?;
         Command::new(binary)
     };
@@ -434,8 +443,55 @@ fn save_desktop_runtime_settings(
     Ok(config.clone())
 }
 
+#[cfg(target_os = "windows")]
+#[link(name = "user32")]
+unsafe extern "system" {
+    fn MessageBoxW(
+        window: *mut core::ffi::c_void,
+        text: *const u16,
+        caption: *const u16,
+        style: u32,
+    ) -> i32;
+}
+
+#[cfg(target_os = "windows")]
+fn report_startup_failure(error: &impl std::fmt::Display) {
+    let log_dir = env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(env::temp_dir)
+        .join("WishForge");
+    let log_path = log_dir.join("startup-error.log");
+    let _ = fs::create_dir_all(&log_dir);
+    let _ = fs::write(
+        &log_path,
+        format!("WishForge failed to start.\n\n{error}\n"),
+    );
+    let message = format!(
+        "WishForge failed to start.\n\n{error}\n\nDetails were saved to:\n{}",
+        log_path.display()
+    );
+    let mut wide_message: Vec<u16> = message.encode_utf16().collect();
+    wide_message.push(0);
+    let mut wide_caption: Vec<u16> = "WishForge startup error".encode_utf16().collect();
+    wide_caption.push(0);
+    // MB_ICONERROR
+    unsafe {
+        MessageBoxW(
+            std::ptr::null_mut(),
+            wide_message.as_ptr(),
+            wide_caption.as_ptr(),
+            0x0000_0010,
+        );
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn report_startup_failure(error: &impl std::fmt::Display) {
+    eprintln!("WishForge failed to start: {error}");
+}
+
 fn main() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
             get_runtime_config,
@@ -448,11 +504,14 @@ fn main() {
             start_sidecar(&app.handle(), &state).map_err(std::io::Error::other)?;
             Ok(())
         })
-        .build(tauri::generate_context!())
-        .expect("error while building WishForge application")
-        .run(|app_handle, event| {
+        .build(tauri::generate_context!());
+
+    match app {
+        Ok(app) => app.run(|app_handle, event| {
             if matches!(event, RunEvent::ExitRequested { .. } | RunEvent::Exit) {
                 app_handle.state::<AppState>().stop();
             }
-        });
+        }),
+        Err(error) => report_startup_failure(&error),
+    }
 }

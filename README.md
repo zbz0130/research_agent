@@ -231,11 +231,11 @@ Windows Release 的构建和下载说明见 [发布 Windows 桌面版](docs/rele
 
 ### Windows 桌面 App
 
-普通使用直接运行安装包 `src-tauri\target\release\bundle\nsis\WishForge_0.2.0_x64-setup.exe`，安装后从开始菜单打开 WishForge；不需要手动启动 Python、Vite 或 sidecar。
+普通使用直接运行安装包 `src-tauri\target\release\bundle\nsis\WishForge_0.2.1_x64-setup.exe`，安装后从开始菜单打开 WishForge；不需要手动启动 Python、Vite 或 sidecar。GitHub Tag 页面下载的 Source code zip 仅供开发者使用，普通用户应下载 Release Assets 中的 `*-setup.exe`。
 
 ### Windows 桌面开发模式
 
-最简单的方式是双击仓库根目录中的 `启动 WishForge.bat`。它会自动设置项目环境、检查前端依赖并启动桌面 App。
+最简单的方式是双击仓库根目录中的 `启动 WishForge.bat`。这是开发者启动方式，要求本机已安装 Python、Node.js、Rust 和项目依赖；普通用户应使用 Release 安装包。
 
 也可以在 PowerShell 中执行：
 
@@ -265,7 +265,7 @@ cd D:\C++\search_agent\frontend
 npm.cmd run tauri:build
 ```
 
-默认生成面向普通 Windows 用户的 NSIS 一键安装程序：`src-tauri\target\release\bundle\nsis\WishForge_0.2.0_x64-setup.exe`。构建前会自动生成 sidecar，并真实调用健康接口；无法启动的 sidecar 不会进入安装包。
+默认生成面向普通 Windows 用户的 NSIS 一键安装程序：`src-tauri\target\release\bundle\nsis\WishForge_0.2.1_x64-setup.exe`。构建前会自动生成 sidecar，并真实调用健康接口；无法启动的 sidecar 不会进入安装包。
 
 ## 当前阶段验收标准
 

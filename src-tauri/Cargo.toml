@@ -1,6 +1,6 @@
 [package]
 name = "wishforge"
-version = "0.2.0"
+version = "0.2.1"
 description = "许愿机 / WishForge research graph desktop app"
 authors = ["WishForge"]
 edition = "2021"
