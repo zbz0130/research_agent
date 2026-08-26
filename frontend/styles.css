@@ -865,6 +865,54 @@ button.secondary:hover, .node-edit:hover, .node-explain:hover { border-color: va
 .graph-editor-footer label { min-width: 180px; margin: 0; font-size: 0.76rem; }
 .graph-editor-footer select { margin-top: 4px; }
 
+/* Keep the research-direction graph readable in the light desktop theme.
+   These rules intentionally override the older blue-on-dark Overview styles. */
+[data-view="research-overview"] .overview-history-copy h3,
+[data-view="research-overview"] .overview-status-copy h3,
+[data-view="research-overview"] .overview-progress-meta,
+[data-view="research-overview"] #overview-progress-label,
+[data-view="research-overview"] .overview-legend,
+[data-view="research-overview"] .overview-legend > p,
+[data-view="research-overview"] .legend-item,
+[data-view="research-overview"] .legend-label,
+[data-view="research-overview"] .graph-inspector-heading h3,
+[data-view="research-overview"] .graph-inspector-scope,
+[data-view="research-overview"] .graph-inspector-section > p,
+[data-view="research-overview"] .graph-inspector-section > div,
+[data-view="research-overview"] .graph-inspector-meta dt,
+[data-view="research-overview"] .graph-inspector-meta dd,
+[data-view="research-overview"] .graph-inspector-relations,
+[data-view="research-overview"] .graph-inspector-evidence li,
+[data-view="research-overview"] .graph-inspector-evidence small,
+[data-view="research-overview"] .graph-inspector-metric small {
+  color: #111827;
+}
+
+[data-view="research-overview"] .graph-inspector-scope,
+[data-view="research-overview"] .overview-legend {
+  border-color: #b6c2cf;
+  background: #f6f8fa;
+}
+
+[data-view="research-overview"] .graph-inspector-section,
+[data-view="research-overview"] .graph-inspector-actions {
+  border-color: #d0d7de;
+}
+
+[data-view="research-overview"] .graph-inspector-relations strong,
+[data-view="research-overview"] .graph-inspector-evidence li::marker {
+  color: #1f6feb;
+}
+
+.overview-canvas-help {
+  margin: 10px 2px 0;
+  color: #111827;
+  font-size: 0.82rem;
+  line-height: 1.6;
+}
+
+.overview-canvas-help strong { color: #111827; }
+
 @media (prefers-color-scheme: dark) {
   :root {
     color-scheme: light;

@@ -39,23 +39,23 @@ export function nodeAppearance(node, graph) {
   const backendRadius = Number(visual.radius);
   let width = 76;
   let height = 76;
-  let background = "#6d8fb4";
-  let foreground = "#f7fbff";
-  let border = "#d7e8f7";
+  let background = "#b9d4ee";
+  let foreground = "#111827";
+  let border = "#6f9fc8";
 
   if (role === "root") {
     width = 146;
     height = 82;
-    background = "#315f91";
-    border = "#a8d5ff";
+    background = "#b7d6ef";
+    border = "#5a8fbc";
   } else if (role === "direction") {
     const diameter = Number.isFinite(backendRadius)
       ? clamp(backendRadius * 2, 56, 128)
       : 56 + (48 * Math.sqrt(heat));
     width = diameter;
     height = diameter;
-    background = mixColor([131, 178, 222], [39, 92, 150], heat);
-    border = "#c6e2fa";
+    background = mixColor([201, 224, 244], [129, 176, 219], heat);
+    border = "#6699c7";
   } else if (role === "paper") {
     const diameter = Number.isFinite(backendRadius)
       ? clamp(backendRadius * 2, 34, 70)
@@ -67,29 +67,28 @@ export function nodeAppearance(node, graph) {
     width = clamp(diameter, 42, 74);
     height = width;
     background = node?.year == null
-      ? "#718096"
-      : mixColor([184, 213, 246], [31, 78, 196], recency);
-    foreground = recency > 0.42 ? "#ffffff" : "#13273b";
-    border = recency > 0.55 ? "#a9c5ff" : "#eef7ff";
+      ? "#c9d2dc"
+      : mixColor([220, 234, 248], [133, 179, 223], recency);
+    border = recency > 0.55 ? "#5c91c5" : "#9abadd";
   } else if (role === "problem") {
     const diameter = Number.isFinite(backendRadius)
       ? clamp(backendRadius * 2, 64, 132)
       : 64 + (56 * Math.sqrt(heat));
     width = diameter;
     height = diameter;
-    background = "#b46b72";
-    border = "#ffd0d5";
+    background = "#e6b1b5";
+    border = "#b9626a";
   } else if (role === "method") {
     const diameter = Number.isFinite(backendRadius)
       ? clamp(backendRadius * 2, 54, 116)
       : 54 + (46 * Math.sqrt(heat));
     width = diameter;
     height = diameter;
-    background = "#675aa7";
-    border = "#d8d0ff";
+    background = "#c6b9ee";
+    border = "#8071bc";
   } else if (role === "idea") {
-    background = "#9b7a3a";
-    border = "#ffe2a1";
+    background = "#ead39b";
+    border = "#b58a32";
   }
 
   return {

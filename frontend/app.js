@@ -103,7 +103,9 @@ const overviewActionMessageEl = document.querySelector("#overview-action-message
 const overviewGraphTitleEl = document.querySelector("#overview-graph-title");
 const overviewCanvasEl = document.querySelector("#overview-canvas");
 const overviewInspectorEl = document.querySelector("#overview-inspector");
+const overviewZoomOutButton = document.querySelector("#overview-zoom-out");
 const overviewFitButton = document.querySelector("#overview-fit");
+const overviewZoomInButton = document.querySelector("#overview-zoom-in");
 const overviewToggleEdgesButton = document.querySelector("#overview-toggle-edges");
 const overviewLegendEl = document.querySelector("#overview-legend");
 const overviewLegendNoteEl = document.querySelector("#overview-legend-note");
@@ -2988,6 +2990,8 @@ function resetOverviewView({ preserveJobStatus = false } = {}) {
   overviewSaveButton?.classList.add("hidden");
   overviewEditButton?.classList.add("hidden");
   if (overviewFitButton) overviewFitButton.disabled = true;
+  if (overviewZoomOutButton) overviewZoomOutButton.disabled = true;
+  if (overviewZoomInButton) overviewZoomInButton.disabled = true;
   if (overviewToggleEdgesButton) overviewToggleEdgesButton.disabled = true;
   if (overviewToggleEdgesButton) {
     overviewToggleEdgesButton.setAttribute("aria-pressed", "true");
@@ -3205,6 +3209,8 @@ function renderOverviewGraph(result) {
     else renderOverviewInspector(null);
   }
   if (overviewFitButton) overviewFitButton.disabled = false;
+  if (overviewZoomOutButton) overviewZoomOutButton.disabled = false;
+  if (overviewZoomInButton) overviewZoomInButton.disabled = false;
   if (overviewToggleEdgesButton) overviewToggleEdgesButton.disabled = false;
   overviewLegendEl?.classList.remove("hidden");
   const legend = result.legend || {};
@@ -3489,7 +3495,9 @@ async function openOverviewEditor() {
 
 createOverviewButton?.addEventListener("click", () => createOverview());
 overviewRetryButton?.addEventListener("click", () => createOverview({ force: true }));
+overviewZoomOutButton?.addEventListener("click", () => state.overviewRenderer?.zoomBy?.(0.8));
 overviewFitButton?.addEventListener("click", () => state.overviewRenderer?.fit());
+overviewZoomInButton?.addEventListener("click", () => state.overviewRenderer?.zoomBy?.(1.25));
 overviewToggleEdgesButton?.addEventListener("click", () => {
   state.overviewLowConfidenceVisible = !state.overviewLowConfidenceVisible;
   overviewToggleEdgesButton.setAttribute("aria-pressed", String(state.overviewLowConfidenceVisible));

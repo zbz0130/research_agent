@@ -47,3 +47,13 @@ test("problem and method nodes remain circular and grow with branch heat", () =>
     assert.ok(hot.width > cool.width);
   }
 });
+
+test("research graph labels use dark text on every node role", () => {
+  for (const role of ["root", "direction", "paper", "problem", "method", "idea", "concept"]) {
+    const appearance = nodeAppearance(
+      { role, year: 2025, visual: { recency_score: 1, heat_score: 1 } },
+      { root_id: "topic" },
+    );
+    assert.equal(appearance.foreground, "#111827");
+  }
+});

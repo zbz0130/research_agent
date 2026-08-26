@@ -300,6 +300,18 @@ export function createGraphRenderer(cytoscape, container, options = {}) {
       cy.resize();
       cy.fit(undefined, 42);
     },
+    zoomBy: (factor) => {
+      const multiplier = Number(factor);
+      if (!Number.isFinite(multiplier) || multiplier <= 0) return;
+      const nextZoom = Math.min(cy.maxZoom(), Math.max(cy.minZoom(), cy.zoom() * multiplier));
+      cy.zoom({
+        level: nextZoom,
+        renderedPosition: {
+          x: container.clientWidth / 2,
+          y: container.clientHeight / 2,
+        },
+      });
+    },
     resize: () => cy.resize(),
     visibleNodeScreenPositions: () => cy.nodes(":visible").map((node) => ({
       id: node.id(),
