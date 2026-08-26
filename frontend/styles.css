@@ -913,6 +913,36 @@ button.secondary:hover, .node-edit:hover, .node-explain:hover { border-color: va
 
 .overview-canvas-help strong { color: #111827; }
 
+/* Legend end labels stay on opposite sides of the visual scale instead of
+   both appearing after it. */
+[data-view="research-overview"] .legend-item {
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 12px;
+}
+
+[data-view="research-overview"] .legend-scale {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 9px;
+}
+
+[data-view="research-overview"] .legend-scale small {
+  flex: 0 0 auto;
+  color: #111827;
+  white-space: nowrap;
+}
+
+[data-view="research-overview"] .recency-gradient {
+  min-width: 92px;
+  flex: 1 1 auto;
+  border-color: #8ca9c5;
+}
+
+[data-view="research-overview"] .heat-scale { width: max-content; }
+[data-view="research-overview"] .heat-dots { display: inline-flex; align-items: center; gap: 7px; }
+[data-view="research-overview"] .heat-dot { border-color: #5d8dbb; background: #4f86bc; }
+
 @media (prefers-color-scheme: dark) {
   :root {
     color-scheme: light;

@@ -423,15 +423,21 @@
             </div>
             <p class="overview-canvas-help"><strong>操作图谱：</strong>滚轮缩放；按住画布空白处拖动即可移动视角；拖动圆形节点可调整位置。也可使用上方“放大 / 缩小 / 适应画布”。</p>
             <div id="overview-legend" class="overview-legend hidden">
-              <div class="legend-item">
+              <div class="legend-item recency-legend">
                 <span class="legend-label">论文新旧</span>
-                <span class="recency-gradient" aria-hidden="true"></span>
-                <small>较早</small><small>较新</small>
+                <span class="legend-scale recency-scale">
+                  <small>较早</small>
+                  <span class="recency-gradient" aria-hidden="true"></span>
+                  <small>较新</small>
+                </span>
               </div>
               <div class="legend-item heat-legend">
                 <span class="legend-label">问题/方法活跃度</span>
-                <i class="heat-dot heat-dot-small"></i><i class="heat-dot heat-dot-medium"></i><i class="heat-dot heat-dot-large"></i>
-                <small>范围内较少</small><small>范围内较活跃</small>
+                <span class="legend-scale heat-scale">
+                  <small>范围内较少</small>
+                  <span class="heat-dots" aria-hidden="true"><i class="heat-dot heat-dot-small"></i><i class="heat-dot heat-dot-medium"></i><i class="heat-dot heat-dot-large"></i></span>
+                  <small>范围内较活跃</small>
+                </span>
               </div>
               <p id="overview-legend-note">热度只表示当前检索范围内的相对活跃度，不代表论文质量、正确性、创新性或全局影响力。</p>
             </div>
