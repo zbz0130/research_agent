@@ -53,8 +53,11 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          projectPath: ./frontend
-          tauriScript: npm run tauri
+          # The repository root contains both `frontend/` and `src-tauri/`.
+          # projectPath must therefore be the repository root so the action
+          # can discover src-tauri/tauri.conf.json.
+          projectPath: ./
+          tauriScript: frontend/node_modules/.bin/tauri.cmd
           tagName: v__VERSION__
           releaseName: WishForge v__VERSION__
           releaseBody: |
