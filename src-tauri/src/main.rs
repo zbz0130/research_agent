@@ -17,6 +17,9 @@ use tauri::{AppHandle, Manager, RunEvent, State};
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 const CREDENTIAL_SERVICE: &str = "com.wishforge.research";
 const CREDENTIAL_SLOTS: &[(&str, &str)] = &[
     ("paper_search", "WISHFORGE_PAPER_API_KEY"),
@@ -221,6 +224,10 @@ fn sidecar_command(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    // The sidecar is a background API service.  Without this flag, Windows
+    // creates a transient cmd window whenever the desktop shortcut is opened.
+    #[cfg(target_os = "windows")]
+    command.creation_flags(CREATE_NO_WINDOW);
     command.env("WISHFORGE_APP_DATA_DIR", data_dir);
     command.env("WISHFORGE_DESKTOP_SIDECAR", "1");
     for (slot, variable) in CREDENTIAL_SLOTS {
@@ -251,7 +258,6 @@ fn wait_for_health(base_url: &str) -> Result<(), String> {
 fn terminate_sidecar(child: &mut Child) {
     #[cfg(target_os = "windows")]
     {
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
         let status = Command::new("taskkill")
             .args(["/PID", &child.id().to_string(), "/T", "/F"])
             .stdin(Stdio::null())
