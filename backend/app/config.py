@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     app_name: str = "许愿机 API"
     brand_name: str = "许愿机"
     brand_name_en: str = "WishForge"
-    version: str = "0.2.2"
+    version: str = "0.2.3"
     cors_origins: str = "http://localhost:8000,http://localhost:3000"
     storage_path: str = "data/wishforge.db"
 

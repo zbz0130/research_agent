@@ -3273,12 +3273,12 @@ async function waitForOverviewCompletion(id) {
   }
 }
 
-const ONBOARDING_STORAGE_KEY = "wishforge-onboarding-v0.2.2-complete";
-const APP_VERSION = "0.2.2";
+const ONBOARDING_STORAGE_KEY = "wishforge-onboarding-v0.2.3-complete";
+const APP_VERSION = "0.2.3";
 const RELEASES_ENDPOINT = "https://api.github.com/repos/zbz0130/research_agent/releases/latest";
 const MODEL_SETUP_TEMPLATES = {
-  "deepseek-v4-flash": { provider: "openai_compatible", model: "deepseek-v4-flash", baseUrl: "https://api.deepseek.com", label: "DeepSeek V4 Flash" },
-  "deepseek-v4-pro": { provider: "openai_compatible", model: "deepseek-v4-pro", baseUrl: "https://api.deepseek.com", label: "DeepSeek V4 Pro" },
+  "deepseek-v4-flash": { provider: "openai_compatible", model: "deepseek-v4-flash", baseUrl: "https://api.deepseek.com/v1", label: "DeepSeek V4 Flash" },
+  "deepseek-v4-pro": { provider: "openai_compatible", model: "deepseek-v4-pro", baseUrl: "https://api.deepseek.com/v1", label: "DeepSeek V4 Pro" },
   "gpt-5.6-sol": { provider: "openai", model: "gpt-5.6-sol", baseUrl: "https://api.openai.com/v1", label: "GPT-5.6 Sol" },
 };
 

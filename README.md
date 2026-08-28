@@ -111,8 +111,8 @@ WISHFORGE_EXPLANATION_BASE_URL  # OpenAI-compatible 服务地址
 
 | 服务 | Provider | 模型名称 | Base URL |
 | --- | --- | --- | --- |
-| DeepSeek V4 Flash | `openai_compatible` | `deepseek-v4-flash` | `https://api.deepseek.com` |
-| DeepSeek V4 Pro | `openai_compatible` | `deepseek-v4-pro` | `https://api.deepseek.com` |
+| DeepSeek V4 Flash | `openai_compatible` | `deepseek-v4-flash` | `https://api.deepseek.com/v1` |
+| DeepSeek V4 Pro | `openai_compatible` | `deepseek-v4-pro` | `https://api.deepseek.com/v1` |
 | OpenAI GPT-5.6 Sol | `openai` | `gpt-5.6-sol` | `https://api.openai.com/v1` |
 
 在“解释模型”卡片粘贴该服务自己的 API Key 后，先点击“保存模型路由”，再点击“保存 API Key”。论文检索默认使用无需 Key 的 arXiv、OpenAlex、Crossref 多源合并。
@@ -241,7 +241,7 @@ Windows Release 的构建和下载说明见 [发布 Windows 桌面版](docs/rele
 
 ### Windows 桌面 App
 
-普通使用直接运行安装包 `src-tauri\target\release\bundle\nsis\WishForge_0.2.2_x64-setup.exe`，安装后从开始菜单打开 WishForge；不需要手动启动 Python、Vite 或 sidecar。首次启动会自动打开设置并展示不含密钥的模型配置引导。GitHub Tag 页面下载的 Source code zip 仅供开发者使用，普通用户应下载 Release Assets 中的 `*-setup.exe`。
+普通使用直接运行安装包 `src-tauri\target\release\bundle\nsis\WishForge_0.2.3_x64-setup.exe`，安装后从开始菜单打开 WishForge；不需要手动启动 Python、Vite 或 sidecar。首次启动会自动打开设置并展示不含密钥的模型配置引导。GitHub Tag 页面下载的 Source code zip 仅供开发者使用，普通用户应下载 Release Assets 中的 `*-setup.exe`。
 
 ### Windows 桌面开发模式
 
@@ -275,7 +275,7 @@ cd D:\C++\search_agent\frontend
 npm.cmd run tauri:build
 ```
 
-默认生成面向普通 Windows 用户的 NSIS 一键安装程序：`src-tauri\target\release\bundle\nsis\WishForge_0.2.2_x64-setup.exe`。构建前会自动生成 sidecar，并真实调用健康接口；无法启动的 sidecar 不会进入安装包。
+默认生成面向普通 Windows 用户的 NSIS 一键安装程序：`src-tauri\target\release\bundle\nsis\WishForge_0.2.3_x64-setup.exe`。构建前会自动生成 sidecar，并真实调用健康接口；无法启动的 sidecar 不会进入安装包。
 
 ## 当前阶段验收标准
 

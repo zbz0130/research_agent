@@ -104,6 +104,24 @@ fn load_runtime_settings(data_dir: &Path) -> PersistedRuntimeSettings {
     }
 }
 
+fn migrate_deepseek_base_url(settings: &mut PersistedRuntimeSettings) -> bool {
+    let is_legacy_deepseek_route = settings.explanation_provider.as_deref()
+        == Some("openai_compatible")
+        && settings
+            .explanation_base_url
+            .as_deref()
+            .is_some_and(|value| {
+                value
+                    .trim_end_matches('/')
+                    .eq_ignore_ascii_case("https://api.deepseek.com")
+            });
+    if !is_legacy_deepseek_route {
+        return false;
+    }
+    settings.explanation_base_url = Some("https://api.deepseek.com/v1".to_string());
+    true
+}
+
 fn persist_runtime_settings(
     data_dir: &Path,
     settings: &PersistedRuntimeSettings,
@@ -282,7 +300,10 @@ fn start_sidecar(app: &AppHandle, state: &AppState) -> Result<(), String> {
         .app_data_dir()
         .map_err(|error| format!("读取应用数据目录失败：{error}"))?;
     fs::create_dir_all(&data_dir).map_err(|error| format!("创建应用数据目录失败：{error}"))?;
-    let settings = load_runtime_settings(&data_dir);
+    let mut settings = load_runtime_settings(&data_dir);
+    if migrate_deepseek_base_url(&mut settings) {
+        persist_runtime_settings(&data_dir, &settings)?;
+    }
     let settings_path = config_path(&data_dir);
     let port = next_loopback_port()?;
     let base_url = format!("http://127.0.0.1:{port}");
