@@ -8,6 +8,10 @@ from app.main import app
 client = TestClient(app)
 
 
+def test_default_paper_search_is_arxiv_for_research_direction_compatibility() -> None:
+    assert Settings.model_fields["paper_provider"].default == "arxiv"
+
+
 def test_arxiv_paper_search_is_ready_without_a_credential() -> None:
     settings = Settings(paper_provider="arxiv", paper_api_key=None, _env_file=None)
     app.dependency_overrides[get_settings] = lambda: settings

@@ -111,7 +111,7 @@ arXiv 检索不需要 API Key。Provider 会：
 - 处理网络异常、限流、空结果和 XML 错误；
 - 在 Demo 模式下才允许明确标记的演示资料作为回退。
 
-代码中还保留了 Semantic Scholar Provider 作为可选数据源；切换到它时需要相应的论文检索 Key，并需要处理公开接口的限流（例如 HTTP 429）。默认 `multi_source` 不依赖 Semantic Scholar Key。
+代码中还保留了多源检索和 Semantic Scholar Provider 作为可选数据源；多源检索不依赖论文 Key，Semantic Scholar 则需要相应的论文检索 Key，并需要处理公开接口的限流（例如 HTTP 429）。默认使用 `arxiv`，以便研究方向图能够在后台稳定地执行方向级检索。
 
 ### 4.2 论文记录
 

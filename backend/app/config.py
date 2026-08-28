@@ -22,7 +22,10 @@ class Settings(BaseSettings):
 
     # Providers are deliberately separated by responsibility. A paper-search
     # credential must never be accidentally used by the experiment runner.
-    paper_provider: str = "multi_source"
+    # Keep arXiv as the default because the research-direction worker can
+    # recreate it safely after the initial workbench analysis has completed.
+    # Multi-source retrieval remains an opt-in Workbench option.
+    paper_provider: str = "arxiv"
     paper_base_url: str | None = None
     paper_model: str | None = None
     paper_enabled: bool = True
