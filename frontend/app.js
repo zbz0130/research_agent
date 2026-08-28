@@ -102,6 +102,7 @@ const overviewRetryButton = document.querySelector("#overview-retry");
 const overviewSaveLaterButton = document.querySelector("#overview-save-later");
 const overviewSaveButton = document.querySelector("#overview-save");
 const overviewEditButton = document.querySelector("#overview-edit");
+const overviewDeleteButton = document.querySelector("#overview-delete");
 const overviewActionMessageEl = document.querySelector("#overview-action-message");
 const overviewGraphTitleEl = document.querySelector("#overview-graph-title");
 const overviewCanvasEl = document.querySelector("#overview-canvas");
@@ -119,6 +120,9 @@ const overviewHistoryStatusEl = document.querySelector("#overview-history-status
 const overviewSaveDialog = document.querySelector("#overview-save-dialog");
 const overviewDialogConfirmButton = document.querySelector("#overview-dialog-confirm");
 const overviewDialogLaterButton = document.querySelector("#overview-dialog-later");
+const overviewDeleteDialog = document.querySelector("#overview-delete-dialog");
+const overviewDeleteDialogConfirmButton = document.querySelector("#overview-delete-dialog-confirm");
+const overviewDeleteDialogCancelButton = document.querySelector("#overview-delete-dialog-cancel");
 const deleteCurrentGraphButton = document.querySelector("#delete-current-graph");
 const graphSaveDialog = document.querySelector("#graph-save-dialog");
 const saveGraphDialogConfirmButton = document.querySelector("#save-graph-dialog-confirm");
@@ -327,6 +331,7 @@ const state = {
   overviewJobs: [],
   overviewHistoryLoaded: false,
   overviewHistoryLoading: false,
+  pendingOverviewDeletion: null,
   graphGalleryRenderers: new Map(),
 };
 
@@ -1186,6 +1191,7 @@ function resetAnalysisView() {
   state.overviewSavePromptedForId = null;
   closeDialog(graphSaveDialog);
   closeDialog(overviewSaveDialog);
+  closeDialog(overviewDeleteDialog);
   closeDialog(graphDeleteDialog);
   analysisProviderEl.textContent = "分析中…";
   paperCountEl.textContent = "0 篇";
@@ -2991,6 +2997,7 @@ async function loadOverviewHistory({ autoOpen = false } = {}) {
 }
 
 function resetOverviewView({ preserveJobStatus = false } = {}) {
+  state.pendingOverviewDeletion = null;
   if (!preserveJobStatus) {
     state.overviewId = null;
     state.overviewJob = null;
@@ -3013,6 +3020,7 @@ function resetOverviewView({ preserveJobStatus = false } = {}) {
   overviewSaveLaterButton?.classList.add("hidden");
   overviewSaveButton?.classList.add("hidden");
   overviewEditButton?.classList.add("hidden");
+  overviewDeleteButton?.classList.add("hidden");
   if (overviewFitButton) overviewFitButton.disabled = true;
   if (overviewZoomOutButton) overviewZoomOutButton.disabled = true;
   if (overviewZoomInButton) overviewZoomInButton.disabled = true;
@@ -3076,6 +3084,54 @@ function renderOverviewStatus(job) {
   overviewEditButton?.classList.toggle("hidden", !hasGraph);
   if (overviewEditButton) overviewEditButton.textContent = saved ? "打开图编辑模式" : "保存并进入编辑模式";
   if (saved && overviewSaveButton) overviewSaveButton.classList.add("hidden");
+  const canDelete = Boolean(job?.id) && ["succeeded", "partial", "failed", "interrupted"].includes(status);
+  overviewDeleteButton?.classList.toggle("hidden", !canDelete);
+  if (overviewDeleteButton) overviewDeleteButton.disabled = !canDelete;
+}
+
+function openOverviewDeleteDialog() {
+  const job = state.overviewJob;
+  if (!job?.id || ["queued", "running"].includes(job.status)) return;
+  state.pendingOverviewDeletion = {
+    id: String(job.id),
+    savedGraphId: job.saved_graph_id || null,
+  };
+  if (overviewDeleteDialogConfirmButton) overviewDeleteDialogConfirmButton.disabled = false;
+  showDialog(overviewDeleteDialog);
+}
+
+function closeOverviewDeleteDialog() {
+  closeDialog(overviewDeleteDialog);
+  state.pendingOverviewDeletion = null;
+}
+
+async function deleteOverviewById() {
+  const pending = state.pendingOverviewDeletion;
+  if (!pending) return;
+  if (overviewDeleteDialogConfirmButton) overviewDeleteDialogConfirmButton.disabled = true;
+  setOverviewActionMessage("正在删除当前研究方向图…", "");
+  try {
+    const response = await apiFetch(`/api/v1/overviews/${encodeURIComponent(pending.id)}`, { method: "DELETE" });
+    if (!response.ok) throw new Error(await response.text());
+    const isCurrent = String(state.overviewId) === pending.id;
+    state.overviewJobs = state.overviewJobs.filter((job) => String(job.id) !== pending.id);
+    state.overviewHistoryLoaded = true;
+    closeOverviewDeleteDialog();
+    if (isCurrent) {
+      stopOverviewPolling();
+      resetOverviewView();
+    }
+    renderOverviewHistory();
+    setOverviewActionMessage(
+      pending.savedGraphId
+        ? "研究方向图历史已删除；概念图库中的独立副本仍然保留。"
+        : "研究方向图历史已删除；工作台的原始分析仍然保留。",
+      "",
+    );
+  } catch (error) {
+    if (overviewDeleteDialogConfirmButton) overviewDeleteDialogConfirmButton.disabled = false;
+    setOverviewActionMessage(`删除失败：${error.message}`, "error-text");
+  }
 }
 
 function refreshGraphEditorControls() {
@@ -3669,6 +3725,16 @@ overviewHistoryRefreshButton?.addEventListener("click", () => {
 });
 overviewSaveButton?.addEventListener("click", () => showDialog(overviewSaveDialog));
 overviewEditButton?.addEventListener("click", () => openOverviewEditor());
+overviewDeleteButton?.addEventListener("click", openOverviewDeleteDialog);
+overviewDeleteDialogConfirmButton?.addEventListener("click", deleteOverviewById);
+overviewDeleteDialogCancelButton?.addEventListener("click", closeOverviewDeleteDialog);
+overviewDeleteDialog?.addEventListener("cancel", (event) => {
+  event.preventDefault();
+  closeOverviewDeleteDialog();
+});
+overviewDeleteDialog?.addEventListener("click", (event) => {
+  if (event.target.closest("[data-dialog-close='overview-delete']")) closeOverviewDeleteDialog();
+});
 overviewSaveLaterButton?.addEventListener("click", () => {
   closeDialog(overviewSaveDialog);
   setOverviewActionMessage("研究方向图暂不保存；Overview 任务仍可继续查看。", "");

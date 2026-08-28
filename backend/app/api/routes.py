@@ -405,6 +405,27 @@ def get_overview(overview_id: UUID) -> OverviewJob:
         raise HTTPException(status_code=404, detail="研究方向图任务不存在") from exc
 
 
+@router.delete(
+    "/overviews/{overview_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    tags=["research", "overviews"],
+)
+def delete_overview(overview_id: UUID) -> Response:
+    """Delete a finished research-direction map history task.
+
+    A graph that has been explicitly saved to the shared graph library remains
+    independent and can be managed in the Concept Graph page.
+    """
+
+    try:
+        overview_service.delete(overview_id)
+    except OverviewNotFound as exc:
+        raise HTTPException(status_code=404, detail="研究方向图任务不存在") from exc
+    except GraphConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
 @router.get(
     "/overviews/{overview_id}/nodes/{node_id}",
     response_model=GraphNodeDetail,

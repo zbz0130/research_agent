@@ -400,6 +400,7 @@
             <button id="overview-save-later" type="button" class="secondary hidden">稍后保存</button>
             <button id="overview-save" type="button" class="hidden">保存研究方向图</button>
             <button id="overview-edit" type="button" class="secondary hidden">进入图编辑模式</button>
+            <button id="overview-delete" type="button" class="danger-button hidden">删除当前整图</button>
             <span id="overview-action-message" class="form-message" role="status"></span>
           </div>
         </section>
@@ -760,6 +761,18 @@
         <div class="action-sheet-actions">
           <button id="overview-dialog-confirm" type="button" autofocus>保存研究方向图</button>
           <button id="overview-dialog-later" type="button" class="secondary">暂不保存</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="overview-delete-dialog" class="action-sheet-dialog danger-dialog" aria-labelledby="overview-delete-dialog-title" aria-describedby="overview-delete-dialog-description">
+      <form method="dialog" class="action-sheet-content">
+        <button type="button" class="dialog-close" data-dialog-close="overview-delete" aria-label="关闭删除提示">×</button>
+        <p class="eyebrow">DELETE RESEARCH MAP</p>
+        <h2 id="overview-delete-dialog-title">删除当前研究方向图？</h2>
+        <p id="overview-delete-dialog-description">这会删除这次研究方向图的历史任务、图和进度，操作不可撤销。工作台的原始分析会保留；若你已将这张图保存到“概念图”图库，那个独立副本也会保留。</p>
+        <div class="action-sheet-actions">
+          <button id="overview-delete-dialog-confirm" type="button" class="danger-button">删除整图</button>
+          <button id="overview-delete-dialog-cancel" type="button" class="secondary">取消</button>
         </div>
       </form>
     </dialog>

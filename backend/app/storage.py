@@ -869,6 +869,23 @@ class Storage:
 
         return self._run(read)
 
+    def delete_overview(self, overview_id: str) -> bool:
+        """Delete one durable research-direction Overview task.
+
+        Overview history is intentionally separate from a graph that the user
+        may already have promoted into the shared concept-graph library.  This
+        operation therefore removes only the Overview task and leaves an
+        independently saved graph untouched.
+        """
+
+        def delete(connection: sqlite3.Connection) -> bool:
+            cursor = connection.execute(
+                "DELETE FROM overview_jobs WHERE id = ?", (overview_id,)
+            )
+            return cursor.rowcount == 1
+
+        return bool(self._run(delete))
+
     def mark_overview_graph_deleted(self, graph_id: str) -> list[str]:
         """Return Overview snapshots for a deleted library graph to transient.
 

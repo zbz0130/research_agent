@@ -519,6 +519,36 @@ def test_overview_history_list_recovers_terminal_jobs() -> None:
         app.dependency_overrides.clear()
 
 
+def test_overview_delete_removes_history_but_keeps_saved_graph() -> None:
+    try:
+        analysis_id = _completed_analysis()
+        overview_id = client.post(
+            f"/api/v1/analyses/{analysis_id}/overview", json={}
+        ).json()["id"]
+        completed = _wait_overview(overview_id)
+        assert completed["status"] in {"succeeded", "partial"}
+        graph = completed["result"]["graph"]
+
+        saved = client.post(
+            f"/api/v1/overviews/{overview_id}/save",
+            json={"expected_version": graph["version"]},
+        )
+        assert saved.status_code == 200
+        graph_id = saved.json()["saved_graph_id"]
+
+        deleted = client.delete(f"/api/v1/overviews/{overview_id}")
+        assert deleted.status_code == 204
+        assert client.get(f"/api/v1/overviews/{overview_id}").status_code == 404
+        history = client.get("/api/v1/overviews")
+        assert history.status_code == 200
+        assert all(item["id"] != overview_id for item in history.json())
+        # The graph-library copy is independently managed in the Concept Graph
+        # page, so deleting an Overview history task must not remove it.
+        assert client.get(f"/api/v1/graphs/{graph_id}").status_code == 200
+    finally:
+        app.dependency_overrides.clear()
+
+
 class _RecordingDirectionProvider:
     name = "test_direction"
 

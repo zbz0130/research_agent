@@ -607,6 +607,18 @@ class OverviewService:
         jobs = storage.list_overviews(str(analysis_id) if analysis_id else None)
         return [job.model_copy(deep=True) for job in jobs]
 
+    def delete(self, overview_id: UUID) -> None:
+        """Remove a finished Overview history task without touching saved graphs."""
+
+        with self._lock:
+            job = storage.get_overview(str(overview_id))
+            if job is None:
+                raise OverviewNotFound(overview_id)
+            if job.status in {"queued", "running"}:
+                raise GraphConflict("研究方向图仍在生成中，请完成后再删除")
+            if not storage.delete_overview(str(overview_id)):
+                raise OverviewNotFound(overview_id)
+
     def mark_saved_graph_deleted(self, graph_id: str) -> None:
         """Keep Overview history reusable after its graph-library copy is removed."""
 
