@@ -2268,17 +2268,13 @@ async function loadGraphPicker(selectedId = state.graphId) {
   if (!response.ok) return [];
   const graphs = await response.json();
   state.graphs = graphs;
-  const previousCompareSelection = new Set(
-    [...graphComparePickerEl.selectedOptions].map((option) => option.value),
-  );
-  const previousGallerySelection = new Set(
-    [...graphGalleryPickerEl.selectedOptions].map((option) => option.value),
-  );
+  const previousCompareSelection = selectedGraphIds(graphComparePickerEl);
+  const previousGallerySelection = selectedGraphIds(graphGalleryPickerEl);
   if (!graphs.length) {
     destroyGraphGalleryRenderers();
     graphPickerEl.classList.add("hidden");
-    graphComparePickerEl.innerHTML = '<option disabled>完成分析后这里会出现概念图</option>';
-    graphGalleryPickerEl.innerHTML = '<option disabled>完成分析后这里会出现概念图</option>';
+    renderGraphMultiPicker(graphComparePickerEl, []);
+    renderGraphMultiPicker(graphGalleryPickerEl, []);
     if (!graphGalleryEl.querySelector("[data-gallery-graph-id]")) {
       graphGalleryEl.innerHTML = '<p class="empty">还没有已保存的概念图。</p>';
     }
@@ -2291,24 +2287,75 @@ async function loadGraphPicker(selectedId = state.graphId) {
     `<option value="${escapeHtml(graph.id)}">${escapeHtml(graph.name)} · v${escapeHtml(graph.version)}</option>`,
   ).join("");
   if (selectedId && graphs.some((graph) => graph.id === selectedId)) graphPickerEl.value = selectedId;
-  graphComparePickerEl.innerHTML = graphs.map((graph) =>
-    `<option value="${escapeHtml(graph.id)}">${escapeHtml(graph.name)} · v${escapeHtml(graph.version)}</option>`,
-  ).join("");
-  [...graphComparePickerEl.options].forEach((option) => {
-    option.selected = previousCompareSelection.has(option.value) || option.value === selectedId;
-  });
-  graphGalleryPickerEl.innerHTML = graphs.map((graph) =>
-    `<option value="${escapeHtml(graph.id)}">${escapeHtml(graph.name)} · v${escapeHtml(graph.version)}</option>`,
-  ).join("");
-  [...graphGalleryPickerEl.options].forEach((option) => {
-    option.selected = previousGallerySelection.has(option.value) || option.value === selectedId;
-  });
+  renderGraphMultiPicker(graphComparePickerEl, graphs, previousCompareSelection, selectedId);
+  renderGraphMultiPicker(graphGalleryPickerEl, graphs, previousGallerySelection, selectedId);
   if (state.graph?.id) {
     deleteCurrentGraphButton?.classList.toggle("hidden", graphSaveState(state.graph, state.analysisResult) !== "saved");
   }
   renderAnalysisGraphSaveControls();
   return graphs;
 }
+
+function selectedGraphIds(picker) {
+  return new Set(
+    [...picker.querySelectorAll('input[type="checkbox"]:checked')]
+      .map((input) => input.value),
+  );
+}
+
+function updateGraphMultiPickerSummary(picker) {
+  const selectedCount = selectedGraphIds(picker).size;
+  const summary = picker.querySelector("[data-graph-selection-count]");
+  if (summary) summary.textContent = selectedCount ? `已选择 ${selectedCount} 张` : "尚未选择";
+}
+
+function renderGraphMultiPicker(picker, graphs, selectedIds = new Set(), selectedId = null) {
+  if (!graphs.length) {
+    picker.innerHTML = '<p class="empty">完成分析并保存概念图后，这里会出现可勾选的图。</p>';
+    return;
+  }
+  const selected = new Set(selectedIds);
+  if (!selected.size && selectedId && graphs.some((graph) => graph.id === selectedId)) {
+    selected.add(selectedId);
+  }
+  picker.innerHTML = `
+    <div class="graph-multiselect-toolbar">
+      <strong data-graph-selection-count></strong>
+      <span>
+        <button type="button" class="secondary" data-graph-selection-action="all">全选</button>
+        <button type="button" class="secondary" data-graph-selection-action="clear">清空</button>
+      </span>
+    </div>
+    <div class="graph-multiselect-options">
+      ${graphs.map((graph) => `
+        <label class="graph-multiselect-option">
+          <input type="checkbox" value="${escapeHtml(graph.id)}" ${selected.has(graph.id) ? "checked" : ""} />
+          <span>${escapeHtml(graph.name)} <small>v${escapeHtml(graph.version)}</small></span>
+        </label>
+      `).join("")}
+    </div>
+  `;
+  updateGraphMultiPickerSummary(picker);
+}
+
+function setupGraphMultiPicker(picker) {
+  picker.addEventListener("change", (event) => {
+    if (event.target.matches('input[type="checkbox"]')) updateGraphMultiPickerSummary(picker);
+  });
+  picker.addEventListener("click", (event) => {
+    const action = event.target.closest("[data-graph-selection-action]");
+    if (!action) return;
+    event.preventDefault();
+    const checked = action.dataset.graphSelectionAction === "all";
+    picker.querySelectorAll('input[type="checkbox"]').forEach((input) => {
+      input.checked = checked;
+    });
+    updateGraphMultiPickerSummary(picker);
+  });
+}
+
+setupGraphMultiPicker(graphComparePickerEl);
+setupGraphMultiPicker(graphGalleryPickerEl);
 
 graphPickerEl.addEventListener("change", async () => {
   state.graphId = graphPickerEl.value;
@@ -2342,7 +2389,7 @@ function renderGraphCompare(result) {
 
 graphCompareForm.addEventListener("submit", async (event) => {
   event.preventDefault();
-  const graphIds = [...graphComparePickerEl.selectedOptions].map((option) => option.value);
+  const graphIds = [...selectedGraphIds(graphComparePickerEl)];
   if (graphIds.length < 2) {
     setGraphCompareMessage("请至少选择两棵概念图。", "error-text");
     return;
@@ -2439,7 +2486,7 @@ async function loadGalleryGraph(graphId, nodeIds) {
 
 graphGalleryForm.addEventListener("submit", async (event) => {
   event.preventDefault();
-  const graphIds = [...graphGalleryPickerEl.selectedOptions].map((option) => option.value);
+  const graphIds = [...selectedGraphIds(graphGalleryPickerEl)];
   if (!graphIds.length) {
     setGraphGalleryMessage("请至少选择一张概念图。", "error-text");
     return;

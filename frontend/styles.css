@@ -1064,6 +1064,72 @@ button.secondary:hover, .node-edit:hover, .node-explain:hover { border-color: va
 .idea-library-item .warning-inline { margin-bottom: 0; }
 .idea-library-item .innovation-actions { margin-top: auto; padding-top: 13px; }
 
+/* Innovation cards previously retained dark-workspace colours after the app
+   moved to a light theme, making their explanation text difficult to read. */
+.innovation-row {
+  border-color: var(--border-soft);
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(31, 35, 40, 0.05);
+}
+.innovation-heading h3 { color: var(--ink-strong); }
+.innovation-details dt { color: #1f6feb; }
+.innovation-details dd,
+.innovation-nearest { color: #26384a; }
+.innovation-nearest strong { color: var(--ink-strong); }
+.validation-box {
+  border-left-color: #1f6feb;
+  color: #26384a;
+  background: #eef6ff;
+}
+.validation-box strong,
+.validation-box ol { color: #26384a; }
+.warning-inline {
+  border-radius: 8px;
+  padding: 8px 10px;
+  color: #7a4b00;
+  background: #fff8c5;
+}
+
+.form-field { display: grid; gap: 7px; }
+.field-label { color: var(--ink-strong); font-weight: 700; }
+.multi-select-hint { margin: 0; color: var(--ink-muted); font-size: 0.8rem; line-height: 1.5; }
+.graph-multiselect {
+  overflow: hidden;
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  background: #fff;
+}
+.graph-multiselect-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border-bottom: 1px solid var(--border-soft);
+  padding: 8px 10px;
+  background: #f6f8fa;
+}
+.graph-multiselect-toolbar strong { color: var(--ink-strong); font-size: 0.8rem; }
+.graph-multiselect-toolbar > span { display: inline-flex; gap: 6px; }
+.graph-multiselect-toolbar button { min-height: 30px; padding: 4px 8px; font-size: 0.74rem; }
+.graph-multiselect-options { display: grid; max-height: 220px; overflow: auto; }
+.graph-multiselect-option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 42px;
+  margin: 0;
+  border-bottom: 1px solid #eaeef2;
+  padding: 9px 11px;
+  color: var(--ink-strong);
+  cursor: pointer;
+}
+.graph-multiselect-option:last-child { border-bottom: 0; }
+.graph-multiselect-option:hover { background: #f6f8fa; }
+.graph-multiselect-option input { width: 17px; height: 17px; margin: 0; accent-color: var(--accent-strong); }
+.graph-multiselect-option span { min-width: 0; overflow-wrap: anywhere; }
+.graph-multiselect-option small { color: var(--ink-muted); font-size: 0.78rem; }
+.graph-multiselect-option input:checked + span { color: #174f86; font-weight: 700; }
+
 @media (prefers-color-scheme: dark) {
   :root {
     color-scheme: light;

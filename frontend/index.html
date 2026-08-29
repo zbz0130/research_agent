@@ -283,12 +283,13 @@
             选择至少两棵已保存的图。你也可以输入节点 ID，只比较局部节点；结果不会直接改动原图，若要写回必须生成并审批 GraphPatch。
           </p>
           <form id="graph-compare-form" class="analysis-form">
-            <label>
-              参与比较的概念图（可多选）
-              <select id="graph-compare-picker" multiple size="4" aria-label="选择多棵概念图">
-                <option disabled>完成分析后这里会出现概念图</option>
-              </select>
-            </label>
+            <div class="form-field">
+              <span class="field-label">参与比较的概念图（可多选）</span>
+              <div id="graph-compare-picker" class="graph-multiselect" role="group" aria-label="选择多棵概念图">
+                <p class="empty">完成分析并保存概念图后，这里会出现可勾选的图。</p>
+              </div>
+              <p class="multi-select-hint">直接勾选两张或更多概念图，无需按住 Ctrl 或 Shift。</p>
+            </div>
             <label>
               可选：节点 ID（逗号分隔）
               <input id="graph-compare-nodes" maxlength="1200" placeholder="例如：problem-a, method-b；留空表示比较各图的主要节点" />
@@ -317,12 +318,13 @@
             选择两张或更多概念图并排查看。填写节点 ID 后，每个画布会保留这些节点及其层级祖先；这是临时视图，不会修改数据库中的原图。
           </p>
           <form id="graph-gallery-form" class="analysis-form">
-            <label>
-              要显示的概念图（可多选）
-              <select id="graph-gallery-picker" multiple size="4" aria-label="选择要并排显示的概念图">
-                <option disabled>完成分析后这里会出现概念图</option>
-              </select>
-            </label>
+            <div class="form-field">
+              <span class="field-label">要显示的概念图（可多选）</span>
+              <div id="graph-gallery-picker" class="graph-multiselect" role="group" aria-label="选择要并排显示的概念图">
+                <p class="empty">完成分析并保存概念图后，这里会出现可勾选的图。</p>
+              </div>
+              <p class="multi-select-hint">直接勾选即可并排查看，无需按住 Ctrl 或 Shift。</p>
+            </div>
             <label>
               可选：只显示这些节点（逗号分隔）
               <input id="graph-gallery-nodes" maxlength="1200" placeholder="例如：root,problem-a,method-b；留空表示整棵图" />
