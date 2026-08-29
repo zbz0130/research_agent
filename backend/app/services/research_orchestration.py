@@ -691,13 +691,20 @@ def _model_brainstorm(
     evidence: Sequence[EvidenceCard],
     explanation_provider: ExplanationProvider | None,
     language: str = "zh-CN",
+    idea_context: str = "",
 ) -> tuple[list[InnovationCandidate], str, list[str]]:
     """Use a configured model's optional brainstorm method, with a clear fallback."""
 
     brainstorm = getattr(explanation_provider, "brainstorm", None)
     if callable(brainstorm):
         try:
-            ideas = brainstorm(concept, papers, evidence, language)
+            model_topic = concept
+            if idea_context.strip():
+                model_topic = (
+                    f"{concept}\n\n研究方向图上下文（用于提出待验证 Idea，不是论文事实）：\n"
+                    f"{idea_context.strip()[:4000]}"
+                )
+            ideas = brainstorm(model_topic, papers, evidence, language)
             if ideas:
                 ideas = [
                     item.model_copy(
@@ -775,13 +782,20 @@ def _model_synthesis(
     existing: Sequence[InnovationCandidate],
     explanation_provider: ExplanationProvider | None,
     synthesis_run_id: str,
+    idea_context: str = "",
 ) -> tuple[str, list[InnovationCandidate], str, list[str]]:
     """Use an optional compatible model for synthesis, with a deterministic fallback."""
 
     synthesize = getattr(explanation_provider, "synthesize_research", None)
     if callable(synthesize):
         try:
-            summary, candidates = synthesize(concept, community, model_ideas, future)
+            model_topic = concept
+            if idea_context.strip():
+                model_topic = (
+                    f"{concept}\n\n研究方向图上下文（用于汇总待验证 Idea，不是论文事实）：\n"
+                    f"{idea_context.strip()[:4000]}"
+                )
+            summary, candidates = synthesize(model_topic, community, model_ideas, future)
             upstream_evidence_ids = list(
                 dict.fromkeys(
                     [
@@ -895,6 +909,7 @@ class ResearchOrchestrator:
         explanation_provider: ExplanationProvider | None = None,
         language: str = "zh-CN",
         community_query_terms: Sequence[str] = (),
+        idea_context: str = "",
     ) -> ResearchBrief:
         started = _now()
         role_order = ["community", "model_brainstorm", "future_work"]
@@ -953,7 +968,12 @@ class ResearchOrchestrator:
             )
             try:
                 ideas, provider_name, model_warnings = _model_brainstorm(
-                    concept, papers, evidence, explanation_provider, language
+                    concept,
+                    papers,
+                    evidence,
+                    explanation_provider,
+                    language,
+                    idea_context,
                 )
                 done = _now()
                 run = run.model_copy(
@@ -1062,6 +1082,7 @@ class ResearchOrchestrator:
             existing_candidates,
             explanation_provider,
             synthesis_run_id,
+            idea_context,
         )
         arxiv_status, arxiv_terms, arxiv_matches, arxiv_warnings = _check_arxiv(
             candidates, search_provider

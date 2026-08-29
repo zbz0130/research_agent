@@ -512,6 +512,25 @@ def save_overview(
     )
 
 
+@router.post(
+    "/overviews/{overview_id}/ideas",
+    response_model=OverviewJob,
+    tags=["research", "overviews", "ideas"],
+)
+def generate_overview_ideas(
+    overview_id: UUID,
+    settings: Settings = Depends(get_settings),
+) -> OverviewJob:
+    """Generate auditable, deduplicated Idea candidates from an Overview."""
+
+    try:
+        return overview_service.generate_ideas(overview_id, settings=settings)
+    except OverviewNotFound as exc:
+        raise HTTPException(status_code=404, detail="研究方向图任务不存在") from exc
+    except (OverviewUnavailable, GraphConflict) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @router.get(
     "/analyses/{analysis_id}/research-brief",
     response_model=ResearchBrief,

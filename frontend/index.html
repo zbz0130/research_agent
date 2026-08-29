@@ -400,6 +400,7 @@
             <button id="overview-save-later" type="button" class="secondary hidden">稍后保存</button>
             <button id="overview-save" type="button" class="hidden">保存研究方向图</button>
             <button id="overview-edit" type="button" class="secondary hidden">进入图编辑模式</button>
+            <button id="overview-ideas" type="button" class="secondary hidden">基于方向图想 Idea</button>
             <button id="overview-delete" type="button" class="danger-button hidden">删除当前整图</button>
             <span id="overview-action-message" class="form-message" role="status"></span>
           </div>
@@ -451,6 +452,17 @@
           <aside id="overview-inspector" class="card graph-inspector" aria-live="polite">
             <div class="graph-inspector-empty"><span>◎</span><p>点击图中的节点，在这里查看解释、论文证据和关系。</p></div>
           </aside>
+        </section>
+
+        <section id="overview-idea-card" class="card research-brief-card hidden" aria-labelledby="overview-idea-title">
+          <div class="card-heading">
+            <div>
+              <p class="eyebrow">DIRECTION-GROUNDED IDEAS</p>
+              <h2 id="overview-idea-title">基于研究方向图的 Idea</h2>
+              <p>图谱脑暴、相关论文线索与社区调研会并行汇总，再去重为待验证候选。它们不是已确认的新颖成果。</p>
+            </div>
+          </div>
+          <div id="overview-idea-result" class="research-brief-content"></div>
         </section>
       </section>
 

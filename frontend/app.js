@@ -102,6 +102,7 @@ const overviewRetryButton = document.querySelector("#overview-retry");
 const overviewSaveLaterButton = document.querySelector("#overview-save-later");
 const overviewSaveButton = document.querySelector("#overview-save");
 const overviewEditButton = document.querySelector("#overview-edit");
+const overviewIdeasButton = document.querySelector("#overview-ideas");
 const overviewDeleteButton = document.querySelector("#overview-delete");
 const overviewActionMessageEl = document.querySelector("#overview-action-message");
 const overviewGraphTitleEl = document.querySelector("#overview-graph-title");
@@ -114,6 +115,8 @@ const overviewToggleEdgesButton = document.querySelector("#overview-toggle-edges
 const overviewLegendEl = document.querySelector("#overview-legend");
 const overviewLegendNoteEl = document.querySelector("#overview-legend-note");
 const overviewWarningsEl = document.querySelector("#overview-warnings");
+const overviewIdeaCardEl = document.querySelector("#overview-idea-card");
+const overviewIdeaResultEl = document.querySelector("#overview-idea-result");
 const overviewHistorySelectEl = document.querySelector("#overview-history-select");
 const overviewHistoryRefreshButton = document.querySelector("#overview-history-refresh");
 const overviewHistoryStatusEl = document.querySelector("#overview-history-status");
@@ -1817,6 +1820,7 @@ function handleExperimentCandidateClick(event) {
 innovationCardEl.addEventListener("click", handleExperimentCandidateClick);
 ideaCheckResultEl.addEventListener("click", handleExperimentCandidateClick);
 researchBriefCardEl.addEventListener("click", handleExperimentCandidateClick);
+overviewIdeaResultEl?.addEventListener("click", handleExperimentCandidateClick);
 
 function renderResearchBrief(result) {
   const brief = result.research_brief;
@@ -2945,6 +2949,7 @@ async function openOverviewJob(jobOrId, { promptSave = false } = {}) {
   renderOverviewHistory();
   renderOverviewStatus(job);
   const result = overviewResult(job);
+  renderOverviewIdeaBrief(result?.idea_brief);
   if (result?.graph) {
     state.overviewRenderer?.destroy();
     state.overviewRenderer = null;
@@ -3020,7 +3025,10 @@ function resetOverviewView({ preserveJobStatus = false } = {}) {
   overviewSaveLaterButton?.classList.add("hidden");
   overviewSaveButton?.classList.add("hidden");
   overviewEditButton?.classList.add("hidden");
+  overviewIdeasButton?.classList.add("hidden");
   overviewDeleteButton?.classList.add("hidden");
+  overviewIdeaCardEl?.classList.add("hidden");
+  if (overviewIdeaResultEl) overviewIdeaResultEl.innerHTML = "";
   if (overviewFitButton) overviewFitButton.disabled = true;
   if (overviewZoomOutButton) overviewZoomOutButton.disabled = true;
   if (overviewZoomInButton) overviewZoomInButton.disabled = true;
@@ -3084,9 +3092,89 @@ function renderOverviewStatus(job) {
   overviewEditButton?.classList.toggle("hidden", !hasGraph);
   if (overviewEditButton) overviewEditButton.textContent = saved ? "打开图编辑模式" : "保存并进入编辑模式";
   if (saved && overviewSaveButton) overviewSaveButton.classList.add("hidden");
+  const canGenerateIdeas = hasGraph && ["succeeded", "partial"].includes(status);
+  overviewIdeasButton?.classList.toggle("hidden", !canGenerateIdeas);
+  if (overviewIdeasButton) overviewIdeasButton.disabled = !canGenerateIdeas;
   const canDelete = Boolean(job?.id) && ["succeeded", "partial", "failed", "interrupted"].includes(status);
   overviewDeleteButton?.classList.toggle("hidden", !canDelete);
   if (overviewDeleteButton) overviewDeleteButton.disabled = !canDelete;
+}
+
+function overviewIdeaRoleLabel(role) {
+  return {
+    model_brainstorm: "图谱脑暴 Agent",
+    future_work: "论文线索 Agent",
+    community: "社区调研 Agent",
+    synthesis: "综合去重 Agent",
+  }[role] || role || "Idea Agent";
+}
+
+function renderOverviewIdeaBrief(brief) {
+  if (!overviewIdeaCardEl || !overviewIdeaResultEl) return;
+  if (!brief) {
+    overviewIdeaCardEl.classList.add("hidden");
+    overviewIdeaResultEl.innerHTML = "";
+    return;
+  }
+  const statusLabel = { queued: "等待", running: "运行中", completed: "完成", failed: "失败" };
+  const communitySignals = brief.community_signals || [];
+  const paperSignals = brief.future_work_signals || [];
+  const candidates = brief.innovation_candidates || [];
+  overviewIdeaCardEl.classList.remove("hidden");
+  overviewIdeaResultEl.innerHTML = `
+    ${(brief.warnings || []).length ? `<div class="warning-box"><strong>本轮范围提示</strong><ul>${brief.warnings.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul></div>` : ""}
+    <p class="brief-synthesis">${escapeHtml(brief.synthesis || "正在汇总图谱、论文和社区线索。")}</p>
+    <div class="agent-run-list">
+      ${(brief.agent_runs || []).map((run) => `<article class="agent-run-row"><div><strong>${escapeHtml(overviewIdeaRoleLabel(run.role))}</strong><small>${escapeHtml(run.summary || run.error || "暂无执行说明")}</small></div><span class="tag ${run.status === "failed" ? "tag-missing" : "tag-configured"}">${escapeHtml(statusLabel[run.status] || run.status)} · ${escapeHtml(run.provider || "未标注")}</span></article>`).join("")}
+    </div>
+    <div class="brief-columns">
+      <section>
+        <p class="section-label">社区调研（非科学证据）</p>
+        ${communitySignals.map((signal) => {
+          const url = safeExternalUrl(signal.url);
+          return `<article class="brief-signal"><strong>${escapeHtml(signal.title)}</strong><span>${escapeHtml(displayLabel(signal.platform))} · ${escapeHtml(signal.pain_point || signal.summary)}</span><small>${escapeHtml(signal.open_question || "暂无开放问题")}</small>${url ? `<a class="inline-source-link" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">打开社区来源 ↗</a>` : ""}</article>`;
+        }).join("") || '<p class="empty">本轮没有可用社区信号；这不代表不存在社区痛点。</p>'}
+      </section>
+      <section>
+        <p class="section-label">相关论文线索</p>
+        ${paperSignals.map((signal) => `<article class="brief-signal"><strong>${escapeHtml(signal.paper_title)}</strong><span>${escapeHtml(signal.claim)}</span><small>${escapeHtml(signal.excerpt || "摘要级线索，需打开原文核验。")}</small></article>`).join("") || '<p class="empty">图中论文尚未提供可提取的限制或 Future Work 线索。</p>'}
+      </section>
+    </div>
+    <section class="brief-candidates">
+      <p class="section-label">汇总去重后的 Idea（待验证）</p>
+      ${candidates.map((candidate) => `<article class="innovation-row"><div class="innovation-heading"><div><h3>${escapeHtml(candidate.title)}</h3><p class="paper-meta">${escapeHtml(displayLabel(candidate.source_type || "synthesis"))} · 新颖性层级 ${escapeHtml(candidate.novelty_level)} · 可行性 ${escapeHtml(candidate.feasibility)}</p></div><span class="tag tag-missing">${escapeHtml(displayLabel(candidate.arxiv_status || "not_checked"))}</span></div><dl class="innovation-details"><div><dt>要解决的问题</dt><dd>${escapeHtml(candidate.problem)}</dd></div><div><dt>可能机制</dt><dd>${escapeHtml(candidate.mechanism)}</dd></div><div><dt>为什么想到它</dt><dd>${escapeHtml(candidate.rationale)}</dd></div></dl>${candidate.nearest_work?.length ? `<p class="innovation-nearest"><strong>相关工作：</strong>${candidate.nearest_work.map(escapeHtml).join("；")}</p>` : ""}<div class="validation-box"><strong>建议的最小验证</strong><ol>${(candidate.validation_steps || []).map((step) => `<li>${escapeHtml(step)}</li>`).join("")}</ol></div><p class="warning-inline">${escapeHtml(candidate.warning || "待人工核验")}</p><div class="innovation-actions"><button type="button" class="secondary experiment-from-candidate" data-experiment-candidate="${escapeHtml([candidate.title, candidate.problem, candidate.mechanism].filter(Boolean).join("；"))}">生成实验方案</button></div></article>`).join("") || '<p class="empty">当前范围没有可汇总的候选；可检查模型、社区来源与图内论文是否已配置。</p>'}
+    </section>
+  `;
+}
+
+async function generateOverviewIdeas() {
+  if (!state.overviewJob?.id || !overviewResult()?.graph?.nodes?.length) return;
+  if (overviewIdeasButton) {
+    overviewIdeasButton.disabled = true;
+    overviewIdeasButton.textContent = "正在想 Idea…";
+  }
+  setOverviewActionMessage("正在并行进行图谱脑暴、论文线索提取、社区调研与汇总去重…", "");
+  try {
+    const response = await apiFetch(`/api/v1/overviews/${encodeURIComponent(state.overviewJob.id)}/ideas`, { method: "POST" });
+    if (!response.ok) throw new Error(await response.text());
+    const job = await response.json();
+    state.overviewJob = job;
+    state.overviewId = String(job.id);
+    const historyIndex = state.overviewJobs.findIndex((item) => String(item.id) === String(job.id));
+    if (historyIndex >= 0) state.overviewJobs.splice(historyIndex, 1, job);
+    else state.overviewJobs.unshift(job);
+    renderOverviewHistory();
+    renderOverviewStatus(job);
+    renderOverviewIdeaBrief(overviewResult(job)?.idea_brief);
+    setOverviewActionMessage("已汇总去重 Idea；请先核验相关论文和社区来源，再进入实验方案。", "");
+  } catch (error) {
+    setOverviewActionMessage(`Idea 生成失败：${error.message}`, "error-text");
+  } finally {
+    if (overviewIdeasButton) {
+      overviewIdeasButton.textContent = "基于方向图想 Idea";
+      overviewIdeasButton.disabled = false;
+    }
+  }
 }
 
 function openOverviewDeleteDialog() {
@@ -3534,6 +3622,7 @@ async function pollOverview(id, { scheduleNext = true } = {}) {
   renderOverviewStatus(job);
   const result = overviewResult(job);
   if (result?.graph) renderOverviewGraph(result);
+  renderOverviewIdeaBrief(result?.idea_brief);
   if (["succeeded", "partial", "failed", "interrupted"].includes(job.status)) {
     state.overviewPollTimer = null;
     maybePromptOverviewSave(job);
@@ -3725,6 +3814,7 @@ overviewHistoryRefreshButton?.addEventListener("click", () => {
 });
 overviewSaveButton?.addEventListener("click", () => showDialog(overviewSaveDialog));
 overviewEditButton?.addEventListener("click", () => openOverviewEditor());
+overviewIdeasButton?.addEventListener("click", () => generateOverviewIdeas());
 overviewDeleteButton?.addEventListener("click", openOverviewDeleteDialog);
 overviewDeleteDialogConfirmButton?.addEventListener("click", deleteOverviewById);
 overviewDeleteDialogCancelButton?.addEventListener("click", closeOverviewDeleteDialog);

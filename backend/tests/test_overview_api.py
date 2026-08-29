@@ -32,6 +32,7 @@ from app.services.overview_pipeline import (
 from app.services.overview_service import _read_paper_abstract, _read_paper_sections
 import app.services.overview_service as overview_module
 from app.services.research_providers import (
+    DemoSearchProvider,
     OpenAICompatibleExplanationProvider,
     ProviderUnavailable,
 )
@@ -545,6 +546,57 @@ def test_overview_delete_removes_history_but_keeps_saved_graph() -> None:
         # The graph-library copy is independently managed in the Concept Graph
         # page, so deleting an Overview history task must not remove it.
         assert client.get(f"/api/v1/graphs/{graph_id}").status_code == 200
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_overview_idea_generation_uses_graph_context_and_persists_brief(
+    monkeypatch,
+) -> None:
+    """A completed direction map can drive the reusable multi-agent Idea flow."""
+
+    try:
+        analysis_id = _completed_analysis()
+        overview_id = client.post(
+            f"/api/v1/analyses/{analysis_id}/overview", json={}
+        ).json()["id"]
+        completed = _wait_overview(overview_id)
+        assert completed["status"] in {"succeeded", "partial"}
+
+        # The Idea scope check is always arXiv in production.  Use a bounded
+        # local provider here so this API test remains fully offline.
+        monkeypatch.setattr(
+            overview_module,
+            "build_search_provider",
+            lambda *args, **kwargs: DemoSearchProvider(),
+        )
+        app.dependency_overrides[get_settings] = lambda: Settings(
+            paper_provider="demo",
+            community_provider="demo",
+            explanation_provider="rule_based",
+            demo_mode=True,
+        )
+
+        response = client.post(f"/api/v1/overviews/{overview_id}/ideas")
+        assert response.status_code == 200
+        result = response.json()["result"]
+        brief = result["idea_brief"]
+        assert brief is not None
+        assert brief["innovation_candidates"]
+        assert {run["role"] for run in brief["agent_runs"]} >= {
+            "community",
+            "model_brainstorm",
+            "future_work",
+            "synthesis",
+        }
+
+        # Reopening the same durable overview must show the exact audit trail
+        # and de-duplicated candidates without recomputing it.
+        restored = client.get(f"/api/v1/overviews/{overview_id}")
+        assert restored.status_code == 200
+        restored_brief = restored.json()["result"]["idea_brief"]
+        assert restored_brief["id"] == brief["id"]
+        assert restored_brief["innovation_candidates"] == brief["innovation_candidates"]
     finally:
         app.dependency_overrides.clear()
 

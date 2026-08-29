@@ -39,6 +39,7 @@ from app.research_schemas import (
     OverviewSaveRequest,
     PaperReadingSummary,
     PaperRecord,
+    ResearchBrief,
 )
 from app.services.graph_service import GraphConflict, graph_service
 from app.services.overview_pipeline import (
@@ -55,6 +56,7 @@ from app.services.overview_pipeline import (
 )
 from app.services.research_service import AnalysisNotFound, research_service
 from app.services.research_service import _explanation_provider
+from app.services.research_orchestration import research_orchestrator
 from app.services.research_providers import ProviderUnavailable
 from app.config import get_settings
 from app.storage import storage
@@ -77,6 +79,28 @@ def _safe_error_category(exc: Exception) -> str:
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _overview_idea_input(result: OverviewResult) -> tuple[str, str, list[str]]:
+    """Extract a compact, model-safe brainstorming context from an Overview."""
+
+    graph = result.graph
+    root = next((node for node in graph.nodes if node.id == graph.root_id), None)
+    topic = (root.label if root is not None else None) or graph.name or "研究方向"
+    directions = [
+        node.label.strip()
+        for node in graph.nodes
+        if node.role in {"direction", "method"} and node.label.strip()
+    ]
+    directions = list(dict.fromkeys(directions))[:10]
+    paper_titles = list(dict.fromkeys(
+        paper.title.strip() for paper in result.papers if paper.title.strip()
+    ))[:8]
+    context_lines = [
+        "方向/方法节点：" + ("；".join(directions) if directions else "图中尚无细分方向或方法节点。"),
+        "已关联论文：" + ("；".join(paper_titles) if paper_titles else "当前方向图没有已关联论文。"),
+    ]
+    return topic[:500], "\n".join(context_lines)[:4000], directions[:6]
 
 
 def _agent_run(
@@ -606,6 +630,72 @@ class OverviewService:
 
         jobs = storage.list_overviews(str(analysis_id) if analysis_id else None)
         return [job.model_copy(deep=True) for job in jobs]
+
+    def generate_ideas(self, overview_id: UUID, *, settings=None) -> OverviewJob:
+        """Generate deduplicated, auditable Idea candidates from one Overview.
+
+        The research-direction graph supplies the problem/method context; the
+        reusable research orchestrator then fans out to model brainstorming,
+        paper limitation signals and the configured community connector before
+        synthesizing deduplicated, explicitly unverified candidates.
+        """
+
+        runtime_settings = settings or get_settings()
+        with self._lock:
+            job = storage.get_overview(str(overview_id))
+            if job is None or job.result is None:
+                raise OverviewNotFound(overview_id)
+            if job.status not in {"succeeded", "partial"}:
+                raise GraphConflict("研究方向图尚未生成完成，暂不能基于它生成 Idea")
+            snapshot = job.model_copy(deep=True)
+
+        topic, idea_context, community_terms = _overview_idea_input(snapshot.result)
+        try:
+            search_provider = build_search_provider("arxiv", settings=runtime_settings)
+        except TypeError as exc:
+            if "unexpected keyword argument 'settings'" not in str(exc):
+                raise
+            search_provider = build_search_provider("arxiv")
+        if search_provider is None:
+            raise OverviewUnavailable("无法创建用于范围内近邻核验的 arXiv Provider")
+        try:
+            explanation_provider = _explanation_provider(runtime_settings)
+        except ProviderUnavailable:
+            # The orchestration layer will surface the transparent heuristic
+            # fallback instead of failing the whole multi-source Idea run.
+            explanation_provider = None
+
+        previous_candidates = (
+            snapshot.result.idea_brief.innovation_candidates
+            if snapshot.result.idea_brief is not None
+            else []
+        )
+        brief = research_orchestrator.run(
+            topic,
+            snapshot.result.papers,
+            snapshot.result.evidence,
+            search_provider,
+            runtime_settings,
+            existing_candidates=previous_candidates,
+            explanation_provider=explanation_provider,
+            community_query_terms=community_terms,
+            idea_context=idea_context,
+        )
+
+        with self._lock:
+            current = storage.get_overview(str(overview_id))
+            if current is None or current.result is None:
+                raise OverviewNotFound(overview_id)
+            updated_result = current.result.model_copy(update={"idea_brief": brief})
+            updated = current.model_copy(
+                update={
+                    "result": updated_result,
+                    "updated_at": _utcnow(),
+                    "version": current.version + 1,
+                }
+            )
+            storage.save_overview(updated)
+            return updated.model_copy(deep=True)
 
     def delete(self, overview_id: UUID) -> None:
         """Remove a finished Overview history task without touching saved graphs."""

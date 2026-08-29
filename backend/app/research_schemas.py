@@ -1209,6 +1209,10 @@ class OverviewResult(BaseModel):
     direction_audits: list[OverviewDirectionAudit] = Field(default_factory=list, max_length=200)
     agent_runs: list[OverviewAgentRun] = Field(default_factory=list, max_length=300)
     legend: OverviewMetricLegend = Field(default_factory=OverviewMetricLegend)
+    # Idea generation is initiated explicitly from the research-direction
+    # view.  Keeping its auditable brief with the durable Overview lets users
+    # reopen the same graph and inspect the exact upstream signals later.
+    idea_brief: ResearchBrief | None = None
     warnings: list[str] = Field(default_factory=list, max_length=40)
     direction_count: int = Field(default=0, ge=0, le=200)
     paper_count: int = Field(default=0, ge=0, le=80)
