@@ -1130,6 +1130,40 @@ button.secondary:hover, .node-edit:hover, .node-explain:hover { border-color: va
 .graph-multiselect-option small { color: var(--ink-muted); font-size: 0.78rem; }
 .graph-multiselect-option input:checked + span { color: #174f86; font-weight: 700; }
 
+/* Keep generated experiment plans readable on the light application surface. */
+.experiment-plan-result { border-top-color: var(--border-soft); }
+.experiment-plan-heading h3 { color: var(--ink-strong); }
+.experiment-plan-id { color: var(--ink-muted); }
+.experiment-section { border-top-color: var(--border-soft); }
+.experiment-section > p:not(.section-label) { color: #26384a; }
+.experiment-item {
+  border-color: var(--border-soft);
+  background: #f6f8fa;
+}
+.experiment-item strong { color: var(--ink-strong); }
+.experiment-item p { color: #26384a; }
+.experiment-item small,
+.resource-note { color: var(--ink-muted); }
+.failure-item {
+  border-color: #cf222e;
+  background: #ffebe9;
+}
+.experiment-step {
+  border-left-color: #1f6feb;
+  color: #26384a;
+  background: #eef6ff;
+}
+.experiment-resource-grid div {
+  border-color: var(--border-soft);
+  background: #f6f8fa;
+}
+.experiment-resource-grid dt { color: #1f6feb; }
+.experiment-resource-grid dd { color: #26384a; }
+.experiment-review {
+  border-color: #b6d6ff;
+  background: #f6fbff;
+}
+
 @media (prefers-color-scheme: dark) {
   :root {
     color-scheme: light;
