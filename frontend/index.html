@@ -20,6 +20,7 @@
           <a class="nav-link" href="#workspace" data-route-link="workspace"><span>工作台</span></a>
           <a class="nav-link" href="#concept-graphs" data-route-link="concept-graphs"><span>概念图</span></a>
           <a class="nav-link" href="#research-overview" data-route-link="research-overview"><span>研究方向图</span></a>
+          <a class="nav-link" href="#idea-library" data-route-link="idea-library"><span>Idea 库</span></a>
           <a class="nav-link" href="#innovations" data-route-link="innovations"><span>创新与查重</span></a>
           <a class="nav-link" href="#experiments" data-route-link="experiments"><span>实验方案</span></a>
           <a class="nav-link" href="#settings" data-route-link="settings"><span>设置</span></a>
@@ -463,6 +464,55 @@
             </div>
           </div>
           <div id="overview-idea-result" class="research-brief-content"></div>
+        </section>
+      </section>
+
+      <section class="app-view" data-view="idea-library" aria-labelledby="idea-library-title">
+        <header class="view-heading">
+          <div>
+            <p class="eyebrow">IDEA LIBRARY</p>
+            <h2 id="idea-library-title">Idea 库</h2>
+            <p>集中查看研究方向图生成过的待验证 Idea。每条都保留它来自哪张方向图、哪种线索和建议的最小验证步骤。</p>
+          </div>
+          <span class="tag tag-beta">待人工核验</span>
+        </header>
+
+        <section class="card idea-library-toolbar" aria-label="Idea 库筛选">
+          <div>
+            <p class="section-label">IDEA HISTORY</p>
+            <h3>已生成的研究候选</h3>
+            <p id="idea-library-status" class="settings-note" role="status">正在读取研究方向图历史…</p>
+          </div>
+          <div class="idea-library-controls">
+            <label for="idea-library-source">来源类型
+              <select id="idea-library-source">
+                <option value="">全部来源</option>
+                <option value="model_generated">图谱脑暴</option>
+                <option value="paper_future_work">论文线索</option>
+                <option value="community_signal">社区调研</option>
+                <option value="synthesis">综合候选</option>
+                <option value="heuristic">规则兜底</option>
+              </select>
+            </label>
+            <label for="idea-library-query">搜索
+              <input id="idea-library-query" type="search" maxlength="300" placeholder="搜索标题、方向或问题" />
+            </label>
+            <button id="idea-library-refresh" type="button" class="secondary">刷新</button>
+          </div>
+        </section>
+
+        <section class="card idea-library-card" aria-labelledby="idea-library-list-title">
+          <div class="card-heading">
+            <div>
+              <p class="eyebrow">DEDUPLICATED CANDIDATES</p>
+              <h3 id="idea-library-list-title">候选列表</h3>
+            </div>
+            <span id="idea-library-summary" class="tag">0 条 Idea</span>
+          </div>
+          <p class="settings-note">不同研究方向图可能给出相似候选；本页完整保留各自的来源上下文，不把跨图相似性当作已完成的全局去重。</p>
+          <div id="idea-library-list" class="idea-library-list">
+            <p class="empty">还没有从研究方向图生成的 Idea。</p>
+          </div>
         </section>
       </section>
 

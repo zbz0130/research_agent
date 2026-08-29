@@ -120,6 +120,12 @@ const overviewIdeaResultEl = document.querySelector("#overview-idea-result");
 const overviewHistorySelectEl = document.querySelector("#overview-history-select");
 const overviewHistoryRefreshButton = document.querySelector("#overview-history-refresh");
 const overviewHistoryStatusEl = document.querySelector("#overview-history-status");
+const ideaLibraryStatusEl = document.querySelector("#idea-library-status");
+const ideaLibrarySourceEl = document.querySelector("#idea-library-source");
+const ideaLibraryQueryEl = document.querySelector("#idea-library-query");
+const ideaLibraryRefreshButton = document.querySelector("#idea-library-refresh");
+const ideaLibrarySummaryEl = document.querySelector("#idea-library-summary");
+const ideaLibraryListEl = document.querySelector("#idea-library-list");
 const overviewSaveDialog = document.querySelector("#overview-save-dialog");
 const overviewDialogConfirmButton = document.querySelector("#overview-dialog-confirm");
 const overviewDialogLaterButton = document.querySelector("#overview-dialog-later");
@@ -156,6 +162,7 @@ const routes = {
   workspace: { title: "研究工作台" },
   "concept-graphs": { title: "概念图" },
   "research-overview": { title: "研究方向图" },
+  "idea-library": { title: "Idea 库" },
   innovations: { title: "创新与查重" },
   experiments: { title: "实验方案" },
   settings: { title: "设置" },
@@ -284,6 +291,12 @@ function renderRoute(route = currentRoute()) {
       state.overviewRenderer?.resize();
       state.overviewRenderer?.fit();
     });
+  } else if (activeRoute === "idea-library") {
+    if (!state.overviewHistoryLoaded && !state.overviewHistoryLoading) {
+      loadOverviewHistory({ autoOpen: false }).catch(() => {});
+    } else {
+      renderIdeaLibrary();
+    }
   } else if (activeRoute === "concept-graphs") {
     window.requestAnimationFrame(() => {
       state.conceptGraphRenderer?.resize();
@@ -334,6 +347,9 @@ const state = {
   overviewJobs: [],
   overviewHistoryLoaded: false,
   overviewHistoryLoading: false,
+  ideaLibrarySource: "",
+  ideaLibraryQuery: "",
+  ideaLibraryLoadError: "",
   pendingOverviewDeletion: null,
   graphGalleryRenderers: new Map(),
 };
@@ -2926,6 +2942,96 @@ function renderOverviewHistory() {
   }
 }
 
+function overviewIdeaLibraryTopic(job) {
+  const graph = overviewResult(job)?.graph;
+  const root = graph?.nodes?.find((node) => node.id === graph?.root_id);
+  return root?.label || graph?.name || "未命名研究方向";
+}
+
+function overviewIdeaLibraryTime(job, brief) {
+  const timestamp = Date.parse(brief?.generated_at || job?.updated_at || job?.created_at || "");
+  if (!Number.isFinite(timestamp)) return "时间未知";
+  return new Intl.DateTimeFormat("zh-CN", {
+    year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit",
+  }).format(new Date(timestamp));
+}
+
+function overviewIdeaLibraryRecords() {
+  return (state.overviewJobs || []).flatMap((job) => {
+    const brief = overviewResult(job)?.idea_brief;
+    const candidates = brief?.innovation_candidates || [];
+    return candidates.map((candidate, index) => ({
+      candidate,
+      brief,
+      job,
+      index,
+      topic: overviewIdeaLibraryTopic(job),
+      timestamp: Date.parse(brief?.generated_at || job?.updated_at || job?.created_at || "") || 0,
+    }));
+  }).sort((left, right) => right.timestamp - left.timestamp);
+}
+
+function renderIdeaLibrary() {
+  if (!ideaLibraryListEl || !ideaLibrarySummaryEl || !ideaLibraryStatusEl) return;
+  const records = overviewIdeaLibraryRecords();
+  const source = ideaLibrarySourceEl?.value || state.ideaLibrarySource || "";
+  const query = (ideaLibraryQueryEl?.value || state.ideaLibraryQuery || "").trim().toLocaleLowerCase("zh-CN");
+  state.ideaLibrarySource = source;
+  state.ideaLibraryQuery = ideaLibraryQueryEl?.value || state.ideaLibraryQuery || "";
+  const filtered = records.filter(({ candidate, topic }) => {
+    const matchesSource = !source || candidate.source_type === source;
+    const haystack = [candidate.title, candidate.problem, candidate.mechanism, candidate.rationale, topic]
+      .filter(Boolean)
+      .join(" ")
+      .toLocaleLowerCase("zh-CN");
+    return matchesSource && (!query || haystack.includes(query));
+  });
+  const overviewCount = new Set(records.map(({ job }) => String(job.id))).size;
+  ideaLibrarySummaryEl.textContent = `${filtered.length} / ${records.length} 条 Idea`;
+  if (!records.length) {
+    ideaLibraryStatusEl.textContent = state.ideaLibraryLoadError
+      ? `Idea 历史读取失败：${state.ideaLibraryLoadError}`
+      : state.overviewHistoryLoading
+      ? "正在读取研究方向图历史…"
+      : "还没有生成过 Idea。请先在研究方向图中点击“基于方向图想 Idea”。";
+    ideaLibraryListEl.innerHTML = '<p class="empty">还没有从研究方向图生成的 Idea。</p>';
+    return;
+  }
+  ideaLibraryStatusEl.textContent = `已汇集 ${overviewCount} 张研究方向图中的 ${records.length} 条待验证 Idea。`;
+  if (!filtered.length) {
+    ideaLibraryListEl.innerHTML = '<p class="empty">没有符合当前筛选条件的 Idea。</p>';
+    return;
+  }
+  ideaLibraryListEl.innerHTML = filtered.map(({ candidate, brief, job, topic, index }) => {
+    const validation = (candidate.validation_steps || []).slice(0, 3);
+    const sourceType = candidate.source_type || "synthesis";
+    return `
+      <article class="idea-library-item">
+        <div class="idea-library-item-heading">
+          <div>
+            <p class="section-label">${escapeHtml(topic)}</p>
+            <h3>${escapeHtml(candidate.title || "未命名 Idea")}</h3>
+          </div>
+          <span class="tag tag-missing">${escapeHtml(displayLabel(candidate.arxiv_status || "not_checked"))}</span>
+        </div>
+        <div class="idea-library-meta">
+          <span>${escapeHtml(displayLabel(sourceType))}</span>
+          <span>${escapeHtml(overviewIdeaLibraryTime(job, brief))}</span>
+          <span>可行性 ${escapeHtml(candidate.feasibility || "待评估")}</span>
+        </div>
+        <p class="idea-library-problem"><strong>要解决的问题：</strong>${escapeHtml(candidate.problem || candidate.rationale || "暂无问题说明")}</p>
+        <p class="idea-library-mechanism"><strong>可能机制：</strong>${escapeHtml(candidate.mechanism || "待进一步设计")}</p>
+        ${validation.length ? `<div class="idea-library-validation"><strong>最小验证</strong><ol>${validation.map((step) => `<li>${escapeHtml(step)}</li>`).join("")}</ol></div>` : ""}
+        <p class="warning-inline">${escapeHtml(candidate.warning || "待人工核验；不是已确认的新颖成果。")}</p>
+        <div class="innovation-actions">
+          <button type="button" class="secondary" data-idea-overview="${escapeHtml(job.id)}">查看研究方向图</button>
+          <button type="button" class="secondary" data-experiment-candidate="${escapeHtml([candidate.title, candidate.problem, candidate.mechanism].filter(Boolean).join("；"))}" data-idea-library-index="${index}">生成实验方案</button>
+        </div>
+      </article>
+    `;
+  }).join("");
+}
+
 function stopOverviewPolling() {
   if (state.overviewPollTimer) window.clearTimeout(state.overviewPollTimer);
   state.overviewPollTimer = null;
@@ -2977,6 +3083,7 @@ async function openOverviewJob(jobOrId, { promptSave = false } = {}) {
 async function loadOverviewHistory({ autoOpen = false } = {}) {
   if (state.overviewHistoryLoading) return state.overviewJobs;
   state.overviewHistoryLoading = true;
+  state.ideaLibraryLoadError = "";
   overviewHistoryRefreshButton && (overviewHistoryRefreshButton.disabled = true);
   if (overviewHistoryStatusEl) overviewHistoryStatusEl.textContent = "正在读取历史任务…";
   try {
@@ -2987,17 +3094,20 @@ async function loadOverviewHistory({ autoOpen = false } = {}) {
     state.overviewJobs = jobs;
     state.overviewHistoryLoaded = true;
     renderOverviewHistory();
+    renderIdeaLibrary();
     if (autoOpen && !state.overviewId && jobs.length) {
       await openOverviewJob(jobs[0], { promptSave: false });
     }
     return jobs;
   } catch (error) {
     state.overviewHistoryLoaded = false;
+    state.ideaLibraryLoadError = error.message;
     if (overviewHistoryStatusEl) overviewHistoryStatusEl.textContent = `历史任务读取失败：${error.message}`;
     throw error;
   } finally {
     state.overviewHistoryLoading = false;
     if (overviewHistoryRefreshButton) overviewHistoryRefreshButton.disabled = false;
+    renderIdeaLibrary();
   }
 }
 
@@ -3164,6 +3274,7 @@ async function generateOverviewIdeas() {
     if (historyIndex >= 0) state.overviewJobs.splice(historyIndex, 1, job);
     else state.overviewJobs.unshift(job);
     renderOverviewHistory();
+    renderIdeaLibrary();
     renderOverviewStatus(job);
     renderOverviewIdeaBrief(overviewResult(job)?.idea_brief);
     setOverviewActionMessage("已汇总去重 Idea；请先核验相关论文和社区来源，再进入实验方案。", "");
@@ -3210,6 +3321,7 @@ async function deleteOverviewById() {
       resetOverviewView();
     }
     renderOverviewHistory();
+    renderIdeaLibrary();
     setOverviewActionMessage(
       pending.savedGraphId
         ? "研究方向图历史已删除；概念图库中的独立副本仍然保留。"
@@ -3816,6 +3928,39 @@ overviewSaveButton?.addEventListener("click", () => showDialog(overviewSaveDialo
 overviewEditButton?.addEventListener("click", () => openOverviewEditor());
 overviewIdeasButton?.addEventListener("click", () => generateOverviewIdeas());
 overviewDeleteButton?.addEventListener("click", openOverviewDeleteDialog);
+ideaLibrarySourceEl?.addEventListener("change", () => renderIdeaLibrary());
+ideaLibraryQueryEl?.addEventListener("input", () => renderIdeaLibrary());
+ideaLibraryRefreshButton?.addEventListener("click", async () => {
+  ideaLibraryRefreshButton.disabled = true;
+  if (ideaLibraryStatusEl) ideaLibraryStatusEl.textContent = "正在刷新研究方向图历史…";
+  try {
+    await loadOverviewHistory({ autoOpen: false });
+  } catch (error) {
+    if (ideaLibraryStatusEl) ideaLibraryStatusEl.textContent = `Idea 历史读取失败：${error.message}`;
+  } finally {
+    ideaLibraryRefreshButton.disabled = false;
+  }
+});
+ideaLibraryListEl?.addEventListener("click", async (event) => {
+  if (event.target.closest("[data-experiment-candidate]")) {
+    handleExperimentCandidateClick(event);
+    return;
+  }
+  const button = event.target.closest("[data-idea-overview]");
+  if (!button) return;
+  const overviewId = button.dataset.ideaOverview;
+  if (!overviewId) return;
+  button.disabled = true;
+  try {
+    navigateTo("research-overview");
+    await openOverviewJob(overviewId, { promptSave: false });
+    setOverviewActionMessage("已打开这条 Idea 对应的研究方向图。", "");
+  } catch (error) {
+    if (ideaLibraryStatusEl) ideaLibraryStatusEl.textContent = `无法打开来源方向图：${error.message}`;
+  } finally {
+    button.disabled = false;
+  }
+});
 overviewDeleteDialogConfirmButton?.addEventListener("click", deleteOverviewById);
 overviewDeleteDialogCancelButton?.addEventListener("click", closeOverviewDeleteDialog);
 overviewDeleteDialog?.addEventListener("cancel", (event) => {
