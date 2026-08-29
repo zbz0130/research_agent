@@ -20,6 +20,8 @@ from threading import RLock
 import time
 from uuid import UUID
 
+from pydantic import ValidationError
+
 from app.research_schemas import (
     ConceptEdge,
     ConceptGraph,
@@ -75,6 +77,24 @@ def _safe_error_category(exc: Exception) -> str:
 
     name = type(exc).__name__
     return name[:200] if name else "OverviewError"
+
+
+def _safe_error_detail(exc: Exception) -> str:
+    """Return a concise, secret-free validation hint for durable job status.
+
+    Provider responses, PDF metadata and model prose are untrusted. Keep only
+    Pydantic field locations and messages here; never persist the rejected
+    value, request body, URL query parameters, or provider response text.
+    """
+
+    if not isinstance(exc, ValidationError):
+        return _safe_error_category(exc)
+    details: list[str] = []
+    for item in exc.errors()[:3]:
+        location = ".".join(str(part) for part in item.get("loc", ()))[:160]
+        message = str(item.get("msg") or "字段校验未通过")[:240]
+        details.append(f"{location}: {message}" if location else message)
+    return "；".join(details) or "结构化字段校验未通过"
 
 
 def _utcnow() -> datetime:
@@ -1386,6 +1406,10 @@ class OverviewService:
     def _run(self, overview_id: UUID, generation: int, settings=None) -> None:
         validation_started_at: datetime | None = None
         validation_started_perf: float | None = None
+        job: OverviewJob | None = None
+        analysis = None
+        agent_runs: list[OverviewAgentRun] = []
+        rich_graph_started = False
         try:
             self._update(
                 overview_id,
@@ -1411,7 +1435,6 @@ class OverviewService:
             plans: list[DirectionPlan] = []
             planner_mode = "deterministic_rule_fallback"
             planner_warning: str | None = None
-            agent_runs: list[OverviewAgentRun] = []
             explanation_provider = _explanation_provider(settings or get_settings())
             model_planner = getattr(explanation_provider, "plan_research_directions", None)
             if callable(model_planner):
@@ -1671,6 +1694,11 @@ class OverviewService:
                 progress=76,
                 message="正在核对论文归属、证据范围、叶节点和有向无环结构",
             )
+            # From this point onward a ValidationError can only come from the
+            # enriched, externally influenced direction graph. A compact
+            # deterministic graph from the already validated analysis is a
+            # safe fallback and is preferable to discarding the whole task.
+            rich_graph_started = True
             result = _build_overview_result(
                 job,
                 analysis.result,
@@ -1875,6 +1903,77 @@ class OverviewService:
                     updated_at=datetime.now(timezone.utc),
                 )
                 return
+            if (
+                rich_graph_started
+                and job is not None
+                and analysis is not None
+                and analysis.result is not None
+            ):
+                error_detail = _safe_error_detail(exc)
+                try:
+                    # Do not reuse the failing pipeline/readings: rebuild from
+                    # the analysis snapshot, whose persisted schema has
+                    # already been validated. This deliberately gives up
+                    # direction-specific enrichment but keeps a usable,
+                    # auditable graph visible to the user.
+                    fallback = _build_overview_result(job, analysis.result)
+                    warning = (
+                        "方向级扩展数据未通过结构校验，已回退为基于原分析论文的保守方向图"
+                        f"（{error_detail}）。"
+                    )
+                    fallback_started_at = _utcnow()
+                    fallback_started_perf = time.perf_counter()
+                    fallback_runs = [
+                        *agent_runs,
+                        _agent_run(
+                            role="direction_validation",
+                            status="failed",
+                            execution_mode="validation",
+                            provider="wishforge_graph_validator",
+                            started_at=validation_started_at or fallback_started_at,
+                            started_perf=validation_started_perf or fallback_started_perf,
+                            input_paper_count=len(fallback.paper_readings),
+                            output_paper_count=fallback.paper_count,
+                            summary="方向级扩展结果未通过校验；已生成可检查的保守回退图。",
+                            warnings=[warning],
+                            error_type=_safe_error_category(exc),
+                        ),
+                    ]
+                    fallback = fallback.model_copy(
+                        update={
+                            "warnings": list(dict.fromkeys([
+                                *fallback.warnings,
+                                warning,
+                            ]))[:40],
+                            "agent_runs": fallback_runs[:300],
+                            "graph": fallback.graph.model_copy(
+                                update={
+                                    "warnings": list(dict.fromkeys([
+                                        *fallback.graph.warnings,
+                                        warning,
+                                    ]))[:30]
+                                }
+                            ),
+                        }
+                    )
+                    self._update(
+                        overview_id,
+                        generation,
+                        status="partial",
+                        stage="completed",
+                        progress=100,
+                        message="方向级扩展数据异常；已生成可继续使用的保守方向图",
+                        result=fallback,
+                        error=None,
+                        save_state="transient",
+                        updated_at=datetime.now(timezone.utc),
+                    )
+                    return
+                except Exception:
+                    # Fall through to the durable failure below. The original
+                    # exception remains the only user-visible category, so a
+                    # failed fallback cannot leak internal provider details.
+                    pass
             self._update(
                 overview_id,
                 generation,

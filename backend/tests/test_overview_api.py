@@ -6,6 +6,7 @@ from threading import Lock
 from uuid import UUID
 
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 from app.config import Settings, get_settings
 from app.main import app
@@ -915,6 +916,60 @@ def test_overview_service_finishes_partial_and_keeps_successful_graph(monkeypatc
         and "error=ProviderUnavailable: provider unavailable" in warning
         for warning in current.result.warnings
     )
+
+
+def test_overview_falls_back_when_enriched_graph_fails_validation(monkeypatch) -> None:
+    """An invalid live enrichment must not erase the already valid analysis."""
+
+    analysis_id = _completed_analysis()
+    original_builder = overview_module._build_overview_result
+
+    def fail_only_for_enriched_graph(job, analysis_result, *, pipeline=None, **kwargs):
+        if pipeline is not None:
+            raise ValidationError.from_exception_data(
+                "ConceptNode",
+                [{
+                    "type": "string_too_long",
+                    "loc": ("nodes", 1, "explanation"),
+                    "msg": "String should have at most 5000 characters",
+                    "input": "omitted",
+                    "ctx": {"max_length": 5000},
+                }],
+            )
+        return original_builder(job, analysis_result, pipeline=pipeline, **kwargs)
+
+    monkeypatch.setattr(
+        overview_module,
+        "_build_overview_result",
+        fail_only_for_enriched_graph,
+    )
+    monkeypatch.setattr(
+        OpenArxivSectionReader,
+        "read",
+        lambda self, paper: SectionReadResult(attempted=False),
+    )
+
+    job = overview_module.overview_service.create(
+        UUID(analysis_id),
+        OverviewCreate(force_regenerate=True, max_directions=2),
+    )
+    for _ in range(500):
+        current = overview_module.overview_service.get(job.id)
+        if current.status in {"partial", "succeeded", "failed"} and current.stage == "completed":
+            break
+        time.sleep(0.01)
+    else:
+        raise AssertionError("fallback overview did not finish")
+
+    assert current.status == "partial"
+    assert current.error is None
+    assert current.result is not None
+    assert current.result.graph.nodes
+    assert any("已回退为基于原分析论文" in item for item in current.result.warnings)
+    validation_runs = [
+        item for item in current.result.agent_runs if item.role == "direction_validation"
+    ]
+    assert validation_runs and validation_runs[-1].status == "failed"
 
 
 def test_overview_persists_structured_direction_audits() -> None:
