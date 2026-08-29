@@ -3576,8 +3576,8 @@ async function waitForOverviewCompletion(id) {
   }
 }
 
-const ONBOARDING_STORAGE_KEY = "wishforge-onboarding-v0.2.3-complete";
-const APP_VERSION = "0.2.3";
+const ONBOARDING_STORAGE_KEY = "wishforge-onboarding-v0.2.4-complete";
+const APP_VERSION = "0.2.4";
 const RELEASES_ENDPOINT = "https://api.github.com/repos/zbz0130/research_agent/releases/latest";
 const MODEL_SETUP_TEMPLATES = {
   "deepseek-v4-flash": { provider: "openai_compatible", model: "deepseek-v4-flash", baseUrl: "https://api.deepseek.com/v1", label: "DeepSeek V4 Flash" },
